@@ -1,10 +1,25 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { X, MoreHorizontal } from "lucide-react";
+import { X, GripVertical, Pencil, Brain, CircleHelp, CircleCheck, CircleX, Loader } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import "@xterm/xterm/css/xterm.css";
+
+const stateIconMap = {
+  busy: { icon: Pencil, color: "var(--accent)", className: "state-icon-busy" },
+  thinking: { icon: Brain, color: "var(--accent)", className: "state-icon-busy" },
+  waiting: { icon: CircleHelp, color: "var(--yellow)", className: "" },
+  idle: { icon: CircleCheck, color: "var(--green)", className: "" },
+  error: { icon: CircleX, color: "var(--red)", className: "" },
+  starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
+};
+
+function StateIcon({ state }) {
+  const entry = stateIconMap[state] || stateIconMap.idle;
+  const Icon = entry.icon;
+  return <Icon size={12} style={{ color: entry.color, flexShrink: 0 }} className={entry.className} />;
+}
 
 /**
  * Build an xterm.js theme from our cockpit theme palette.
@@ -36,11 +51,13 @@ function buildXtermTheme(theme) {
   };
 }
 
-export default function TerminalPane({
-  session,       // { id, name, terminalId, model, status }
+const TerminalPane = forwardRef(function TerminalPane({
+  session,       // { id, name, terminalId, model, status, activityState }
   onClose,       // () => void
   onNameChange,  // (name) => void
-}) {
+  paneIndex,     // number — position in the grid
+  onSwap,        // (fromIndex, toIndex) => void
+}, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
   const fitRef = useRef(null);        // FitAddon instance
@@ -50,6 +67,34 @@ export default function TerminalPane({
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
   const { theme } = useTheme();
+
+  // Expose focus() to parent via ref
+  useImperativeHandle(ref, () => ({
+    focus: () => xtermRef.current?.focus(),
+  }));
+
+  // Safe fit: guard against zero-dimension containers and send resize to PTY
+  const safeFit = useCallback(() => {
+    const el = termRef.current;
+    const fit = fitRef.current;
+    const term = xtermRef.current;
+    if (!el || !fit || !term) return;
+    // Skip if container has no size (hidden, transitioning, or not laid out yet)
+    if (el.clientWidth < 10 || el.clientHeight < 10) return;
+    try {
+      fit.fit();
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "resize",
+          cols: term.cols,
+          rows: term.rows,
+        }));
+      }
+    } catch {
+      // fit() can throw if terminal is disposed during resize
+    }
+  }, []);
 
   // Connect terminal to PTY via WebSocket
   const connectWs = useCallback((terminalId) => {
@@ -62,15 +107,7 @@ export default function TerminalPane({
     ws.onopen = () => {
       reconnectAttempts.current = 0;
       // Fit on connect to send initial dimensions
-      if (fitRef.current) {
-        fitRef.current.fit();
-        const term = xtermRef.current;
-        ws.send(JSON.stringify({
-          type: "resize",
-          cols: term.cols,
-          rows: term.rows,
-        }));
-      }
+      safeFit();
     };
 
     ws.onmessage = (evt) => {
@@ -136,8 +173,8 @@ export default function TerminalPane({
     xtermRef.current = term;
     fitRef.current = fitAddon;
 
-    // Fit once mounted
-    requestAnimationFrame(() => fitAddon.fit());
+    // Fit once mounted (double-rAF to ensure layout is settled)
+    requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
     // Terminal input -> WebSocket
     term.onData((data) => {
@@ -149,19 +186,7 @@ export default function TerminalPane({
     // Resize observer with debounce
     resizeObserver.current = new ResizeObserver(() => {
       clearTimeout(resizeTimer.current);
-      resizeTimer.current = setTimeout(() => {
-        if (fitRef.current && xtermRef.current) {
-          fitRef.current.fit();
-          const ws = wsRef.current;
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "resize",
-              cols: xtermRef.current.cols,
-              rows: xtermRef.current.rows,
-            }));
-          }
-        }
-      }, 150);
+      resizeTimer.current = setTimeout(safeFit, 150);
     });
     resizeObserver.current.observe(termRef.current);
 
@@ -201,13 +226,13 @@ export default function TerminalPane({
     }
   }, [session.terminalId, connectWs]);
 
-  // Refit when layout changes (external size change)
+  // Refit when pane position changes (layout switch causes external size change)
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (fitRef.current) fitRef.current.fit();
-    }, 100);
-    return () => clearTimeout(timer);
-  });
+    // Double-delayed fit: first wait for CSS grid to settle, then fit
+    const timer1 = setTimeout(safeFit, 50);
+    const timer2 = setTimeout(safeFit, 200);
+    return () => { clearTimeout(timer1); clearTimeout(timer2); };
+  }, [paneIndex, safeFit]);
 
   // File drop handler
   const handleDrop = useCallback(async (e) => {
@@ -238,25 +263,51 @@ export default function TerminalPane({
     e.stopPropagation();
   }, []);
 
+  const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
+  const isWaiting = activityState === "waiting";
+
   return (
-    <div className="flex flex-col h-full min-w-0">
+    <div
+      className="flex flex-col h-full min-w-0"
+      style={{
+        boxShadow: isWaiting
+          ? "inset 0 0 0 1px var(--yellow), 0 0 15px rgba(234, 179, 8, 0.3)"
+          : "none",
+        animation: isWaiting ? "attention-glow 2s ease-in-out infinite" : "none",
+        transition: "box-shadow 0.3s ease",
+      }}
+    >
       {/* Pane header */}
       <div
         className="flex items-center justify-between px-3 h-9 flex-shrink-0"
         style={{ borderBottom: "1px solid var(--border-color)" }}
+        draggable={onSwap != null}
+        onDragStart={(e) => {
+          if (paneIndex == null) return;
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", String(paneIndex));
+        }}
+        onDragOver={(e) => {
+          if (!onSwap) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(e) => {
+          if (!onSwap || paneIndex == null) return;
+          e.preventDefault();
+          const from = parseInt(e.dataTransfer.getData("text/plain"), 10);
+          if (!isNaN(from) && from !== paneIndex) onSwap(from, paneIndex);
+        }}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <span
-            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-            style={{
-              backgroundColor:
-                session.status === "running"
-                  ? "var(--green)"
-                  : session.status === "error"
-                    ? "var(--red)"
-                    : "var(--text-muted)",
-            }}
-          />
+          {onSwap && (
+            <GripVertical
+              size={12}
+              className="flex-shrink-0 cursor-grab"
+              style={{ color: "var(--text-muted)" }}
+            />
+          )}
+          <StateIcon state={activityState} />
           <span
             className="text-xs font-medium truncate"
             style={{ color: "var(--text-primary)" }}
@@ -300,4 +351,6 @@ export default function TerminalPane({
       />
     </div>
   );
-}
+});
+
+export default TerminalPane;

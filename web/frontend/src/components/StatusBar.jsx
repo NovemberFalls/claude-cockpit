@@ -1,9 +1,18 @@
-import { Square, Columns, Grid2x2, Wifi, WifiOff } from "lucide-react";
+import { useState } from "react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader } from "lucide-react";
 
 const layoutOptions = [
   { value: 1, icon: Square, label: "Single" },
   { value: 2, icon: Columns, label: "Split" },
   { value: 4, icon: Grid2x2, label: "Quad" },
+];
+
+const legendItems = [
+  { icon: Pencil, color: "var(--accent)", label: "Working", desc: "Claude is writing or thinking" },
+  { icon: CircleHelp, color: "var(--yellow)", label: "Waiting", desc: "Needs your approval (pane glows)" },
+  { icon: CircleCheck, color: "var(--green)", label: "Idle", desc: "Ready for input" },
+  { icon: CircleX, color: "var(--red)", label: "Error", desc: "Session has an error" },
+  { icon: Loader, color: "var(--text-muted)", label: "Starting", desc: "Session is launching" },
 ];
 
 export default function StatusBar({
@@ -13,8 +22,11 @@ export default function StatusBar({
   connected,
   totalTokens,
   totalCost,
+  broadcastMode,
+  setBroadcastMode,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
+  const [showLegend, setShowLegend] = useState(false);
 
   return (
     <footer
@@ -44,27 +56,102 @@ export default function StatusBar({
         <span>Cost: ${totalCost.toFixed(2)}</span>
       </div>
 
-      {/* Layout switcher */}
-      <div className="flex items-center gap-1">
-        {layoutOptions.map(({ value, icon: Icon, label }) => (
-          <button
-            key={value}
-            onClick={() => setLayout(value)}
-            title={`${label} (Ctrl+${value === 4 ? 4 : value})`}
-            className="p-1 rounded transition-colors"
+      <div className="flex items-center gap-2" style={{ position: "relative" }}>
+        {/* Icon legend popup */}
+        {showLegend && (
+          <div
             style={{
-              color: layout === value ? "var(--accent)" : "var(--text-muted)",
-            }}
-            onMouseEnter={(e) => {
-              if (layout !== value) e.currentTarget.style.color = "var(--text-secondary)";
-            }}
-            onMouseLeave={(e) => {
-              if (layout !== value) e.currentTarget.style.color = "var(--text-muted)";
+              position: "absolute",
+              bottom: "100%",
+              right: 0,
+              marginBottom: "8px",
+              backgroundColor: "var(--bg-surface)",
+              border: "1px solid var(--border-color)",
+              borderRadius: "8px",
+              padding: "12px 16px",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+              minWidth: "240px",
+              zIndex: 100,
             }}
           >
-            <Icon size={14} />
-          </button>
-        ))}
+            <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
+              Status Icons
+            </p>
+            {legendItems.map(({ icon: Icon, color, label, desc }) => (
+              <div key={label} className="flex items-center gap-2 py-1">
+                <Icon size={12} style={{ color, flexShrink: 0 }} />
+                <span className="text-xs font-medium" style={{ color: "var(--text-primary)", minWidth: "52px" }}>
+                  {label}
+                </span>
+                <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  {desc}
+                </span>
+              </div>
+            ))}
+            <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "8px 0" }} />
+            <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+              Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast
+            </p>
+          </div>
+        )}
+
+        {/* Info button */}
+        <button
+          onClick={() => setShowLegend((p) => !p)}
+          onBlur={() => setTimeout(() => setShowLegend(false), 150)}
+          title="Status icon legend & shortcuts"
+          className="p-1 rounded transition-colors"
+          style={{ color: showLegend ? "var(--accent)" : "var(--text-muted)" }}
+          onMouseEnter={(e) => {
+            if (!showLegend) e.currentTarget.style.color = "var(--text-secondary)";
+          }}
+          onMouseLeave={(e) => {
+            if (!showLegend) e.currentTarget.style.color = "var(--text-muted)";
+          }}
+        >
+          <Info size={14} />
+        </button>
+
+        {/* Broadcast toggle */}
+        <button
+          onClick={() => setBroadcastMode?.(!broadcastMode)}
+          title="Broadcast mode (Ctrl+Shift+Enter)"
+          className="p-1 rounded transition-colors"
+          style={{
+            color: broadcastMode ? "var(--yellow)" : "var(--text-muted)",
+          }}
+          onMouseEnter={(e) => {
+            if (!broadcastMode) e.currentTarget.style.color = "var(--text-secondary)";
+          }}
+          onMouseLeave={(e) => {
+            if (!broadcastMode) e.currentTarget.style.color = "var(--text-muted)";
+          }}
+        >
+          <Radio size={14} />
+        </button>
+
+        {/* Layout switcher */}
+        <div className="flex items-center gap-1">
+          {layoutOptions.map(({ value, icon: Icon, label }) => (
+            <button
+              key={value}
+              onClick={() => setLayout(value)}
+              title={`${label} (Ctrl+${value === 4 ? 4 : value})`}
+              className="p-1 rounded transition-colors"
+              style={{
+                color: layout === value ? "var(--accent)" : "var(--text-muted)",
+              }}
+              onMouseEnter={(e) => {
+                if (layout !== value) e.currentTarget.style.color = "var(--text-secondary)";
+              }}
+              onMouseLeave={(e) => {
+                if (layout !== value) e.currentTarget.style.color = "var(--text-muted)";
+              }}
+            >
+              <Icon size={14} />
+            </button>
+          ))}
+        </div>
       </div>
     </footer>
   );

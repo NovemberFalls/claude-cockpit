@@ -1,26 +1,19 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, Pencil, CircleHelp, CircleCheck, CircleX, Loader, GitBranch } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
-function StatusDot({ status }) {
-  const colors = {
-    running: "var(--green)",
-    idle: "var(--text-muted)",
-    error: "var(--red)",
-  };
-  return (
-    <span className="relative inline-block w-1.5 h-1.5 rounded-full flex-shrink-0">
-      <span
-        className="absolute inset-0 rounded-full"
-        style={{ backgroundColor: colors[status] || colors.idle }}
-      />
-      {status === "running" && (
-        <span
-          className="absolute inset-0 rounded-full animate-ping"
-          style={{ backgroundColor: colors.running, opacity: 0.4 }}
-        />
-      )}
-    </span>
-  );
+const stateIconMap = {
+  busy: { icon: Pencil, color: "var(--accent)", className: "state-icon-busy" },
+  waiting: { icon: CircleHelp, color: "var(--yellow)", className: "" },
+  idle: { icon: CircleCheck, color: "var(--green)", className: "" },
+  running: { icon: CircleCheck, color: "var(--green)", className: "" },
+  error: { icon: CircleX, color: "var(--red)", className: "" },
+  starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
+};
+
+function StateIcon({ state }) {
+  const entry = stateIconMap[state] || stateIconMap.idle;
+  const Icon = entry.icon;
+  return <Icon size={12} style={{ color: entry.color, flexShrink: 0 }} className={entry.className} />;
 }
 
 /** Normalize path separators to backslash for comparison */
@@ -123,6 +116,14 @@ function LocationContextMenu({ x, y, path, onExpand, onNewAt, onRemove, onClose 
         style={itemStyle}
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-elevated)")}
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+        onClick={() => { navigator.clipboard.writeText(path); onClose(); }}
+      >
+        Copy path
+      </div>
+      <div
+        style={itemStyle}
+        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-elevated)")}
+        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
         onClick={() => { onExpand(path); onClose(); }}
       >
         Expand 1 layer
@@ -161,6 +162,7 @@ export default function Sidebar({
   savedLocations,
   onAddLocations,
   onRemoveLocation,
+  gitStatuses = {},
 }) {
   if (!open) return null;
 
@@ -204,7 +206,7 @@ export default function Sidebar({
             if (!isActive) e.currentTarget.style.backgroundColor = "transparent";
           }}
         >
-          <StatusDot status={s.status} />
+          <StateIcon state={s.activityState || s.status} />
           <span className="truncate">{s.name}</span>
         </button>
         <button
@@ -269,6 +271,29 @@ export default function Sidebar({
             <FolderOpen size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
             <span className="text-xs truncate">{node.name}</span>
           </button>
+
+          {/* Git status badge */}
+          {(() => {
+            const git = gitStatuses[norm(node.path)];
+            if (!git?.git) return null;
+            return (
+              <span
+                className="flex items-center gap-0.5 flex-shrink-0"
+                title={`${git.branch}${git.dirty ? ` (${git.files_changed} changed)` : ""}`}
+              >
+                <GitBranch size={9} style={{ color: "var(--text-muted)" }} />
+                <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>
+                  {git.branch.length > 12 ? git.branch.slice(0, 12) + "…" : git.branch}
+                </span>
+                {git.dirty && (
+                  <span
+                    className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: "var(--yellow)" }}
+                  />
+                )}
+              </span>
+            );
+          })()}
 
           {sessionsHere.length > 0 && (
             <span

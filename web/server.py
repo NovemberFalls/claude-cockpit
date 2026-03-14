@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -206,6 +207,58 @@ async def browse_directories(path: str = ""):
         return JSONResponse({"dirs": [], "parent": str(target)})
 
 
+# ── Git Status ────────────────────────────────────────────
+
+
+@app.get("/api/git/status")
+async def git_status(path: str):
+    """Get git branch and dirty state for a directory."""
+    target = Path(path)
+    if not target.is_dir():
+        return JSONResponse({"git": False})
+
+    try:
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(target), capture_output=True, text=True, timeout=5,
+        )
+        if branch_result.returncode != 0:
+            return JSONResponse({"git": False})
+
+        branch = branch_result.stdout.strip()
+
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(target), capture_output=True, text=True, timeout=5,
+        )
+        lines = [l for l in status_result.stdout.strip().split("\n") if l.strip()]
+        dirty = len(lines) > 0
+
+        return JSONResponse({
+            "git": True,
+            "branch": branch,
+            "dirty": dirty,
+            "files_changed": len(lines),
+        })
+    except Exception:
+        return JSONResponse({"git": False})
+
+
+# ── Terminal Input ────────────────────────────────────────
+
+
+@app.post("/api/terminals/{terminal_id}/input")
+async def send_terminal_input(terminal_id: str, request: Request):
+    """Send text input to a terminal's PTY."""
+    body = await request.json()
+    text = body.get("text", "")
+    if not text:
+        return JSONResponse({"error": "No text provided"}, status_code=400)
+    if pty_manager.write_pty(terminal_id, text):
+        return JSONResponse({"status": "sent"})
+    return JSONResponse({"error": "Terminal not found or dead"}, status_code=404)
+
+
 # ── Terminal Management (REST) ───────────────────────────
 
 
@@ -217,6 +270,7 @@ async def create_terminal(request: Request):
     workdir = body.get("workdir", str(Path.cwd()))
     model = body.get("model", "sonnet")
     resume_id = body.get("resume_session_id", "")
+    continue_last = body.get("continue", False)
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
@@ -226,6 +280,7 @@ async def create_terminal(request: Request):
             workdir=workdir,
             model=model,
             resume_session_id=resume_id,
+            continue_last=continue_last,
             cols=cols,
             rows=rows,
         )
@@ -291,6 +346,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             try:
                 data = await pty_manager.read_pty(terminal_id)
                 if data:
+                    session.tracker.feed(data)
                     await websocket.send_text(data)
                 else:
                     await asyncio.sleep(0.01)

@@ -8,12 +8,88 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
 import winpty
+
+# Regex to strip ANSI escape sequences
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
+# Patterns for state detection
+_IDLE_PATTERNS = ["❯", "$ "]
+_WAITING_PATTERNS = ["Allow", "Yes/No", "y/n", "Do you want", "(y)es", "(n)o"]
+# Patterns for token/cost parsing
+_TOKEN_RE = re.compile(r"(\d[\d,]*)\s*tokens?")
+_COST_RE = re.compile(r"\$(\d+\.?\d*)")
+
+
+class SessionStateTracker:
+    """Tracks activity state, tokens, and cost from PTY output."""
+
+    def __init__(self):
+        self.state: str = "starting"  # idle | busy | waiting | starting
+        self.last_output_time: float = time.time()
+        self.buffer: str = ""  # rolling ~2000 chars of ANSI-stripped text
+        self.total_tokens: int = 0
+        self.total_cost: float = 0.0
+        self._last_token_val: int = 0
+        self._last_cost_val: float = 0.0
+
+    def feed(self, raw_data: str) -> None:
+        """Process new PTY output data."""
+        self.last_output_time = time.time()
+        self.state = "busy"
+
+        # Strip ANSI and append to rolling buffer
+        clean = _ANSI_RE.sub("", raw_data)
+        self.buffer += clean
+        if len(self.buffer) > 2000:
+            self.buffer = self.buffer[-2000:]
+
+        # Parse tokens/cost from the clean data
+        for m in _TOKEN_RE.finditer(clean):
+            val = int(m.group(1).replace(",", ""))
+            if val > self._last_token_val:
+                self.total_tokens = val
+                self._last_token_val = val
+
+        for m in _COST_RE.finditer(clean):
+            val = float(m.group(1))
+            if val > self._last_cost_val:
+                self.total_cost = val
+                self._last_cost_val = val
+
+    def tick(self) -> str:
+        """Check for idle/waiting state based on buffer tail and timing."""
+        elapsed = time.time() - self.last_output_time
+
+        if elapsed < 1.0:
+            return self.state  # Still receiving output, stay busy
+
+        # Check the tail of the buffer for patterns
+        tail = self.buffer[-200:] if self.buffer else ""
+
+        # Check waiting patterns first (higher priority)
+        for pattern in _WAITING_PATTERNS:
+            if pattern.lower() in tail.lower():
+                self.state = "waiting"
+                return self.state
+
+        # Check idle patterns
+        for pattern in _IDLE_PATTERNS:
+            if pattern in tail:
+                self.state = "idle"
+                return self.state
+
+        # If no output for 1.5s+ but no recognized pattern, stay in current state
+        if elapsed > 3.0 and self.state == "busy":
+            self.state = "idle"
+
+        return self.state
 
 
 @dataclass
@@ -30,6 +106,7 @@ class TerminalSession:
     cols: int = 120
     rows: int = 30
     alive: bool = True
+    tracker: SessionStateTracker = field(default_factory=SessionStateTracker)
 
 
 class PtyManager:
@@ -44,6 +121,7 @@ class PtyManager:
         workdir: str = "",
         model: str = "sonnet",
         resume_session_id: str = "",
+        continue_last: bool = False,
         cols: int = 120,
         rows: int = 30,
     ) -> TerminalSession:
@@ -58,6 +136,8 @@ class PtyManager:
         cmd = f"claude --model {model}"
         if resume_session_id:
             cmd += f" --resume {resume_session_id}"
+        elif continue_last:
+            cmd += " --continue"
 
         # Build a clean environment without Claude Code markers to avoid
         # "cannot be launched inside another Claude Code session" error
@@ -121,6 +201,7 @@ class PtyManager:
                 session.alive = False
                 dead_ids.append(tid)
                 continue
+            session.tracker.tick()
             result.append({
                 "id": session.id,
                 "name": session.name,
@@ -131,6 +212,9 @@ class PtyManager:
                 "cols": session.cols,
                 "rows": session.rows,
                 "alive": True,
+                "activity_state": session.tracker.state,
+                "tokens": session.tracker.total_tokens,
+                "cost": session.tracker.total_cost,
             })
         # Clean up dead sessions
         for tid in dead_ids:

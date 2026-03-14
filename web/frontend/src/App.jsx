@@ -8,6 +8,7 @@ import NewSessionDialog from "./components/NewSessionDialog";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
+const SESSIONS_KEY = "cockpit-sessions";
 
 function loadSavedLocations() {
   try {
@@ -29,6 +30,22 @@ function saveRecentLocations(locs) {
   try { localStorage.setItem(RECENTS_KEY, JSON.stringify(locs)); } catch {}
 }
 
+function loadSavedSessions() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSIONS_KEY) || "[]");
+  } catch { return []; }
+}
+
+function saveSessions(sessions) {
+  try {
+    // Only persist recoverable sessions (not errors)
+    const toSave = sessions
+      .filter((s) => s.status !== "error")
+      .map(({ name, model, workdir }) => ({ name, model, workdir }));
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(toSave));
+  } catch {}
+}
+
 let nextLocalId = 1;
 
 export default function App() {
@@ -46,6 +63,11 @@ export default function App() {
   const [savedLocations, setSavedLocations] = useState(loadSavedLocations);
   const [recentLocations, setRecentLocations] = useState(loadRecentLocations);
   const [showNewDialog, setShowNewDialog] = useState(false);
+  const [gitStatuses, setGitStatuses] = useState({});
+  const [broadcastMode, setBroadcastMode] = useState(false);
+  const [broadcastText, setBroadcastText] = useState("");
+  const paneRefs = useRef([]);
+  const prevStatesRef = useRef({});
 
   // Health-check polling: wait for backend to be ready
   useEffect(() => {
@@ -99,10 +121,12 @@ export default function App() {
   }, []);
 
   // Create a new terminal session
-  const createSession = useCallback(async (name, workdir) => {
+  // options: { continueSession?: boolean }
+  const createSession = useCallback(async (name, workdir, sessionModel, options = {}) => {
     const localId = nextLocalId++;
     const sessionName = name || `Session ${localId}`;
     const dir = workdir || "C:\\Code";
+    const useModel = sessionModel || model;
 
     // Ensure the workdir is in the curated locations list
     addLocations([dir]);
@@ -119,7 +143,7 @@ export default function App() {
       id: localId,
       name: sessionName,
       terminalId: null,
-      model,
+      model: useModel,
       status: "starting",
       workdir: dir,
     };
@@ -141,10 +165,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: sessionName,
-          model,
+          model: useModel,
           workdir: dir,
           cols: 120,
           rows: 30,
+          ...(options.continueSession ? { continue: true } : {}),
         }),
       });
       const data = await res.json();
@@ -197,9 +222,156 @@ export default function App() {
     });
   }, []);
 
-  // Signal backend is ready (no auto-create — user picks from locations or "+ New")
-  // eslint-disable-next-line no-unused-vars
-  const _ = backendReady;
+  // Persist sessions to localStorage whenever they change
+  useEffect(() => {
+    if (sessions.length > 0) saveSessions(sessions);
+  }, [sessions]);
+
+  // Restore saved sessions once backend is ready (one-time)
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!backendReady || restoredRef.current) return;
+    restoredRef.current = true;
+    const saved = loadSavedSessions();
+    for (const s of saved) {
+      createSession(s.name, s.workdir, s.model, { continueSession: true });
+    }
+  }, [backendReady, createSession]);
+
+  // Request notification permission once first session is created
+  const notifRequested = useRef(false);
+  useEffect(() => {
+    if (sessions.length > 0 && !notifRequested.current && "Notification" in window) {
+      notifRequested.current = true;
+      if (Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+    }
+  }, [sessions.length]);
+
+  // Poll /api/terminals every 2s for activity state, tokens, cost
+  useEffect(() => {
+    if (!backendReady) return;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/terminals");
+        if (!res.ok) return;
+        const data = await res.json();
+        const termMap = {};
+        for (const t of data.terminals) {
+          termMap[t.id] = t;
+        }
+
+        setSessions((prev) => {
+          const updated = prev.map((s) => {
+            if (!s.terminalId || !termMap[s.terminalId]) return s;
+            const t = termMap[s.terminalId];
+            return {
+              ...s,
+              activityState: t.activity_state,
+              tokens: t.tokens || 0,
+              cost: t.cost || 0,
+            };
+          });
+
+          // Desktop notifications on state transitions
+          if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
+            for (const s of updated) {
+              if (!s.terminalId) continue;
+              const prevState = prevStatesRef.current[s.terminalId];
+              const curr = s.activityState;
+              if (prevState && curr) {
+                if (curr === "waiting" && prevState !== "waiting") {
+                  new Notification("Action Required", {
+                    body: `${s.name} is waiting for approval`,
+                    tag: `cockpit-${s.terminalId}`,
+                  });
+                } else if (curr === "idle" && prevState === "busy") {
+                  new Notification("Task Complete", {
+                    body: `${s.name} has finished`,
+                    tag: `cockpit-${s.terminalId}`,
+                  });
+                }
+              }
+              prevStatesRef.current[s.terminalId] = curr;
+            }
+          }
+
+          return updated;
+        });
+      } catch {
+        // ignore poll errors
+      }
+    };
+    const id = setInterval(poll, 2000);
+    poll();
+    return () => clearInterval(id);
+  }, [backendReady]);
+
+  // Poll git status every 30s for all unique workdirs
+  useEffect(() => {
+    if (!backendReady) return;
+    const fetchGit = async () => {
+      const dirs = new Set([
+        ...sessions.map((s) => s.workdir).filter(Boolean),
+        ...savedLocations,
+      ]);
+      const results = {};
+      for (const dir of dirs) {
+        try {
+          const res = await fetch(`/api/git/status?path=${encodeURIComponent(dir)}`);
+          if (res.ok) {
+            const data = await res.json();
+            const normPath = dir.replace(/\//g, "\\").replace(/\\$/, "");
+            results[normPath] = data;
+          }
+        } catch { /* skip */ }
+      }
+      setGitStatuses(results);
+    };
+    fetchGit();
+    const id = setInterval(fetchGit, 30000);
+    return () => clearInterval(id);
+  }, [backendReady, sessions, savedLocations]);
+
+  // Aggregate tokens/cost across all sessions
+  const totalTokens = useMemo(
+    () => sessions.reduce((sum, s) => sum + (s.tokens || 0), 0),
+    [sessions]
+  );
+  const totalCost = useMemo(
+    () => sessions.reduce((sum, s) => sum + (s.cost || 0), 0),
+    [sessions]
+  );
+
+  // Visible sessions for panes (must be above hooks that reference it)
+  const visibleSessions = useMemo(() => {
+    const visible = activeIds
+      .slice(0, layout)
+      .map((id) => sessions.find((s) => s.id === id))
+      .filter(Boolean);
+
+    while (visible.length < layout && visible.length < sessions.length) {
+      const next = sessions.find((s) => !visible.includes(s));
+      if (next) visible.push(next);
+      else break;
+    }
+    return visible;
+  }, [activeIds, layout, sessions]);
+
+  // Broadcast: send text to all visible running terminals
+  const sendBroadcast = useCallback(async (text) => {
+    const targets = visibleSessions.filter((s) => s.status === "running" && s.terminalId);
+    await Promise.all(
+      targets.map((s) =>
+        fetch(`/api/terminals/${s.terminalId}/input`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text + "\n" }),
+        }).catch(() => {})
+      )
+    );
+  }, [visibleSessions]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -225,25 +397,34 @@ export default function App() {
         e.preventDefault();
         setLayout(4);
       }
+      // Quick-switch: Ctrl+1 through Ctrl+4 to focus panes
+      if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "4") {
+        const i = parseInt(e.key) - 1;
+        if (i < visibleSessions.length) {
+          e.preventDefault();
+          paneRefs.current[i]?.focus();
+        }
+      }
+      // Broadcast mode toggle: Ctrl+Shift+Enter
+      if (e.ctrlKey && e.shiftKey && e.key === "Enter") {
+        e.preventDefault();
+        setBroadcastMode((p) => !p);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession]);
+  }, [createSession, visibleSessions]);
 
-  // Visible sessions for panes
-  const visibleSessions = useMemo(() => {
-    const visible = activeIds
-      .slice(0, layout)
-      .map((id) => sessions.find((s) => s.id === id))
-      .filter(Boolean);
-
-    while (visible.length < layout && visible.length < sessions.length) {
-      const next = sessions.find((s) => !visible.includes(s));
-      if (next) visible.push(next);
-      else break;
-    }
-    return visible;
-  }, [activeIds, layout, sessions]);
+  // Swap two panes by index
+  const swapPanes = useCallback((fromIdx, toIdx) => {
+    setActiveIds((prev) => {
+      const next = [...prev];
+      const tmp = next[fromIdx];
+      next[fromIdx] = next[toIdx];
+      next[toIdx] = tmp;
+      return next;
+    });
+  }, []);
 
   // Sidebar resize
   const startSidebarResize = useCallback((e) => {
@@ -343,6 +524,7 @@ export default function App() {
                 savedLocations={savedLocations}
                 onAddLocations={addLocations}
                 onRemoveLocation={removeLocation}
+                gitStatuses={gitStatuses}
               />
               {/* Resize handle */}
               <div
@@ -357,6 +539,51 @@ export default function App() {
                   zIndex: 20,
                 }}
               />
+            </div>
+          )}
+
+          {/* Broadcast input bar */}
+          {broadcastMode && (
+            <div
+              className="flex items-center gap-2 px-4 h-10 flex-shrink-0"
+              style={{
+                borderBottom: "1px solid var(--border-color)",
+                backgroundColor: "rgba(234, 179, 8, 0.05)",
+              }}
+            >
+              <span className="text-xs font-medium" style={{ color: "var(--yellow)" }}>
+                BROADCAST
+              </span>
+              <input
+                autoFocus
+                className="flex-1 text-sm px-2 py-1 rounded"
+                style={{
+                  backgroundColor: "var(--bg-surface)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-color)",
+                  outline: "none",
+                }}
+                placeholder="Type command and press Enter to send to all visible sessions..."
+                value={broadcastText}
+                onChange={(e) => setBroadcastText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && broadcastText.trim()) {
+                    sendBroadcast(broadcastText.trim());
+                    setBroadcastText("");
+                  }
+                  if (e.key === "Escape") {
+                    setBroadcastMode(false);
+                    setBroadcastText("");
+                  }
+                }}
+              />
+              <button
+                onClick={() => { setBroadcastMode(false); setBroadcastText(""); }}
+                className="text-xs px-2 py-1 rounded"
+                style={{ color: "var(--text-muted)" }}
+              >
+                Esc
+              </button>
             </div>
           )}
 
@@ -389,8 +616,11 @@ export default function App() {
                 }}
               >
                 <TerminalPane
+                  ref={(el) => { paneRefs.current[idx] = el; }}
                   session={session}
                   onClose={() => removeSession(session.id)}
+                  paneIndex={idx}
+                  onSwap={layout > 1 ? swapPanes : undefined}
                 />
               </div>
             ))}
@@ -422,8 +652,10 @@ export default function App() {
           setLayout={setLayout}
           sessions={sessions}
           connected={sessions.some((s) => s.status === "running")}
-          totalTokens={0}
-          totalCost={0}
+          totalTokens={totalTokens}
+          totalCost={totalCost}
+          broadcastMode={broadcastMode}
+          setBroadcastMode={setBroadcastMode}
         />
       </div>
 
