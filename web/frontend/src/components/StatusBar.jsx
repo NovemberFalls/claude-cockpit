@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Cloud } from "lucide-react";
 
 const layoutOptions = [
   { value: 1, icon: Square, label: "Single" },
@@ -24,6 +24,8 @@ export default function StatusBar({
   totalCost,
   broadcastMode,
   setBroadcastMode,
+  cloudConnected,
+  isRelay = false,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
   const [showLegend, setShowLegend] = useState(false);
@@ -38,15 +40,22 @@ export default function StatusBar({
       }}
     >
       <div className="flex items-center gap-4">
-        {/* Connection */}
-        <span className="flex items-center gap-1">
-          {connected ? (
-            <Wifi size={10} style={{ color: "var(--green)" }} />
-          ) : (
-            <WifiOff size={10} style={{ color: "var(--red)" }} />
-          )}
-          {connected ? "Connected" : "Disconnected"}
-        </span>
+        {/* Connection / Mode indicator */}
+        {isRelay ? (
+          <span className="flex items-center gap-1" style={{ color: "var(--green)" }}>
+            <Cloud size={10} />
+            Cloud
+          </span>
+        ) : (
+          <span className="flex items-center gap-1">
+            {connected ? (
+              <Wifi size={10} style={{ color: "var(--green)" }} />
+            ) : (
+              <WifiOff size={10} style={{ color: "var(--red)" }} />
+            )}
+            {connected ? "Connected" : "Disconnected"}
+          </span>
+        )}
 
         <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
         {runningCount > 0 && (
@@ -54,6 +63,14 @@ export default function StatusBar({
         )}
         <span>Tokens: {totalTokens.toLocaleString()}</span>
         <span>Cost: ${totalCost.toFixed(2)}</span>
+
+        {/* Cloud indicator (local mode only, when connected) */}
+        {!isRelay && cloudConnected && (
+          <span className="flex items-center gap-1" style={{ color: "var(--green)" }}>
+            <Cloud size={10} />
+            Cloud
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2" style={{ position: "relative" }}>
@@ -100,14 +117,8 @@ export default function StatusBar({
           onClick={() => setShowLegend((p) => !p)}
           onBlur={() => setTimeout(() => setShowLegend(false), 150)}
           title="Status icon legend & shortcuts"
-          className="p-1 rounded transition-colors"
+          className={`p-1 rounded transition-colors ${!showLegend ? "hover-color-secondary" : ""}`}
           style={{ color: showLegend ? "var(--accent)" : "var(--text-muted)" }}
-          onMouseEnter={(e) => {
-            if (!showLegend) e.currentTarget.style.color = "var(--text-secondary)";
-          }}
-          onMouseLeave={(e) => {
-            if (!showLegend) e.currentTarget.style.color = "var(--text-muted)";
-          }}
         >
           <Info size={14} />
         </button>
@@ -116,15 +127,9 @@ export default function StatusBar({
         <button
           onClick={() => setBroadcastMode?.(!broadcastMode)}
           title="Broadcast mode (Ctrl+Shift+Enter)"
-          className="p-1 rounded transition-colors"
+          className={`p-1 rounded transition-colors ${!broadcastMode ? "hover-color-secondary" : ""}`}
           style={{
             color: broadcastMode ? "var(--yellow)" : "var(--text-muted)",
-          }}
-          onMouseEnter={(e) => {
-            if (!broadcastMode) e.currentTarget.style.color = "var(--text-secondary)";
-          }}
-          onMouseLeave={(e) => {
-            if (!broadcastMode) e.currentTarget.style.color = "var(--text-muted)";
           }}
         >
           <Radio size={14} />
@@ -137,15 +142,9 @@ export default function StatusBar({
               key={value}
               onClick={() => setLayout(value)}
               title={`${label} (Ctrl+${value === 4 ? 4 : value})`}
-              className="p-1 rounded transition-colors"
+              className={`p-1 rounded transition-colors ${layout !== value ? "hover-color-secondary" : ""}`}
               style={{
                 color: layout === value ? "var(--accent)" : "var(--text-muted)",
-              }}
-              onMouseEnter={(e) => {
-                if (layout !== value) e.currentTarget.style.color = "var(--text-secondary)";
-              }}
-              onMouseLeave={(e) => {
-                if (layout !== value) e.currentTarget.style.color = "var(--text-muted)";
               }}
             >
               <Icon size={14} />

@@ -11,11 +11,10 @@ import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
-
-import winpty
+from typing import Any, Optional
 
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
@@ -98,11 +97,12 @@ class TerminalSession:
 
     id: str
     name: str
-    pty: winpty.PtyProcess
+    pty: Any  # winpty.PtyProcess or conpty.PtyProcess
     created_at: str
     model: str = "sonnet"
     working_dir: str = ""
     claude_session_id: Optional[str] = None  # for --resume
+    bypass_permissions: bool = False
     cols: int = 120
     rows: int = 30
     alive: bool = True
@@ -114,6 +114,7 @@ class PtyManager:
 
     def __init__(self):
         self.sessions: dict[str, TerminalSession] = {}
+        self._pty_executor = ThreadPoolExecutor(max_workers=64)
 
     def create_terminal(
         self,
@@ -122,6 +123,7 @@ class PtyManager:
         model: str = "sonnet",
         resume_session_id: str = "",
         continue_last: bool = False,
+        bypass_permissions: bool = False,
         cols: int = 120,
         rows: int = 30,
     ) -> TerminalSession:
@@ -132,25 +134,103 @@ class PtyManager:
         if not workdir:
             workdir = os.getcwd()
 
-        # Build the command - spawn claude interactively
+        # Build a clean environment for child processes:
+        # 1. Remove Claude Code markers (avoids "inside another session" error)
+        # 2. Remove PyInstaller artifacts (avoids DLL conflicts)
+        blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+        pyi_prefixes = ("_PYI", "_MEI")
+        env = {}
+        for k, v in os.environ.items():
+            if k in blocked_keys:
+                continue
+            if k.startswith(pyi_prefixes):
+                continue
+            env[k] = v
+
+        import sys as _sys
+        meipass = getattr(_sys, "_MEIPASS", None)
+        current_path = env.get("PATH", env.get("Path", ""))
+
+        # Strip PyInstaller's temp extraction directory from PATH
+        if meipass:
+            meipass_lower = meipass.lower().rstrip(os.sep)
+            cleaned_parts = []
+            for p in current_path.split(";"):
+                p_stripped = p.strip()
+                if not p_stripped:
+                    continue
+                p_lower = p_stripped.lower().rstrip(os.sep)
+                if p_lower == meipass_lower or p_lower.startswith(meipass_lower + os.sep):
+                    continue
+                cleaned_parts.append(p_stripped)
+            current_path = ";".join(cleaned_parts)
+
+        # Ensure critical system directories and npm globals are in PATH
+        sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        npm_dir = os.path.join(user_profile, "AppData", "Roaming", "npm")
+        essential_dirs = [
+            os.path.join(sys_root, "System32"),
+            sys_root,
+            os.path.join(sys_root, "System32", "Wbem"),
+            npm_dir,
+        ]
+        path_lower = current_path.lower()
+        for d in essential_dirs:
+            if os.path.isdir(d) and d.lower() not in path_lower:
+                current_path = d + ";" + current_path
+        env["PATH"] = current_path
+        env.setdefault("SystemRoot", sys_root)
+
+        # Build the command
+        import shutil
         cmd = f"claude --model {model}"
         if resume_session_id:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
             cmd += " --continue"
+        if bypass_permissions:
+            cmd += " --dangerously-skip-permissions"
 
-        # Build a clean environment without Claude Code markers to avoid
-        # "cannot be launched inside another Claude Code session" error
-        blocked = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
-        env = {k: v for k, v in os.environ.items() if k not in blocked}
+        claude_path = shutil.which("claude", path=current_path)
+        print(f"[pty] Spawning: {cmd}", file=_sys.stderr)
+        print(f"[pty] Claude found at: {claude_path}", file=_sys.stderr)
+        print(f"[pty] CWD: {workdir}", file=_sys.stderr)
+        print(f"[pty] Bundled: {bool(meipass)}", file=_sys.stderr)
+        if bypass_permissions:
+            print("[pty] Permissions: BYPASSED", file=_sys.stderr)
 
-        # Spawn via ConPTY
-        pty_process = winpty.PtyProcess.spawn(
-            cmd,
-            dimensions=(rows, cols),
-            cwd=workdir,
-            env=env,
-        )
+        # Inside PyInstaller bundles, pywinpty's C extension causes child
+        # processes to fail with 0xC0000142. Use our pure-ctypes ConPTY
+        # wrapper instead, which calls the Windows API directly.
+        if meipass:
+            from conpty import PtyProcess as ConPtyProcess
+            print("[pty] Using ctypes ConPTY (PyInstaller mode)", file=_sys.stderr)
+            pty_process = ConPtyProcess.spawn(
+                cmd,
+                dimensions=(rows, cols),
+                cwd=workdir,
+                env=env,
+            )
+        else:
+            import winpty
+            pty_process = winpty.PtyProcess.spawn(
+                cmd,
+                dimensions=(rows, cols),
+                cwd=workdir,
+                env=env,
+            )
+
+        # Post-spawn health check (Claude CLI needs time to initialize Node.js)
+        time.sleep(1.5)
+        print(f"[pty] Post-spawn alive: {pty_process.isalive()}", file=_sys.stderr)
+        if not pty_process.isalive():
+            try:
+                out = pty_process.read(4096)
+                print(f"[pty] Dying output: {repr(out[:500])}", file=_sys.stderr)
+            except Exception as e:
+                print(f"[pty] Read error: {e}", file=_sys.stderr)
+            print(f"[pty] Exit status: {pty_process.exitstatus}", file=_sys.stderr)
 
         session = TerminalSession(
             id=terminal_id,
@@ -160,6 +240,7 @@ class PtyManager:
             model=model,
             working_dir=workdir,
             claude_session_id=resume_session_id or None,
+            bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
         )
@@ -209,6 +290,7 @@ class PtyManager:
                 "created_at": session.created_at,
                 "working_dir": session.working_dir,
                 "claude_session_id": session.claude_session_id,
+                "bypass_permissions": session.bypass_permissions,
                 "cols": session.cols,
                 "rows": session.rows,
                 "alive": True,
@@ -229,13 +311,13 @@ class PtyManager:
         return session
 
     async def read_pty(self, terminal_id: str, size: int = 4096) -> str:
-        """Read from PTY (runs in executor to avoid blocking)."""
+        """Read from PTY (runs in dedicated executor to avoid blocking)."""
         session = self.sessions.get(terminal_id)
         if not session or not session.pty.isalive():
             return ""
         loop = asyncio.get_event_loop()
         try:
-            data = await loop.run_in_executor(None, session.pty.read, size)
+            data = await loop.run_in_executor(self._pty_executor, session.pty.read, size)
             return data
         except EOFError:
             session.alive = False
@@ -255,9 +337,10 @@ class PtyManager:
             return False
 
     def shutdown(self):
-        """Kill all sessions."""
+        """Kill all sessions and clean up resources."""
         for tid in list(self.sessions.keys()):
             self.kill_terminal(tid)
+        self._pty_executor.shutdown(wait=False)
 
 
 # Singleton

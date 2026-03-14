@@ -7,6 +7,10 @@ block_cipher = None
 root = os.path.dirname(os.path.abspath(SPEC))
 frontend_dist = os.path.join(root, 'frontend', 'dist')
 
+# No winpty DLLs needed — we use a pure-ctypes ConPTY wrapper (conpty.py)
+# that calls the Windows ConPTY API directly, bypassing pywinpty's C
+# extension which causes 0xC0000142 in PyInstaller onefile bundles.
+
 a = Analysis(
     [os.path.join(root, 'server.py')],
     pathex=[root],
@@ -38,6 +42,7 @@ a = Analysis(
         'authlib.integrations',
         'authlib.integrations.starlette_client',
         'winpty',
+        'conpty',
         'dotenv',
         'websockets',
         'httpx',

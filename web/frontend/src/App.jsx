@@ -5,6 +5,10 @@ import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
+import CloudSettingsDialog from "./components/CloudSettingsDialog";
+import ApiKeysPanel from "./components/ApiKeysPanel";
+import AdminPanel from "./components/AdminPanel";
+import { ModeProvider } from "./hooks/useMode";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -46,16 +50,22 @@ function saveSessions(sessions) {
   } catch {}
 }
 
+const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
+
 let nextLocalId = 1;
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(224);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try { return parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 224; }
+    catch { return 224; }
+  });
   const [model, setModel] = useState("sonnet");
   const [layout, setLayout] = useState(1);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [backendError, setBackendError] = useState(false);
+  const [appMode, setAppMode] = useState("local"); // "local" or "relay"
 
   // Sessions: { id (local), name, terminalId (backend), model, status, workdir }
   const [sessions, setSessions] = useState([]);
@@ -66,8 +76,21 @@ export default function App() {
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
+  const [cloudStatus, setCloudStatus] = useState({ connected: false, relay_url: "", instance_id: "" });
+  const [showCloudDialog, setShowCloudDialog] = useState(false);
+  const [showApiKeys, setShowApiKeys] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
+
+  const isRelay = appMode === "relay";
+
+  // Mode context value
+  const modeCtx = useMemo(() => ({
+    mode: appMode,
+    isRelay,
+    isAdmin: user?.is_admin || false,
+  }), [appMode, isRelay, user]);
 
   // Health-check polling: wait for backend to be ready
   useEffect(() => {
@@ -84,6 +107,7 @@ export default function App() {
             if (!cancelled) {
               setBackendReady(true);
               if (data.authenticated) setUser(data);
+              if (data.mode) setAppMode(data.mode);
             }
             return;
           }
@@ -121,24 +145,22 @@ export default function App() {
   }, []);
 
   // Create a new terminal session
-  // options: { continueSession?: boolean }
   const createSession = useCallback(async (name, workdir, sessionModel, options = {}) => {
     const localId = nextLocalId++;
     const sessionName = name || `Session ${localId}`;
     const dir = workdir || "C:\\Code";
     const useModel = sessionModel || model;
 
-    // Ensure the workdir is in the curated locations list
-    addLocations([dir]);
+    if (!isRelay) addLocations([dir]);
 
-    // Track as recent location (most recent first, capped at 5)
-    setRecentLocations((prev) => {
-      const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
-      saveRecentLocations(next);
-      return next;
-    });
+    if (!isRelay) {
+      setRecentLocations((prev) => {
+        const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
+        saveRecentLocations(next);
+        return next;
+      });
+    }
 
-    // Optimistic local state
     const newSession = {
       id: localId,
       name: sessionName,
@@ -146,6 +168,7 @@ export default function App() {
       model: useModel,
       status: "starting",
       workdir: dir,
+      bypassPermissions: !!options.bypassPermissions,
     };
     setSessions((prev) => [...prev, newSession]);
     setActiveIds((prev) => {
@@ -158,56 +181,53 @@ export default function App() {
       return next;
     });
 
-    // Spawn PTY on backend
     try {
+      const body = {
+        name: sessionName,
+        model: useModel,
+        workdir: dir,
+        cols: 120,
+        rows: 30,
+        ...(options.continueSession ? { continue: true } : {}),
+        ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
+      };
+      // In relay mode, include instance_id so relay knows which desktop to target
+      if (isRelay && options.instance_id) {
+        body.instance_id = options.instance_id;
+      }
+
       const res = await fetch("/api/terminals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: sessionName,
-          model: useModel,
-          workdir: dir,
-          cols: 120,
-          rows: 30,
-          ...(options.continueSession ? { continue: true } : {}),
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
 
       if (data.error) {
         setSessions((prev) =>
-          prev.map((s) =>
-            s.id === localId ? { ...s, status: "error" } : s
-          )
+          prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
         );
         return;
       }
 
-      // Update with real terminal ID
       setSessions((prev) =>
         prev.map((s) =>
-          s.id === localId
-            ? { ...s, terminalId: data.id, status: "running" }
-            : s
+          s.id === localId ? { ...s, terminalId: data.id, status: "running" } : s
         )
       );
     } catch (err) {
       setSessions((prev) =>
-        prev.map((s) =>
-          s.id === localId ? { ...s, status: "error" } : s
-        )
+        prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, layout, addLocations]);
+  }, [model, layout, addLocations, isRelay]);
 
-  // Remove a session
+  // Remove a session (kills terminal on both local and relay)
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
     if (session?.terminalId) {
-      // Kill on backend
       fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" }).catch(() => {});
     }
-
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.filter((id) => id !== localId));
   }, [sessions]);
@@ -222,23 +242,29 @@ export default function App() {
     });
   }, []);
 
-  // Persist sessions to localStorage whenever they change
+  // Persist sessions to localStorage (local mode only)
+  const sessionCountRef = useRef(0);
   useEffect(() => {
-    if (sessions.length > 0) saveSessions(sessions);
-  }, [sessions]);
+    if (isRelay) return;
+    if (sessions.length !== sessionCountRef.current) {
+      sessionCountRef.current = sessions.length;
+      if (sessions.length > 0) saveSessions(sessions);
+      else try { localStorage.removeItem(SESSIONS_KEY); } catch {}
+    }
+  }, [sessions, isRelay]);
 
-  // Restore saved sessions once backend is ready (one-time)
+  // Restore saved sessions once backend is ready (local mode only)
   const restoredRef = useRef(false);
   useEffect(() => {
-    if (!backendReady || restoredRef.current) return;
+    if (!backendReady || restoredRef.current || isRelay) return;
     restoredRef.current = true;
     const saved = loadSavedSessions();
     for (const s of saved) {
-      createSession(s.name, s.workdir, s.model, { continueSession: true });
+      createSession(s.name, s.workdir, s.model);
     }
-  }, [backendReady, createSession]);
+  }, [backendReady, createSession, isRelay]);
 
-  // Request notification permission once first session is created
+  // Request notification permission
   const notifRequested = useRef(false);
   useEffect(() => {
     if (sessions.length > 0 && !notifRequested.current && "Notification" in window) {
@@ -249,7 +275,7 @@ export default function App() {
     }
   }, [sessions.length]);
 
-  // Poll /api/terminals every 2s for activity state, tokens, cost
+  // Poll /api/terminals every 3s
   useEffect(() => {
     if (!backendReady) return;
     const poll = async () => {
@@ -262,79 +288,175 @@ export default function App() {
           termMap[t.id] = t;
         }
 
-        setSessions((prev) => {
-          const updated = prev.map((s) => {
-            if (!s.terminalId || !termMap[s.terminalId]) return s;
-            const t = termMap[s.terminalId];
-            return {
-              ...s,
-              activityState: t.activity_state,
+        if (isRelay) {
+          // Relay mode: terminals from API ARE the sessions
+          setSessions((prev) => {
+            const newSessions = data.terminals.map((t) => ({
+              id: t.id,
+              name: t.name || "Session",
+              terminalId: t.id,
+              model: t.model || "",
+              status: "running",
+              workdir: t.workdir || "",
+              activityState: t.activity_state || "idle",
               tokens: t.tokens || 0,
               cost: t.cost || 0,
-            };
-          });
+              hostname: t.hostname || "",
+              instance_id: t.instance_id || "",
+            }));
 
-          // Desktop notifications on state transitions
-          if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
-            for (const s of updated) {
-              if (!s.terminalId) continue;
-              const prevState = prevStatesRef.current[s.terminalId];
-              const curr = s.activityState;
-              if (prevState && curr) {
-                if (curr === "waiting" && prevState !== "waiting") {
-                  new Notification("Action Required", {
-                    body: `${s.name} is waiting for approval`,
-                    tag: `cockpit-${s.terminalId}`,
-                  });
-                } else if (curr === "idle" && prevState === "busy") {
-                  new Notification("Task Complete", {
-                    body: `${s.name} has finished`,
-                    tag: `cockpit-${s.terminalId}`,
-                  });
+            // Notifications
+            if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
+              for (const s of newSessions) {
+                const prevState = prevStatesRef.current[s.terminalId];
+                const curr = s.activityState;
+                if (prevState && curr) {
+                  if (curr === "waiting" && prevState !== "waiting") {
+                    new Notification("Action Required", {
+                      body: `${s.name} is waiting for approval`,
+                      tag: `cockpit-${s.terminalId}`,
+                    });
+                  } else if (curr === "idle" && prevState === "busy") {
+                    new Notification("Task Complete", {
+                      body: `${s.name} has finished`,
+                      tag: `cockpit-${s.terminalId}`,
+                    });
+                  }
+                }
+                prevStatesRef.current[s.terminalId] = curr;
+              }
+            }
+
+            // Auto-select first session if none active
+            if (newSessions.length > 0 && prev.length === 0) {
+              setActiveIds([newSessions[0].id]);
+            }
+
+            // Skip re-render if nothing changed
+            if (newSessions.length === prev.length) {
+              let same = true;
+              for (let i = 0; i < newSessions.length; i++) {
+                const n = newSessions[i];
+                const p = prev[i];
+                if (!p || n.id !== p.id || n.activityState !== p.activityState ||
+                    n.tokens !== p.tokens || n.cost !== p.cost || n.name !== p.name) {
+                  same = false;
+                  break;
                 }
               }
-              prevStatesRef.current[s.terminalId] = curr;
+              if (same) return prev;
             }
-          }
 
-          return updated;
-        });
+            return newSessions;
+          });
+        } else {
+          // Local mode: update existing sessions with poll data
+          setSessions((prev) => {
+            let changed = false;
+            const updated = prev.map((s) => {
+              if (!s.terminalId || !termMap[s.terminalId]) return s;
+              const t = termMap[s.terminalId];
+              const newState = t.activity_state;
+              const newTokens = t.tokens || 0;
+              const newCost = t.cost || 0;
+              if (s.activityState === newState && s.tokens === newTokens && s.cost === newCost) {
+                return s;
+              }
+              changed = true;
+              return { ...s, activityState: newState, tokens: newTokens, cost: newCost };
+            });
+
+            if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
+              for (const s of updated) {
+                if (!s.terminalId) continue;
+                const prevState = prevStatesRef.current[s.terminalId];
+                const curr = s.activityState;
+                if (prevState && curr) {
+                  if (curr === "waiting" && prevState !== "waiting") {
+                    new Notification("Action Required", {
+                      body: `${s.name} is waiting for approval`,
+                      tag: `cockpit-${s.terminalId}`,
+                    });
+                  } else if (curr === "idle" && prevState === "busy") {
+                    new Notification("Task Complete", {
+                      body: `${s.name} has finished`,
+                      tag: `cockpit-${s.terminalId}`,
+                    });
+                  }
+                }
+                prevStatesRef.current[s.terminalId] = curr;
+              }
+            }
+
+            return changed ? updated : prev;
+          });
+        }
       } catch {
         // ignore poll errors
       }
     };
-    const id = setInterval(poll, 2000);
+    const id = setInterval(poll, 3000);
     poll();
     return () => clearInterval(id);
-  }, [backendReady]);
+  }, [backendReady, isRelay]);
 
-  // Poll git status every 30s for all unique workdirs
+  // Poll git status (local mode only)
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const savedLocationsRef = useRef(savedLocations);
+  savedLocationsRef.current = savedLocations;
+
   useEffect(() => {
     if (!backendReady) return;
     const fetchGit = async () => {
       const dirs = new Set([
-        ...sessions.map((s) => s.workdir).filter(Boolean),
-        ...savedLocations,
+        ...sessionsRef.current.map((s) => s.workdir).filter(Boolean),
+        ...(isRelay ? [] : savedLocationsRef.current),
       ]);
+      if (dirs.size === 0) return;
       const results = {};
-      for (const dir of dirs) {
+      const entries = [...dirs];
+      // In relay mode, derive instance_id from first session
+      const instanceId = isRelay
+        ? sessionsRef.current.find((s) => s.instance_id)?.instance_id || ""
+        : "";
+      const fetches = entries.map(async (dir) => {
         try {
-          const res = await fetch(`/api/git/status?path=${encodeURIComponent(dir)}`);
+          let url = `/api/git/status?path=${encodeURIComponent(dir)}`;
+          if (instanceId) url += `&instance_id=${encodeURIComponent(instanceId)}`;
+          const res = await fetch(url);
           if (res.ok) {
             const data = await res.json();
             const normPath = dir.replace(/\//g, "\\").replace(/\\$/, "");
             results[normPath] = data;
           }
         } catch { /* skip */ }
-      }
+      });
+      await Promise.all(fetches);
       setGitStatuses(results);
     };
     fetchGit();
     const id = setInterval(fetchGit, 30000);
     return () => clearInterval(id);
-  }, [backendReady, sessions, savedLocations]);
+  }, [backendReady, isRelay]);
 
-  // Aggregate tokens/cost across all sessions
+  // Poll cloud tunnel status (local mode only)
+  useEffect(() => {
+    if (!backendReady || isRelay) return;
+    const pollCloud = async () => {
+      try {
+        const res = await fetch("/api/tunnel/status");
+        if (res.ok) {
+          const data = await res.json();
+          setCloudStatus(data);
+        }
+      } catch { /* skip */ }
+    };
+    pollCloud();
+    const id = setInterval(pollCloud, 5000);
+    return () => clearInterval(id);
+  }, [backendReady, isRelay]);
+
   const totalTokens = useMemo(
     () => sessions.reduce((sum, s) => sum + (s.tokens || 0), 0),
     [sessions]
@@ -344,7 +466,6 @@ export default function App() {
     [sessions]
   );
 
-  // Visible sessions for panes (must be above hooks that reference it)
   const visibleSessions = useMemo(() => {
     const visible = activeIds
       .slice(0, layout)
@@ -359,7 +480,6 @@ export default function App() {
     return visible;
   }, [activeIds, layout, sessions]);
 
-  // Broadcast: send text to all visible running terminals
   const sendBroadcast = useCallback(async (text) => {
     const targets = visibleSessions.filter((s) => s.status === "running" && s.terminalId);
     await Promise.all(
@@ -373,10 +493,8 @@ export default function App() {
     );
   }, [visibleSessions]);
 
-  // Keyboard shortcuts
   useEffect(() => {
     const handler = (e) => {
-      // Only intercept if not focused in terminal (let terminal handle most keys)
       if (e.ctrlKey && e.shiftKey && e.key === "N") {
         e.preventDefault();
         setShowNewDialog(true);
@@ -397,7 +515,6 @@ export default function App() {
         e.preventDefault();
         setLayout(4);
       }
-      // Quick-switch: Ctrl+1 through Ctrl+4 to focus panes
       if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "4") {
         const i = parseInt(e.key) - 1;
         if (i < visibleSessions.length) {
@@ -405,7 +522,6 @@ export default function App() {
           paneRefs.current[i]?.focus();
         }
       }
-      // Broadcast mode toggle: Ctrl+Shift+Enter
       if (e.ctrlKey && e.shiftKey && e.key === "Enter") {
         e.preventDefault();
         setBroadcastMode((p) => !p);
@@ -413,9 +529,8 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, visibleSessions]);
+  }, [createSession, visibleSessions, isRelay]);
 
-  // Swap two panes by index
   const swapPanes = useCallback((fromIdx, toIdx) => {
     setActiveIds((prev) => {
       const next = [...prev];
@@ -426,16 +541,27 @@ export default function App() {
     });
   }, []);
 
-  // Sidebar resize
   const startSidebarResize = useCallback((e) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = sidebarWidth;
+    let rafId = 0;
+    let latestX = startX;
     const onMove = (ev) => {
-      const newW = Math.min(Math.max(startW + ev.clientX - startX, 140), 500);
-      setSidebarWidth(newW);
+      latestX = ev.clientX;
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          const newW = Math.min(Math.max(startW + latestX - startX, 140), 500);
+          setSidebarWidth(newW);
+        });
+      }
     };
     const onUp = () => {
+      cancelAnimationFrame(rafId);
+      const finalW = Math.min(Math.max(startW + latestX - startX, 140), 500);
+      setSidebarWidth(finalW);
+      try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(finalW)); } catch {}
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
     };
@@ -443,7 +569,6 @@ export default function App() {
     document.addEventListener("mouseup", onUp);
   }, [sidebarWidth]);
 
-  // Grid layout
   const gridTemplate = layout === 1 ? "1fr" : "1fr 1fr";
   const gridRows = layout === 4 ? "1fr 1fr" : "1fr";
 
@@ -463,7 +588,6 @@ export default function App() {
                   onClick={() => {
                     setBackendError(false);
                     setBackendReady(false);
-                    // Re-trigger the health check by forcing remount
                     window.location.reload();
                   }}
                   className="px-4 py-2 rounded-md text-sm"
@@ -478,7 +602,7 @@ export default function App() {
             ) : (
               <>
                 <p className="text-lg mb-2" style={{ color: "var(--text-primary)" }}>
-                  Starting backend server...
+                  Connecting...
                 </p>
                 <p className="text-sm">Waiting for connection</p>
               </>
@@ -490,185 +614,235 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden relative">
-      <HexGrid />
+    <ModeProvider value={modeCtx}>
+      <div className="flex flex-col h-screen w-screen overflow-hidden relative">
+        <HexGrid />
 
-      <div className="relative z-10 flex flex-col h-full">
-        <TopBar
-          model={model}
-          setModel={setModel}
-          sidebarOpen={sidebarOpen}
-          setSidebarOpen={setSidebarOpen}
-          user={user}
-          onLogout={() => (window.location.href = "/logout")}
-        />
+        <div className="relative z-10 flex flex-col h-full">
+          <TopBar
+            model={model}
+            setModel={setModel}
+            sidebarOpen={sidebarOpen}
+            setSidebarOpen={setSidebarOpen}
+            user={user}
+            onLogout={() => (window.location.href = "/logout")}
+            cloudConnected={cloudStatus.connected}
+            onCloudToggle={() => setShowCloudDialog(true)}
+            isRelay={isRelay}
+          />
 
-        <div className="flex flex-1 min-h-0">
-          {sidebarOpen && (
-            <div
-              className="flex flex-shrink-0"
-              style={{
-                width: sidebarWidth,
-                borderRight: "1px solid var(--border-color)",
-                position: "relative",
-              }}
-            >
-              <Sidebar
-                sessions={sessions}
-                activeIds={visibleSessions.map((s) => s.id)}
-                onSelect={selectSession}
-                onNew={() => setShowNewDialog(true)}
-                onNewAt={(dir) => createSession("", dir)}
-                onDelete={removeSession}
-                open={sidebarOpen}
-                savedLocations={savedLocations}
-                onAddLocations={addLocations}
-                onRemoveLocation={removeLocation}
-                gitStatuses={gitStatuses}
-              />
-              {/* Resize handle */}
+          <div className="flex flex-1 min-h-0">
+            {sidebarOpen && (
               <div
-                onMouseDown={startSidebarResize}
+                className="flex flex-shrink-0"
                 style={{
-                  position: "absolute",
-                  top: 0,
-                  right: -2,
-                  width: 5,
-                  height: "100%",
-                  cursor: "col-resize",
-                  zIndex: 20,
-                }}
-              />
-            </div>
-          )}
-
-          {/* Broadcast input bar */}
-          {broadcastMode && (
-            <div
-              className="flex items-center gap-2 px-4 h-10 flex-shrink-0"
-              style={{
-                borderBottom: "1px solid var(--border-color)",
-                backgroundColor: "rgba(234, 179, 8, 0.05)",
-              }}
-            >
-              <span className="text-xs font-medium" style={{ color: "var(--yellow)" }}>
-                BROADCAST
-              </span>
-              <input
-                autoFocus
-                className="flex-1 text-sm px-2 py-1 rounded"
-                style={{
-                  backgroundColor: "var(--bg-surface)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-color)",
-                  outline: "none",
-                }}
-                placeholder="Type command and press Enter to send to all visible sessions..."
-                value={broadcastText}
-                onChange={(e) => setBroadcastText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && broadcastText.trim()) {
-                    sendBroadcast(broadcastText.trim());
-                    setBroadcastText("");
-                  }
-                  if (e.key === "Escape") {
-                    setBroadcastMode(false);
-                    setBroadcastText("");
-                  }
-                }}
-              />
-              <button
-                onClick={() => { setBroadcastMode(false); setBroadcastText(""); }}
-                className="text-xs px-2 py-1 rounded"
-                style={{ color: "var(--text-muted)" }}
-              >
-                Esc
-              </button>
-            </div>
-          )}
-
-          {/* Pane grid */}
-          <main
-            className="flex-1 min-w-0"
-            style={{
-              display: "grid",
-              gridTemplateColumns: gridTemplate,
-              gridTemplateRows: gridRows,
-              gap: 0,
-            }}
-          >
-            {visibleSessions.map((session, idx) => (
-              <div
-                key={session.id}
-                style={{
-                  overflow: "hidden",
-                  minHeight: 0,
-                  minWidth: 0,
-                  borderRight:
-                    idx < visibleSessions.length - 1 &&
-                    (layout === 2 || (layout === 4 && idx % 2 === 0))
-                      ? "1px solid var(--border-color)"
-                      : "none",
-                  borderBottom:
-                    layout === 4 && idx < 2
-                      ? "1px solid var(--border-color)"
-                      : "none",
+                  width: sidebarWidth,
+                  borderRight: "1px solid var(--border-color)",
+                  position: "relative",
                 }}
               >
-                <TerminalPane
-                  ref={(el) => { paneRefs.current[idx] = el; }}
-                  session={session}
-                  onClose={() => removeSession(session.id)}
-                  paneIndex={idx}
-                  onSwap={layout > 1 ? swapPanes : undefined}
+                <Sidebar
+                  sessions={sessions}
+                  activeIds={visibleSessions.map((s) => s.id)}
+                  onSelect={selectSession}
+                  onNew={() => setShowNewDialog(true)}
+                  onNewAt={(dir) => createSession("", dir)}
+                  onDelete={removeSession}
+                  open={sidebarOpen}
+                  savedLocations={savedLocations}
+                  onAddLocations={addLocations}
+                  onRemoveLocation={removeLocation}
+                  gitStatuses={gitStatuses}
+                  isRelay={isRelay}
+                  onShowApiKeys={() => setShowApiKeys(true)}
+                  onShowAdmin={() => setShowAdmin(true)}
+                  isAdmin={user?.is_admin || false}
+                />
+                {/* Resize handle */}
+                <div
+                  onMouseDown={startSidebarResize}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    right: -2,
+                    width: 5,
+                    height: "100%",
+                    cursor: "col-resize",
+                    zIndex: 20,
+                  }}
                 />
               </div>
-            ))}
+            )}
 
-            {/* Empty pane placeholders */}
-            {visibleSessions.length < layout &&
-              Array.from({ length: layout - visibleSessions.length }).map((_, i) => (
-                <div
-                  key={`empty-${i}`}
-                  className="flex items-center justify-center"
+            {/* Broadcast input bar (local mode only) */}
+            {broadcastMode && (
+              <div
+                className="flex items-center gap-2 px-4 h-10 flex-shrink-0"
+                style={{
+                  borderBottom: "1px solid var(--border-color)",
+                  backgroundColor: "rgba(234, 179, 8, 0.05)",
+                }}
+              >
+                <span className="text-xs font-medium" style={{ color: "var(--yellow)" }}>
+                  BROADCAST
+                </span>
+                <input
+                  autoFocus
+                  className="flex-1 text-sm px-2 py-1 rounded"
+                  style={{
+                    backgroundColor: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-color)",
+                    outline: "none",
+                  }}
+                  placeholder="Type command and press Enter to send to all visible sessions..."
+                  value={broadcastText}
+                  onChange={(e) => setBroadcastText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && broadcastText.trim()) {
+                      sendBroadcast(broadcastText.trim());
+                      setBroadcastText("");
+                    }
+                    if (e.key === "Escape") {
+                      setBroadcastMode(false);
+                      setBroadcastText("");
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => { setBroadcastMode(false); setBroadcastText(""); }}
+                  className="text-xs px-2 py-1 rounded"
                   style={{ color: "var(--text-muted)" }}
                 >
-                  <button
-                    onClick={() => createSession()}
-                    className="text-sm px-4 py-2 rounded-md transition-colors"
-                    style={{ border: "1px solid var(--border-color)" }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                  >
-                    + New Session
-                  </button>
+                  Esc
+                </button>
+              </div>
+            )}
+
+            {/* Pane grid */}
+            <main
+              className="flex-1 min-w-0"
+              style={{
+                display: "grid",
+                gridTemplateColumns: gridTemplate,
+                gridTemplateRows: gridRows,
+                gap: 0,
+              }}
+            >
+              {visibleSessions.map((session, idx) => (
+                <div
+                  key={session.id}
+                  style={{
+                    overflow: "hidden",
+                    minHeight: 0,
+                    minWidth: 0,
+                    borderRight:
+                      idx < visibleSessions.length - 1 &&
+                      (layout === 2 || (layout === 4 && idx % 2 === 0))
+                        ? "1px solid var(--border-color)"
+                        : "none",
+                    borderBottom:
+                      layout === 4 && idx < 2
+                        ? "1px solid var(--border-color)"
+                        : "none",
+                  }}
+                >
+                  <TerminalPane
+                    ref={(el) => { paneRefs.current[idx] = el; }}
+                    session={session}
+                    onClose={() => removeSession(session.id)}
+                    paneIndex={idx}
+                    onSwap={layout > 1 ? swapPanes : undefined}
+                    isRelay={isRelay}
+                  />
                 </div>
               ))}
-          </main>
+
+              {/* Empty pane placeholders */}
+              {visibleSessions.length < layout &&
+                Array.from({ length: layout - visibleSessions.length }).map((_, i) => (
+                  <div
+                    key={`empty-${i}`}
+                    className="flex items-center justify-center"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    <button
+                      onClick={() => setShowNewDialog(true)}
+                      className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
+                      style={{ border: "1px solid var(--border-color)" }}
+                    >
+                      + New Session
+                    </button>
+                  </div>
+                ))}
+            </main>
+          </div>
+
+          <StatusBar
+            layout={layout}
+            setLayout={setLayout}
+            sessions={sessions}
+            connected={sessions.some((s) => s.status === "running")}
+            totalTokens={totalTokens}
+            totalCost={totalCost}
+            broadcastMode={broadcastMode}
+            setBroadcastMode={setBroadcastMode}
+            cloudConnected={cloudStatus.connected}
+            isRelay={isRelay}
+          />
         </div>
 
-        <StatusBar
-          layout={layout}
-          setLayout={setLayout}
-          sessions={sessions}
-          connected={sessions.some((s) => s.status === "running")}
-          totalTokens={totalTokens}
-          totalCost={totalCost}
-          broadcastMode={broadcastMode}
-          setBroadcastMode={setBroadcastMode}
-        />
-      </div>
+        {showNewDialog && (
+          <NewSessionDialog
+            recentLocations={recentLocations}
+            isRelay={isRelay}
+            instances={isRelay ? [...new Map(sessions.map(s => [s.instance_id, { instance_id: s.instance_id, hostname: s.hostname }])).values()] : []}
+            onConfirm={(name, workdir, bypassPermissions, instanceId) => {
+              setShowNewDialog(false);
+              createSession(name, workdir, undefined, { bypassPermissions, instance_id: instanceId });
+            }}
+            onCancel={() => setShowNewDialog(false)}
+          />
+        )}
 
-      {showNewDialog && (
-        <NewSessionDialog
-          recentLocations={recentLocations}
-          onConfirm={(name, workdir) => {
-            setShowNewDialog(false);
-            createSession(name, workdir);
-          }}
-          onCancel={() => setShowNewDialog(false)}
-        />
-      )}
-    </div>
+        {showCloudDialog && !isRelay && (
+          <CloudSettingsDialog
+            cloudStatus={cloudStatus}
+            onConnect={async (relayUrl, apiKey) => {
+              const res = await fetch("/api/tunnel/connect", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ relay_url: relayUrl, api_key: apiKey }),
+              });
+              if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.error || "Connection failed");
+              }
+              setTimeout(async () => {
+                try {
+                  const statusRes = await fetch("/api/tunnel/status");
+                  if (statusRes.ok) setCloudStatus(await statusRes.json());
+                } catch {}
+              }, 2000);
+              setShowCloudDialog(false);
+            }}
+            onDisconnect={async () => {
+              await fetch("/api/tunnel/disconnect", { method: "POST" });
+              setCloudStatus({ connected: false, relay_url: "", instance_id: "" });
+              setShowCloudDialog(false);
+            }}
+            onCancel={() => setShowCloudDialog(false)}
+          />
+        )}
+
+        {showApiKeys && isRelay && (
+          <ApiKeysPanel onClose={() => setShowApiKeys(false)} />
+        )}
+
+        {showAdmin && isRelay && user?.is_admin && (
+          <AdminPanel onClose={() => setShowAdmin(false)} />
+        )}
+      </div>
+    </ModeProvider>
   );
 }

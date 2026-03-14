@@ -57,6 +57,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onNameChange,  // (name) => void
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
+  isRelay = false, // true when running in relay mode (disables file drop)
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -158,7 +159,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace",
       lineHeight: 1.3,
       theme: buildXtermTheme(theme),
-      allowTransparency: true,
+      allowTransparency: false,
       scrollback: 10000,
       convertEol: true,
     });
@@ -327,10 +328,8 @@ const TerminalPane = forwardRef(function TerminalPane({
         <div className="flex items-center gap-1">
           <button
             onClick={onClose}
-            className="p-0.5 rounded transition-colors"
+            className="p-0.5 rounded transition-colors hover-color-red"
             style={{ color: "var(--text-muted)" }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--red)")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
             title="Close session"
           >
             <X size={13} />
@@ -346,8 +345,8 @@ const TerminalPane = forwardRef(function TerminalPane({
           padding: "4px 8px",
           backgroundColor: theme.bg,
         }}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
+        onDrop={isRelay ? undefined : handleDrop}
+        onDragOver={isRelay ? undefined : handleDragOver}
       />
     </div>
   );

@@ -23,6 +23,7 @@ load_dotenv()
 
 from auth import SECRET_KEY, oauth, user_store
 from pty_manager import pty_manager
+from tunnel import TunnelClient
 
 app = FastAPI(title="Claude Cockpit Web")
 
@@ -40,6 +41,9 @@ app.add_middleware(
 )
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+# ── Tunnel Client (Cloud Relay) ──────────────────────────
+tunnel_client = TunnelClient(pty_manager)
 
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
@@ -119,9 +123,9 @@ async def me(request: Request):
     user = request.session.get("user")
     if not user:
         if request.url.hostname in ("localhost", "127.0.0.1"):
-            return {"authenticated": True, "email": "local@localhost", "name": "Local User"}
+            return {"authenticated": True, "mode": "local", "email": "local@localhost", "name": "Local User"}
         return {"authenticated": False}
-    return {"authenticated": True, **user}
+    return {"authenticated": True, "mode": "local", **user}
 
 
 # ── File Upload ──────────────────────────────────────────
@@ -271,6 +275,7 @@ async def create_terminal(request: Request):
     model = body.get("model", "sonnet")
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
+    bypass_permissions = body.get("bypassPermissions", False)
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
@@ -281,6 +286,7 @@ async def create_terminal(request: Request):
             model=model,
             resume_session_id=resume_id,
             continue_last=continue_last,
+            bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
         )
@@ -348,6 +354,8 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 if data:
                     session.tracker.feed(data)
                     await websocket.send_text(data)
+                    # Forward to cloud relay if connected
+                    tunnel_client.forward_pty_output(terminal_id, data)
                 else:
                     await asyncio.sleep(0.01)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
@@ -404,6 +412,37 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             pass
 
 
+# ── Cloud Tunnel ─────────────────────────────────────────
+
+
+@app.post("/api/tunnel/connect")
+async def tunnel_connect(request: Request):
+    """Connect to cloud relay server."""
+    body = await request.json()
+    relay_url = body.get("relay_url", "")
+    api_key = body.get("api_key", "")
+
+    if not relay_url or not api_key:
+        return JSONResponse({"error": "relay_url and api_key required"}, status_code=400)
+
+    await tunnel_client.connect(relay_url, api_key)
+    return JSONResponse({"status": "connecting", "relay_url": relay_url})
+
+
+@app.post("/api/tunnel/disconnect")
+async def tunnel_disconnect():
+    """Disconnect from cloud relay server."""
+    await tunnel_client.disconnect()
+    TunnelClient.clear_settings()
+    return JSONResponse({"status": "disconnected"})
+
+
+@app.get("/api/tunnel/status")
+async def tunnel_status():
+    """Get cloud tunnel connection status."""
+    return JSONResponse(tunnel_client.status())
+
+
 # ── Static files ─────────────────────────────────────────
 
 
@@ -437,8 +476,20 @@ async def static_files(path: str):
     return HTMLResponse("Not found", 404)
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Auto-connect to cloud relay if previously configured."""
+    settings = TunnelClient.load_settings()
+    if settings and settings.get("auto_connect"):
+        relay_url = settings.get("relay_url", "")
+        api_key = settings.get("api_key", "")
+        if relay_url and api_key:
+            await tunnel_client.connect(relay_url, api_key)
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
+    await tunnel_client.disconnect()
     pty_manager.shutdown()
 
 

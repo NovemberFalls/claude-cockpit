@@ -217,7 +217,7 @@ export function applyThemeToDOM(theme) {
   s.setProperty("--text-primary", theme.fg);
   s.setProperty("--text-secondary", theme.fgDim);
   s.setProperty("--text-muted", theme.fgMuted);
-  s.setProperty("--border-color", `${theme.border}80`);
+  s.setProperty("--border-color", `${theme.border}bb`);
   s.setProperty("--status-running", theme.green);
   s.setProperty("--status-idle", theme.fgMuted);
   s.setProperty("--status-error", theme.red);

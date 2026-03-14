@@ -41,6 +41,7 @@ export default function HexGrid() {
     const ctx = canvas.getContext("2d");
     const s = stateRef.current;
     let animId;
+    let running = false;
 
     function buildGrid(w, h) {
       s.hexes = [];
@@ -69,6 +70,7 @@ export default function HexGrid() {
       canvas.style.height = h + "px";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       buildGrid(w, h);
+      ensureRunning();
     }
 
     function drawHex(cx, cy) {
@@ -95,6 +97,7 @@ export default function HexGrid() {
 
       const pulse = Math.sin(ts * PULSE_SPEED) * PULSE_AMP;
       const draw = s.scanlines ? drawSquare : drawHex;
+      let settling = false;
 
       for (const hex of s.hexes) {
         const dx = hex.cx - s.mouseX;
@@ -106,6 +109,10 @@ export default function HexGrid() {
           : BASE_ALPHA;
 
         hex.alpha += (hex.targetAlpha - hex.alpha) * LERP_SPEED;
+
+        // Check if this hex is still animating toward its target
+        if (Math.abs(hex.alpha - hex.targetAlpha) > 0.001) settling = true;
+
         const a = Math.max(0, Math.min(1, hex.alpha + pulse));
         if (a < 0.005) continue;
 
@@ -120,19 +127,39 @@ export default function HexGrid() {
         ctx.stroke();
       }
 
-      animId = requestAnimationFrame(frame);
+      // Keep animating if hexes are still settling, otherwise pause
+      if (settling) {
+        animId = requestAnimationFrame(frame);
+      } else {
+        running = false;
+      }
     }
 
-    function onMove(e) { s.mouseX = e.clientX; s.mouseY = e.clientY; }
-    function onLeave() { s.mouseX = -9999; s.mouseY = -9999; }
+    function ensureRunning() {
+      if (!running) {
+        running = true;
+        animId = requestAnimationFrame(frame);
+      }
+    }
+
+    function onMove(e) {
+      s.mouseX = e.clientX;
+      s.mouseY = e.clientY;
+      ensureRunning();
+    }
+    function onLeave() {
+      s.mouseX = -9999;
+      s.mouseY = -9999;
+      ensureRunning();
+    }
 
     resize();
     window.addEventListener("resize", resize);
     window.addEventListener("mousemove", onMove);
     document.addEventListener("mouseleave", onLeave);
-    animId = requestAnimationFrame(frame);
 
     return () => {
+      running = false;
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", resize);
       window.removeEventListener("mousemove", onMove);

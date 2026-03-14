@@ -12,7 +12,7 @@
   --text-primary: #c0caf5;
   --text-secondary: #a9b1d6;
   --text-muted: #565f89;
-  --border-color: rgba(122, 162, 247, 0.35);
+  --border-color: rgba(122, 162, 247, 0.55);
   --status-running: #9ece6a;
   --status-idle: #565f89;
   --status-error: #f7768e;
@@ -78,6 +78,13 @@ body {
   background: var(--accent-glow);
   color: var(--text-primary);
 }
+
+/* Hover utilities — GPU-accelerated, no JS re-renders */
+.hover-bg-surface:hover { background-color: var(--bg-surface); }
+.hover-bg-elevated:hover { background-color: var(--bg-elevated); }
+.hover-color-red:hover { color: var(--red); }
+.hover-color-secondary:hover { color: var(--text-secondary); }
+.hover-color-primary:hover { color: var(--text-primary); }
 
 /* State indicator animations */
 @keyframes attention-glow {

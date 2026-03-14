@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { PanelLeft, LogOut, ChevronDown } from "lucide-react";
+import { PanelLeft, LogOut, ChevronDown, Cloud, CloudOff } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const MODELS = [
@@ -15,6 +15,9 @@ export default function TopBar({
   setSidebarOpen,
   user,
   onLogout,
+  cloudConnected,
+  onCloudToggle,
+  isRelay = false,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const { themeId, switchTheme, themes } = useTheme();
@@ -30,10 +33,8 @@ export default function TopBar({
       <div className="flex items-center gap-3">
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="p-1.5 rounded-md transition-colors"
+          className="p-1.5 rounded-md transition-colors hover-bg-surface"
           style={{ color: "var(--text-secondary)" }}
-          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
           title="Toggle sidebar (Ctrl+B)"
         >
           <PanelLeft size={18} />
@@ -42,21 +43,31 @@ export default function TopBar({
           Cockpit
         </span>
         <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "var(--accent)" }} />
+        {isRelay && (
+          <span
+            className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full"
+            style={{
+              color: "var(--green)",
+              backgroundColor: "var(--bg-surface)",
+              border: "1px solid var(--border-color)",
+            }}
+          >
+            Cloud
+          </span>
+        )}
       </div>
 
       {/* Right */}
       <div className="flex items-center gap-2">
-        {/* Theme picker */}
+        {/* Theme picker (works in both modes) */}
         <div className="relative">
           <button
             onClick={() => { setThemeOpen(!themeOpen); setModelOpen(false); }}
-            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full transition-colors"
+            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full transition-colors hover-bg-surface"
             style={{
               color: "var(--text-muted)",
               border: "1px solid var(--border-color)",
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
           >
             <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "var(--accent)" }} />
             <ChevronDown size={10} />
@@ -76,13 +87,11 @@ export default function TopBar({
                   <button
                     key={t.id}
                     onClick={() => { switchTheme(t.id); setThemeOpen(false); }}
-                    className="block w-full text-left text-xs px-3 py-1.5 transition-colors"
+                    className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
                     style={{
                       color: t.id === themeId ? "var(--accent)" : "var(--text-secondary)",
                       fontWeight: t.id === themeId ? 600 : 400,
                     }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                   >
                     {t.label} ({t.group})
                   </button>
@@ -94,62 +103,72 @@ export default function TopBar({
 
         {/* Model picker */}
         <div className="relative">
-          <button
-            onClick={() => { setModelOpen(!modelOpen); setThemeOpen(false); }}
-            className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors"
-            style={{
-              color: "var(--text-secondary)",
-              border: "1px solid var(--border-color)",
-              backgroundColor: "var(--bg-surface)",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-elevated)")}
-            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-          >
-            {currentModel.label}
-            <ChevronDown size={10} />
-          </button>
-          {modelOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setModelOpen(false)} />
-              <div
-                className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[130px]"
-                style={{
-                  backgroundColor: "var(--bg-elevated)",
-                  border: "1px solid var(--border-color)",
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                }}
-              >
-                {MODELS.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => { setModel(m.id); setModelOpen(false); }}
-                    className="block w-full text-left text-xs px-3 py-1.5 transition-colors"
-                    style={{
-                      color: m.id === model ? "var(--accent)" : "var(--text-secondary)",
-                      fontWeight: m.id === model ? 600 : 400,
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-surface)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+            <button
+              onClick={() => { setModelOpen(!modelOpen); setThemeOpen(false); }}
+              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
+              style={{
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border-color)",
+                backgroundColor: "var(--bg-surface)",
+              }}
+            >
+              {currentModel.label}
+              <ChevronDown size={10} />
+            </button>
+            {modelOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setModelOpen(false)} />
+                <div
+                  className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[130px]"
+                  style={{
+                    backgroundColor: "var(--bg-elevated)",
+                    border: "1px solid var(--border-color)",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                  }}
+                >
+                  {MODELS.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => { setModel(m.id); setModelOpen(false); }}
+                      className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                      style={{
+                        color: m.id === model ? "var(--accent)" : "var(--text-secondary)",
+                        fontWeight: m.id === model ? 600 : 400,
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
 
         {/* Plan badge */}
         <span
-          className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full"
-          style={{
-            color: "var(--accent)",
-            backgroundColor: "var(--bg-surface)",
-            border: "1px solid var(--border-color)",
-          }}
-        >
-          Plan
-        </span>
+            className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full"
+            style={{
+              color: "var(--accent)",
+              backgroundColor: "var(--bg-surface)",
+              border: "1px solid var(--border-color)",
+            }}
+          >
+            Plan
+          </span>
+
+        {/* Cloud toggle (local mode only) */}
+        {!isRelay && (
+          <button
+            onClick={onCloudToggle}
+            className={`p-1.5 rounded-md transition-colors ${!cloudConnected ? "hover-color-secondary" : ""}`}
+            style={{
+              color: cloudConnected ? "var(--green)" : "var(--text-muted)",
+            }}
+            title={cloudConnected ? "Cloud relay connected" : "Connect to cloud relay"}
+          >
+            {cloudConnected ? <Cloud size={15} /> : <CloudOff size={15} />}
+          </button>
+        )}
 
         {/* Avatar */}
         {user?.picture ? (
@@ -175,10 +194,8 @@ export default function TopBar({
         {/* Logout */}
         <button
           onClick={onLogout}
-          className="p-1.5 rounded-md transition-colors"
+          className="p-1.5 rounded-md transition-colors hover-color-red"
           style={{ color: "var(--text-muted)" }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = "var(--red)")}
-          onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
           title="Logout"
         >
           <LogOut size={15} />
