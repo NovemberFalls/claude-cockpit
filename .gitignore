@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment / secrets
+.env
+*.pem
+credentials*.json
+
+# Node
+web/frontend/node_modules/
+
+# Tauri build artifacts
+web/frontend/src-tauri/target/
+web/frontend/src-tauri/binaries/*.exe
+web/frontend/src-tauri/gen/schemas/
+
+# Vite build output (can be rebuilt)
+web/frontend/dist/
+
+# PyInstaller output
+web/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
