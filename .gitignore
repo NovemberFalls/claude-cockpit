@@ -41,3 +41,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+releases/
+web/dist/
+web/build/

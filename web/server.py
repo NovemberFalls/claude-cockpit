@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import uuid
+import webbrowser
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,8 +43,10 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
     STATIC_DIR = Path(sys._MEIPASS) / "static"
+    FRONTEND_DIST = Path(sys._MEIPASS) / "frontend_dist"
 else:
     STATIC_DIR = Path(__file__).parent / "static"
+    FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
 
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
@@ -65,9 +68,12 @@ ALLOWED_EXTENSIONS = {
 
 @app.get("/")
 async def index(request: Request):
+    # Serve React frontend dist if available (production build)
+    if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").exists():
+        return FileResponse(FRONTEND_DIST / "index.html")
+    # Fallback to legacy static frontend
     user = request.session.get("user")
     if not user:
-        # For localhost, skip auth
         if request.url.hostname in ("localhost", "127.0.0.1"):
             return FileResponse(STATIC_DIR / "index.html")
         return FileResponse(STATIC_DIR / "login.html")
@@ -345,6 +351,28 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 # ── Static files ─────────────────────────────────────────
 
 
+# Serve React frontend assets (JS, CSS, images from Vite build)
+@app.get("/assets/{path:path}")
+async def frontend_assets(path: str):
+    if FRONTEND_DIST.is_dir():
+        file_path = FRONTEND_DIST / "assets" / path
+        if file_path.is_file():
+            return FileResponse(file_path)
+    return HTMLResponse("Not found", 404)
+
+
+# Serve other frontend static files (favicon, icons, etc.)
+@app.get("/favicon.svg")
+@app.get("/icons.svg")
+async def frontend_root_files(request: Request):
+    if FRONTEND_DIST.is_dir():
+        filename = request.url.path.lstrip("/")
+        file_path = FRONTEND_DIST / filename
+        if file_path.is_file():
+            return FileResponse(file_path)
+    return HTMLResponse("Not found", 404)
+
+
 @app.get("/static/{path:path}")
 async def static_files(path: str):
     file_path = STATIC_DIR / path
@@ -362,7 +390,12 @@ def main():
     import uvicorn
     port = int(os.getenv("PORT", "8420"))
     host = os.getenv("HOST", "0.0.0.0")
-    print(f"\n  Claude Cockpit -> http://{host}:{port}\n")
+    url = f"http://localhost:{port}"
+    print(f"\n  Claude Cockpit -> {url}\n")
+    # Auto-open browser unless suppressed
+    if os.getenv("NO_BROWSER", "").lower() not in ("1", "true", "yes"):
+        import threading
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=host, port=port)
 
 

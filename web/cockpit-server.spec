@@ -1,10 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for cockpit-server sidecar
+# PyInstaller spec for cockpit-server (standalone browser-based exe)
 
 import os
 
 block_cipher = None
 root = os.path.dirname(os.path.abspath(SPEC))
+frontend_dist = os.path.join(root, 'frontend', 'dist')
 
 a = Analysis(
     [os.path.join(root, 'server.py')],
@@ -12,6 +13,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(root, 'static'), 'static'),
+        (frontend_dist, 'frontend_dist'),
     ],
     hiddenimports=[
         'uvicorn',
@@ -58,11 +60,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='cockpit-server',
+    name='claude-cockpit',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=True,
-    icon=None,
+    icon=os.path.join(root, 'frontend', 'src-tauri', 'icons', 'icon.ico'),
 )

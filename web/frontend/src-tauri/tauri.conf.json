@@ -5,7 +5,7 @@
   "identifier": "com.claude-cockpit.app",
   "build": {
     "devUrl": "http://localhost:5174",
-    "frontendDist": "../dist",
+    "frontendDist": "http://localhost:8420",
     "beforeDevCommand": "",
     "beforeBuildCommand": ""
   },
