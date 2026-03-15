@@ -295,6 +295,42 @@ python watchdog.py
 
 ---
 
+## Testing
+
+### Backend Tests (Python)
+
+```bash
+cd web
+python -m pytest tests/ -v
+```
+
+Runs **24 tests** covering:
+
+| Test File | What It Tests |
+|-----------|--------------|
+| `test_server.py` | Health endpoint, browse API, auth, git status |
+| `test_pty_manager.py` | Session lifecycle, max limits, kill/shutdown |
+| `test_session_state_tracker.py` | State transitions, token/cost parsing, idle detection |
+
+### Frontend Tests (Vitest)
+
+```bash
+cd web/frontend
+npm test
+```
+
+Runs **70 tests** covering:
+
+| Test File | What It Tests |
+|-----------|--------------|
+| `themeData.test.js` | All 20 themes have required properties, getTheme/listThemes/applyThemeToDOM |
+
+### CI/CD
+
+Tests run automatically on push and PR via GitHub Actions (`.github/workflows/ci.yml`).
+
+---
+
 ## Troubleshooting
 
 ### "claude CLI not found"

@@ -27,7 +27,7 @@ Build, release, commit, and push the Claude Cockpit project in one shot.
 
 5. **Copy Tauri installer to releases**:
    ```
-   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_0.1.0_x64-setup.exe" /c/Code/claude-cockpit/releases/
+   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_0.2.0-alpha_x64-setup.exe" /c/Code/claude-cockpit/releases/
    ```
 
 6. **Stage, commit, and push**:
