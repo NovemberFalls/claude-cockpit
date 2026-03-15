@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "claude-cockpit"
 version = "0.2.0-alpha"
 description = "Multi-session Claude Code manager with tabs, containers, and token tracking"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
     "textual>=1.0.0",
@@ -21,6 +22,9 @@ web = [
     "itsdangerous>=2.2.0",
     "starlette>=0.41.0",
     "websockets>=13.0",
+    "pywinpty>=2.0.0",
+    "psutil>=5.9.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.scripts]

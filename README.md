@@ -23,6 +23,8 @@ It works by wrapping the `claude` CLI in a web-based terminal emulator (xterm.js
 
 ## Prerequisites
 
+> **Platform:** Claude Cockpit currently supports **Windows 10/11** only. Linux and macOS support is not yet available — contributions welcome!
+
 Before you start, make sure you have these installed:
 
 | Requirement | How to check | How to install |
@@ -87,13 +89,13 @@ Go to **http://localhost:5174** in your browser. You should see the cockpit inte
 
 ---
 
-## Using the Pre-Built Executables
+## Download
 
-If you don't want to set up a development environment, use one of the pre-built options.
+Pre-built executables are available on the [GitHub Releases](https://github.com/NovemberFalls/claude-cockpit/releases) page.
 
 ### Option A: Browser-Based (simplest)
 
-1. Download `claude-cockpit-browser.exe` from the `releases/` folder
+1. Download **`claude-cockpit-browser.exe`** from the latest release
 2. Double-click it
 3. Your browser will automatically open to **http://localhost:8420**
 4. That's it — the server and frontend are bundled together
@@ -104,7 +106,7 @@ To stop: close the terminal window that appeared, or press `Ctrl+C`.
 
 ### Option B: Desktop App (native window)
 
-1. Run `Claude Cockpit_0.1.0_x64-setup.exe` from the `releases/` folder
+1. Download **`Claude Cockpit_x64-setup.exe`** from the latest release
 2. Follow the installer prompts (installs to your user folder, no admin needed)
 3. Launch "Claude Cockpit" from your Start Menu or Desktop shortcut
 4. The app opens in its own native window — no browser needed
@@ -150,7 +152,7 @@ cd frontend
 npx tauri build
 ```
 
-Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_0.1.0_x64-setup.exe` (~42 MB)
+Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<version>_x64-setup.exe` (~42 MB)
 
 ---
 
@@ -378,6 +380,14 @@ PyInstaller executables are sometimes flagged by antivirus software. You may nee
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+---
+
 ## License
 
-Private project. All rights reserved.
+Claude Cockpit is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+Copyright (c) 2026 NovemberFalls
