@@ -117,6 +117,11 @@ export default function App() {
           if (res.ok) {
             const data = await res.json();
             if (!cancelled) {
+              // On remote hosts, redirect unauthenticated users to login
+              if (!data.authenticated && !["localhost", "127.0.0.1"].includes(location.hostname)) {
+                window.location.href = "/login";
+                return;
+              }
               setBackendReady(true);
               if (data.authenticated) setUser(data);
               if (data.mode) setAppMode(data.mode);
