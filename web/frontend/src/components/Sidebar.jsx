@@ -438,11 +438,8 @@ export default function Sidebar({
             <button
               onClick={() => {
                 const url = "https://registry.modelcontextprotocol.io/";
-                if (window.__TAURI__) {
-                  import("@tauri-apps/plugin-shell").then(({ open }) => open(url)).catch(() => window.open(url, "_blank"));
-                } else {
-                  window.open(url, "_blank");
-                }
+                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
+                  .catch(() => window.open(url, "_blank"));
               }}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
               style={{ color: "var(--text-secondary)" }}
@@ -490,11 +487,8 @@ export default function Sidebar({
             <button
               onClick={() => {
                 const url = "https://registry.modelcontextprotocol.io/";
-                if (window.__TAURI__) {
-                  import("@tauri-apps/plugin-shell").then(({ open }) => open(url)).catch(() => window.open(url, "_blank"));
-                } else {
-                  window.open(url, "_blank");
-                }
+                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
+                  .catch(() => window.open(url, "_blank"));
               }}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
               style={{ color: "var(--text-secondary)" }}

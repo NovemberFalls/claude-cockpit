@@ -499,6 +499,21 @@ async def tunnel_status():
     return JSONResponse(tunnel_client.status())
 
 
+@app.post("/api/open-url")
+async def open_url(request: Request):
+    """Open a URL in the system's default browser."""
+    body = await request.json()
+    url = body.get("url", "")
+    if not url.startswith("https://"):
+        return JSONResponse({"error": "Only HTTPS URLs allowed"}, 400)
+    try:
+        webbrowser.open(url)
+        return JSONResponse({"ok": True})
+    except Exception:
+        logger.exception("Failed to open URL: %s", url)
+        return JSONResponse({"error": "Failed to open URL"}, 500)
+
+
 # ── Static files ─────────────────────────────────────────
 
 
