@@ -1,4 +1,4 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, Pencil, CircleHelp, CircleCheck, CircleX, Loader, GitBranch, ShieldOff, Monitor, Key, Shield } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, Pencil, CircleHelp, CircleCheck, CircleX, Loader, GitBranch, ShieldOff, Monitor, Key, Shield, Puzzle } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
 const stateIconMap = {
@@ -427,6 +427,27 @@ export default function Sidebar({
         </>
       )}
 
+      {/* Local mode: resources footer */}
+      {!isRelay && (
+        <>
+          <div style={{ flex: 1 }} />
+          <div
+            className="border-t pt-3 mt-3"
+            style={{ borderColor: "var(--border-color)" }}
+          >
+            <button
+              onClick={() => window.open("https://registry.modelcontextprotocol.io/", "_blank")}
+              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
+              style={{ color: "var(--text-secondary)" }}
+              title="Browse MCP server registry"
+            >
+              <Puzzle size={12} />
+              MCP Servers
+            </button>
+          </div>
+        </>
+      )}
+
       {/* Relay mode: settings section */}
       {isRelay && (
         <>
@@ -459,6 +480,15 @@ export default function Sidebar({
                 Admin
               </button>
             )}
+            <button
+              onClick={() => window.open("https://registry.modelcontextprotocol.io/", "_blank")}
+              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
+              style={{ color: "var(--text-secondary)" }}
+              title="Browse MCP server registry"
+            >
+              <Puzzle size={12} />
+              MCP Servers
+            </button>
           </div>
         </>
       )}

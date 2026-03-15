@@ -7,24 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Roadmap
 
-### v0.3.0 — Cross-Platform & UX
+### v0.3.0 — Linux & UX
 - [ ] Linux PTY support (pty module + spawn)
-- [ ] macOS PTY support
 - [ ] Code splitting / lazy loading (bundle >500KB warning)
 - [ ] Session search / filter
 - [ ] Keyboard-driven session switching (Ctrl+Tab)
 - [ ] Zoom controls (Ctrl+/-, Ctrl+mousewheel)
 
-### v0.4.0 — Collaboration & Cloud
+### v0.4.0 — Public Relay & Abuse Prevention
+- [ ] cockpit.boord-its.com as public relay bridge (users run Cockpit locally, relay provides remote access URL)
+- [ ] Rate limiting per connection (bandwidth caps, WebSocket message rate)
+- [ ] Usage quotas & tiered access (free tier connection limits, approved tiers for heavier use)
+- [ ] Relay key approval workflow (request access → admin review → grant)
+- [ ] Abuse detection (connection flooding, idle tunnel hoarding, bandwidth abuse)
+- [ ] IP-based throttling & connection limits per IP
+- [ ] Idle tunnel timeout (reclaim relay slots from inactive connections)
+- [ ] Admin dashboard: active tunnels, bandwidth metrics, ban/suspend controls
 - [ ] Auto-update mechanism (Tauri updater plugin)
-- [ ] Shared relay with user management
-- [ ] Session sharing / spectator mode
 - [ ] Export session transcripts
 
 ### Future
 - [ ] Plugin system for custom session types
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
+- [ ] Session sharing / spectator mode
+- [ ] macOS PTY support (community contribution welcome)
 
 ## [0.2.0-alpha] - 2026-03-15
 
