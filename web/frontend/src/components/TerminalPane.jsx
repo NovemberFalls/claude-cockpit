@@ -58,6 +58,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
   isRelay = false, // true when running in relay mode (disables file drop)
+  terminalZoom = 13, // terminal font size (zoom level)
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -155,7 +156,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
-      fontSize: 13,
+      fontSize: terminalZoom,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace",
       lineHeight: 1.3,
       theme: buildXtermTheme(theme),
@@ -213,6 +214,14 @@ const TerminalPane = forwardRef(function TerminalPane({
       xtermRef.current.options.theme = buildXtermTheme(theme);
     }
   }, [theme]);
+
+  // Update font size when zoom changes
+  useEffect(() => {
+    if (xtermRef.current) {
+      xtermRef.current.options.fontSize = terminalZoom;
+      requestAnimationFrame(() => safeFit());
+    }
+  }, [terminalZoom, safeFit]);
 
   // Connect/reconnect when terminalId changes
   useEffect(() => {

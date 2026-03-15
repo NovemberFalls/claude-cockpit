@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Cloud } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Cloud, Plus, Minus } from "lucide-react";
 
 const layoutOptions = [
   { value: 1, icon: Square, label: "Single" },
@@ -26,6 +26,10 @@ export default function StatusBar({
   setBroadcastMode,
   cloudConnected,
   isRelay = false,
+  terminalZoom = 13,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
   const [showLegend, setShowLegend] = useState(false);
@@ -107,7 +111,7 @@ export default function StatusBar({
             ))}
             <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "8px 0" }} />
             <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-              Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast
+              Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
             </p>
           </div>
         )}
@@ -134,6 +138,42 @@ export default function StatusBar({
         >
           <Radio size={14} />
         </button>
+
+        {/* Zoom controls */}
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={onZoomOut}
+            title="Zoom out (Ctrl+-)"
+            className="p-1 rounded transition-colors hover-color-secondary"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Minus size={12} />
+          </button>
+          <button
+            onClick={onZoomReset}
+            title="Reset zoom (Ctrl+0)"
+            className="px-1 rounded transition-colors hover-color-secondary"
+            style={{
+              color: terminalZoom !== 13 ? "var(--accent)" : "var(--text-muted)",
+              fontSize: "10px",
+              fontWeight: 600,
+              minWidth: "28px",
+              textAlign: "center",
+            }}
+          >
+            {terminalZoom}px
+          </button>
+          <button
+            onClick={onZoomIn}
+            title="Zoom in (Ctrl+=)"
+            className="p-1 rounded transition-colors hover-color-secondary"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Plus size={12} />
+          </button>
+        </div>
+
+        <span style={{ width: 1, height: 14, backgroundColor: "var(--border-color)", opacity: 0.5 }} />
 
         {/* Layout switcher */}
         <div className="flex items-center gap-1">

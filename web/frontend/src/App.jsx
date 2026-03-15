@@ -51,6 +51,10 @@ function saveSessions(sessions) {
 }
 
 const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
+const ZOOM_KEY = "cockpit-terminal-zoom";
+const DEFAULT_ZOOM = 13;
+const MIN_ZOOM = 8;
+const MAX_ZOOM = 28;
 
 let nextLocalId = 1;
 
@@ -60,6 +64,14 @@ export default function App() {
     try { return parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 224; }
     catch { return 224; }
   });
+  const [terminalZoom, setTerminalZoom] = useState(() => {
+    try {
+      const saved = parseInt(localStorage.getItem(ZOOM_KEY));
+      return (saved >= MIN_ZOOM && saved <= MAX_ZOOM) ? saved : DEFAULT_ZOOM;
+    } catch { return DEFAULT_ZOOM; }
+  });
+  const [zoomToast, setZoomToast] = useState(null);
+  const zoomToastTimer = useRef(null);
   const [model, setModel] = useState("sonnet");
   const [layout, setLayout] = useState(1);
   const [user, setUser] = useState(null);
@@ -493,6 +505,36 @@ export default function App() {
     );
   }, [visibleSessions]);
 
+  const zoomIn = useCallback(() => {
+    setTerminalZoom((prev) => {
+      const next = Math.min(prev + 1, MAX_ZOOM);
+      try { localStorage.setItem(ZOOM_KEY, String(next)); } catch {}
+      clearTimeout(zoomToastTimer.current);
+      setZoomToast(next);
+      zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
+      return next;
+    });
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setTerminalZoom((prev) => {
+      const next = Math.max(prev - 1, MIN_ZOOM);
+      try { localStorage.setItem(ZOOM_KEY, String(next)); } catch {}
+      clearTimeout(zoomToastTimer.current);
+      setZoomToast(next);
+      zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
+      return next;
+    });
+  }, []);
+
+  const zoomReset = useCallback(() => {
+    setTerminalZoom(DEFAULT_ZOOM);
+    try { localStorage.setItem(ZOOM_KEY, String(DEFAULT_ZOOM)); } catch {}
+    clearTimeout(zoomToastTimer.current);
+    setZoomToast(DEFAULT_ZOOM);
+    zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
+  }, []);
+
   useEffect(() => {
     const handler = (e) => {
       if (e.ctrlKey && e.shiftKey && e.key === "N") {
@@ -526,10 +568,35 @@ export default function App() {
         e.preventDefault();
         setBroadcastMode((p) => !p);
       }
+      // Zoom: Ctrl+= / Ctrl+- / Ctrl+0
+      if (e.ctrlKey && !e.shiftKey && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        zoomIn();
+      }
+      if (e.ctrlKey && !e.shiftKey && e.key === "-") {
+        e.preventDefault();
+        zoomOut();
+      }
+      if (e.ctrlKey && !e.shiftKey && e.key === "0") {
+        e.preventDefault();
+        zoomReset();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, visibleSessions, isRelay]);
+  }, [createSession, visibleSessions, isRelay, zoomIn, zoomOut, zoomReset]);
+
+  // Ctrl+MouseWheel zoom
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      if (e.deltaY < 0) zoomIn();
+      else if (e.deltaY > 0) zoomOut();
+    };
+    window.addEventListener("wheel", handler, { passive: false });
+    return () => window.removeEventListener("wheel", handler);
+  }, [zoomIn, zoomOut]);
 
   const swapPanes = useCallback((fromIdx, toIdx) => {
     setActiveIds((prev) => {
@@ -754,6 +821,7 @@ export default function App() {
                     paneIndex={idx}
                     onSwap={layout > 1 ? swapPanes : undefined}
                     isRelay={isRelay}
+                    terminalZoom={terminalZoom}
                   />
                 </div>
               ))}
@@ -789,7 +857,36 @@ export default function App() {
             setBroadcastMode={setBroadcastMode}
             cloudConnected={cloudStatus.connected}
             isRelay={isRelay}
+            terminalZoom={terminalZoom}
+            onZoomIn={zoomIn}
+            onZoomOut={zoomOut}
+            onZoomReset={zoomReset}
           />
+
+          {/* Zoom toast */}
+          {zoomToast !== null && (
+            <div
+              style={{
+                position: "fixed",
+                bottom: 48,
+                left: "50%",
+                transform: "translateX(-50%)",
+                backgroundColor: "var(--bg-elevated)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-color)",
+                borderRadius: 6,
+                padding: "4px 14px",
+                fontSize: 13,
+                fontWeight: 600,
+                zIndex: 200,
+                pointerEvents: "none",
+                opacity: 0.95,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+              }}
+            >
+              {zoomToast}px
+            </div>
+          )}
         </div>
 
         {showNewDialog && (
