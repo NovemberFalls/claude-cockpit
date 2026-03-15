@@ -386,7 +386,9 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 
     async def pty_to_ws():
         """Read from PTY and forward to WebSocket."""
-        while session.alive and session.pty.isalive():
+        # Use session.alive (bool) instead of session.pty.isalive() (kernel call)
+        # in the loop condition. read_pty handles EOFError and sets alive=False.
+        while session.alive:
             try:
                 data = await pty_manager.read_pty(terminal_id)
                 if data:
@@ -394,6 +396,9 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                     await websocket.send_text(data)
                     # Forward to cloud relay if connected
                     tunnel_client.forward_pty_output(terminal_id, data)
+                    # Yield to event loop so the WS receive handler (user input)
+                    # gets a chance to run during heavy output bursts
+                    await asyncio.sleep(0)
                 else:
                     await asyncio.sleep(0.01)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
@@ -444,12 +449,12 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                             continue
                     except json.JSONDecodeError:
                         pass
-                # Regular terminal input
-                pty_manager.write_pty(terminal_id, text)
+                # Regular terminal input (async to avoid blocking event loop)
+                await pty_manager.write_pty_async(terminal_id, text)
 
             data = msg.get("bytes")
             if data:
-                pty_manager.write_pty(terminal_id, data.decode("utf-8", errors="replace"))
+                await pty_manager.write_pty_async(terminal_id, data.decode("utf-8", errors="replace"))
 
     except WebSocketDisconnect:
         pass

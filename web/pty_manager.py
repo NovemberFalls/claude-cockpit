@@ -381,7 +381,33 @@ class PtyManager:
             return ""
 
     def write_pty(self, terminal_id: str, data: str) -> bool:
-        """Write to PTY stdin."""
+        """Write to PTY stdin (synchronous)."""
+        session = self.sessions.get(terminal_id)
+        if not session or not session.pty.isalive():
+            return False
+        try:
+            session.pty.write(data)
+            return True
+        except Exception:
+            logger.debug("PTY write error for %s", terminal_id)
+            return False
+
+    async def write_pty_async(self, terminal_id: str, data: str) -> bool:
+        """Write to PTY stdin (non-blocking, runs in executor)."""
+        session = self.sessions.get(terminal_id)
+        if not session or not session.alive:
+            return False
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(
+                self._pty_executor, self._write_pty_sync, terminal_id, data
+            )
+        except Exception:
+            logger.debug("PTY async write error for %s", terminal_id)
+            return False
+
+    def _write_pty_sync(self, terminal_id: str, data: str) -> bool:
+        """Executor-safe PTY write (avoids isalive() kernel call on event loop)."""
         session = self.sessions.get(terminal_id)
         if not session or not session.pty.isalive():
             return False

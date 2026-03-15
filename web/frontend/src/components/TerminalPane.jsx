@@ -69,6 +69,8 @@ const TerminalPane = forwardRef(function TerminalPane({
   const resizeTimer = useRef(null);
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
+  const pendingDataRef = useRef("");  // Batched WS data for xterm
+  const writeRafRef = useRef(null);   // rAF handle for batched writes
   const { theme } = useTheme();
 
   // Expose focus() to parent via ref
@@ -119,8 +121,18 @@ const TerminalPane = forwardRef(function TerminalPane({
         try { ws.send('{"type":"pong"}'); } catch {}
         return;
       }
-      if (xtermRef.current) {
-        xtermRef.current.write(evt.data);
+      // Batch writes: accumulate data and flush once per animation frame.
+      // During heavy output, this reduces hundreds of xterm.write() calls
+      // per second down to ~60 (one per frame), preventing UI freezes.
+      pendingDataRef.current += evt.data;
+      if (!writeRafRef.current) {
+        writeRafRef.current = requestAnimationFrame(() => {
+          if (xtermRef.current && pendingDataRef.current) {
+            xtermRef.current.write(pendingDataRef.current);
+          }
+          pendingDataRef.current = "";
+          writeRafRef.current = null;
+        });
       }
     };
 
@@ -206,11 +218,14 @@ const TerminalPane = forwardRef(function TerminalPane({
     return () => {
       clearTimeout(resizeTimer.current);
       clearTimeout(reconnectTimer.current);
+      cancelAnimationFrame(writeRafRef.current);
       resizeObserver.current?.disconnect();
       wsRef.current?.close();
       term.dispose();
       xtermRef.current = null;
       fitRef.current = null;
+      pendingDataRef.current = "";
+      writeRafRef.current = null;
     };
   }, []); // Only run once on mount
 
