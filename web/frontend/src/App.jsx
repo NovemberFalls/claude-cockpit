@@ -891,6 +891,7 @@ export default function App() {
                     onSwap={layout > 1 ? swapPanes : undefined}
                     isRelay={isRelay}
                     terminalZoom={terminalZoom}
+                    toast={toast}
                   />
                 </div>
               ))}

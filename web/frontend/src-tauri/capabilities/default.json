@@ -6,6 +6,7 @@
     "core:default",
     "shell:allow-execute",
     "shell:allow-spawn",
+    "shell:allow-open",
     "updater:default",
     "process:allow-restart"
   ]

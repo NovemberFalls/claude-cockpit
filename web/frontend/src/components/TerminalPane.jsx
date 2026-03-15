@@ -59,6 +59,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onSwap,        // (fromIndex, toIndex) => void
   isRelay = false, // true when running in relay mode (disables file drop)
   terminalZoom = 13, // terminal font size (zoom level)
+  toast,           // (msg, type) => void — optional toast notification
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -263,15 +264,22 @@ const TerminalPane = forwardRef(function TerminalPane({
     try {
       const res = await fetch("/api/upload", { method: "POST", body: formData });
       const data = await res.json();
+      if (data.error) {
+        toast?.(`Upload failed: ${data.error}`, "error");
+        return;
+      }
       if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
         // Paste file paths into the terminal
         const pathStr = data.paths.join(" ");
         wsRef.current.send(pathStr);
+        toast?.(`Dropped ${data.paths.length} file${data.paths.length > 1 ? "s" : ""}`, "success");
+      } else if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        toast?.("Session not connected — cannot drop files", "error");
       }
-    } catch {
-      // Silently fail
+    } catch (err) {
+      toast?.(`Upload failed: ${err.message}`, "error");
     }
-  }, []);
+  }, [toast]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();

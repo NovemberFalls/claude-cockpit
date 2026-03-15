@@ -436,7 +436,14 @@ export default function Sidebar({
             style={{ borderColor: "var(--border-color)" }}
           >
             <button
-              onClick={() => window.open("https://registry.modelcontextprotocol.io/", "_blank")}
+              onClick={() => {
+                const url = "https://registry.modelcontextprotocol.io/";
+                if (window.__TAURI__) {
+                  import("@tauri-apps/plugin-shell").then(({ open }) => open(url)).catch(() => window.open(url, "_blank"));
+                } else {
+                  window.open(url, "_blank");
+                }
+              }}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
               style={{ color: "var(--text-secondary)" }}
               title="Browse MCP server registry"
@@ -481,7 +488,14 @@ export default function Sidebar({
               </button>
             )}
             <button
-              onClick={() => window.open("https://registry.modelcontextprotocol.io/", "_blank")}
+              onClick={() => {
+                const url = "https://registry.modelcontextprotocol.io/";
+                if (window.__TAURI__) {
+                  import("@tauri-apps/plugin-shell").then(({ open }) => open(url)).catch(() => window.open(url, "_blank"));
+                } else {
+                  window.open(url, "_blank");
+                }
+              }}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
               style={{ color: "var(--text-secondary)" }}
               title="Browse MCP server registry"
