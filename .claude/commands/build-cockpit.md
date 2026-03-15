@@ -24,23 +24,27 @@ Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) and brow
    ```
    cp /c/Code/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
    ```
+   **CRITICAL:** Always copy the FRESH PyInstaller exe here BEFORE building Tauri, or the desktop app will bundle a stale server.
 
-5. **Build Tauri app** (requires `TAURI_SIGNING_PRIVATE_KEY` env var for auto-update signing):
+5. **Build Tauri app** (requires signing env vars for auto-update):
    ```
+   export TAURI_SIGNING_PRIVATE_KEY="$(cat C:/Code/.tauri/claude-cockpit.key)"
+   export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<password>"
    cd /c/Code/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
-6. **Copy installer, updater zip, and manifest to local releases** (gitignored):
+6. **Copy installer and updater zip to local releases** (gitignored):
    ```
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/claude-cockpit/releases/
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/claude-cockpit/releases/
-   cp /c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/latest.json /c/Code/claude-cockpit/releases/
    ```
+   Note: Tauri does NOT generate `latest.json`. That's handled by `/push-cockpit` when uploading to GitHub Releases.
 
 7. **Notify user** — "Build complete. Artifacts ready at `C:\Code\claude-cockpit\releases\`."
 
 ## Important
 
+- **Build order matters:** Frontend → PyInstaller → copy sidecar → Tauri. Skipping the sidecar copy = broken desktop app.
 - The full build takes a few minutes (Rust compilation is the slowest part).
 - If the Vite build fails, fix errors before proceeding.
 - If PyInstaller fails, ensure `pywinpty` and other dependencies are installed.

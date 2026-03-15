@@ -49,7 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checks for updates on startup via GitHub Releases (latest.json)
 - In-app toast notification with "Install & Restart" button
 - Signing keypair generated, builds produce signed update bundles
-- MCP Servers button in sidebar links to official registry
+
+### UI
+- MCP Servers button in sidebar (both local and relay mode) links to official registry
+- Disabled Tauri drag-drop interception so web file drop works in desktop app
 
 ### Added (Stability Sprint — 2026-03-14)
 

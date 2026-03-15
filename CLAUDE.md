@@ -88,8 +88,16 @@ cd web/frontend && npm run lint
 
 ## Build & Release
 
+- **Build order matters:** Frontend → PyInstaller → copy sidecar to `src-tauri/binaries/` → Tauri. A stale sidecar = broken desktop app.
 - Release artifacts (exe files) are NOT committed to git — they are distributed via GitHub Releases.
 - Use `/push-cockpit` to build, commit source, push, and upload to GitHub Releases.
 - Use `/build-cockpit` for local builds only.
 - Tauri targets NSIS only (MSI doesn't support alpha pre-release identifiers).
-- **Auto-update:** Desktop app checks GitHub Releases for `latest.json` on startup. Builds must be signed with `TAURI_SIGNING_PRIVATE_KEY` env var (key at `C:\Code\.tauri\claude-cockpit.key`). The push-cockpit skill uploads `latest.json` alongside installers.
+- **Auto-update:** Desktop app checks GitHub Releases for `latest.json` on startup. Tauri does NOT auto-generate `latest.json` — the push skill builds it from the `.nsis.zip.sig` file. Builds must be signed with `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env vars. Signing key at `C:\Code\.tauri\claude-cockpit.key`.
+- **Tauri webview:** `dragDropEnabled: false` in tauri.conf.json so the web-native file drop handler works in the desktop app.
+
+## Community Management
+
+- **Weekly cadence:** Run `/triage-issues` and `/audit-repo` roughly once a week to review PRs, issues, and repo health.
+- **PR review:** Always run `/review-pr {number}` before merging any contribution.
+- **User context:** The project owner is new to open-source. When presenting PR/issue summaries, explain in plain English what the contributor wants to change and what risks it poses. Avoid git jargon.
