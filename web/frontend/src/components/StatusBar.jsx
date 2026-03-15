@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Cloud, Plus, Minus } from "lucide-react";
+import { version } from "../../package.json";
 
 const layoutOptions = [
   { value: 1, icon: Square, label: "Single" },
@@ -75,6 +76,8 @@ export default function StatusBar({
             Cloud
           </span>
         )}
+
+        <span style={{ opacity: 0.5 }}>v{version}</span>
       </div>
 
       <div className="flex items-center gap-2" style={{ position: "relative" }}>
