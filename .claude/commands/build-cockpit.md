@@ -25,14 +25,16 @@ Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) and brow
    cp /c/Code/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
    ```
 
-5. **Build Tauri app**:
+5. **Build Tauri app** (requires `TAURI_SIGNING_PRIVATE_KEY` env var for auto-update signing):
    ```
    cd /c/Code/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
-6. **Copy installer to local releases** (gitignored):
+6. **Copy installer, updater zip, and manifest to local releases** (gitignored):
    ```
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/claude-cockpit/releases/
+   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/claude-cockpit/releases/
+   cp /c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/latest.json /c/Code/claude-cockpit/releases/
    ```
 
 7. **Notify user** — "Build complete. Artifacts ready at `C:\Code\claude-cockpit\releases\`."

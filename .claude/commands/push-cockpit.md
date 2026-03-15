@@ -26,9 +26,11 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
    cd /c/Code/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
-5. **Copy Tauri installer to local releases** (gitignored):
+5. **Copy Tauri installer and updater manifest to local releases** (gitignored):
    ```
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/claude-cockpit/releases/
+   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/claude-cockpit/releases/
+   cp /c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/latest.json /c/Code/claude-cockpit/releases/
    ```
 
 6. **Stage, commit, and push source changes only**:
@@ -42,7 +44,7 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
    - Delete existing release for this version if it exists: `gh release delete v{version} --yes 2>/dev/null`
    - Create a new GitHub Release and upload both artifacts:
      ```
-     gh release create v{version} --title "v{version}" --generate-notes releases/claude-cockpit-browser.exe "releases/Claude Cockpit_{version}_x64-setup.exe"
+     gh release create v{version} --title "v{version}" --generate-notes releases/claude-cockpit-browser.exe "releases/Claude Cockpit_{version}_x64-setup.exe" "releases/Claude Cockpit_{version}_x64-setup.nsis.zip" releases/latest.json
      ```
 
 8. **Report** — List release artifacts with file sizes:

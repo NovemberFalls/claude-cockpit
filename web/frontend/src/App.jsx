@@ -100,6 +100,40 @@ export default function App() {
 
   const isRelay = appMode === "relay";
 
+  // Auto-update check (Tauri desktop only)
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        const update = await check();
+        if (cancelled || !update) return;
+        toast(
+          `Update available: v${update.version}`,
+          "info",
+          0, // persistent until dismissed
+          {
+            label: "Install & Restart",
+            onClick: async () => {
+              try {
+                toast("Downloading update...", "info", 0);
+                await update.downloadAndInstall();
+                const { relaunch } = await import("@tauri-apps/plugin-process");
+                await relaunch();
+              } catch (err) {
+                toast(`Update failed: ${err.message}`, "error");
+              }
+            },
+          }
+        );
+      } catch {
+        // Silently ignore update check failures (offline, no pubkey yet, etc.)
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Mode context value
   const modeCtx = useMemo(() => ({
     mode: appMode,
