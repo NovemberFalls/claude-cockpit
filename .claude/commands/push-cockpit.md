@@ -26,12 +26,16 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
    cd /c/Code/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
-5. **Copy Tauri installer and updater manifest to local releases** (gitignored):
+5. **Copy Tauri installer to local releases and generate latest.json** (gitignored):
    ```
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/claude-cockpit/releases/
    cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/claude-cockpit/releases/
-   cp /c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/latest.json /c/Code/claude-cockpit/releases/
    ```
+   Then generate `latest.json` from the `.sig` file (Tauri does NOT auto-generate this):
+   - Read the signature from the `.nsis.zip.sig` file
+   - Read the version from `pyproject.toml`
+   - Build `latest.json` with: version, notes (brief changelog), pub_date (UTC ISO), platforms.windows-x86_64.signature, platforms.windows-x86_64.url pointing to the GitHub Release download URL
+   - Write to `releases/latest.json`
 
 6. **Stage, commit, and push source changes only**:
    - Stage changed source files (NOT release artifacts — they are gitignored)
@@ -57,6 +61,7 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
 - The full build takes several minutes (Rust compilation is the slowest part).
 - If Vite build fails, fix errors before proceeding — everything else depends on the frontend dist.
 - If PyInstaller fails, check that `pywinpty` and dependencies are installed.
-- The Tauri build requires the sidecar exe to exist at the exact target-triple path.
+- The Tauri build requires the sidecar exe to exist at the exact target-triple path. **Always copy the fresh PyInstaller exe to the sidecar location BEFORE building Tauri** (step 4) or the desktop app will bundle a stale server.
+- The signing env vars must be set: `TAURI_SIGNING_PRIVATE_KEY` (from `C:/Code/.tauri/claude-cockpit.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - Release artifacts are distributed via GitHub Releases — NOT committed to git.
 - The `releases/` directory is gitignored. Artifacts live there locally only.
