@@ -2,6 +2,9 @@
   "identifier": "default",
   "description": "Default capabilities for Claude Cockpit",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:8420/*"]
+  },
   "permissions": [
     "core:default",
     "shell:allow-execute",

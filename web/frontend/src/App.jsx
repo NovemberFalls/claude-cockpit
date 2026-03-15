@@ -133,8 +133,8 @@ export default function App() {
             },
           }
         );
-      } catch {
-        // Silently ignore update check failures (offline, no pubkey yet, etc.)
+      } catch (err) {
+        console.error("[updater] check failed:", err);
       }
     })();
     return () => { cancelled = true; };
