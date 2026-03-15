@@ -92,3 +92,4 @@ cd web/frontend && npm run lint
 - Use `/push-cockpit` to build, commit source, push, and upload to GitHub Releases.
 - Use `/build-cockpit` for local builds only.
 - Tauri targets NSIS only (MSI doesn't support alpha pre-release identifiers).
+- **Auto-update:** Desktop app checks GitHub Releases for `latest.json` on startup. Builds must be signed with `TAURI_SIGNING_PRIVATE_KEY` env var (key at `C:\Code\.tauri\claude-cockpit.key`). The push-cockpit skill uploads `latest.json` alongside installers.

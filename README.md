@@ -113,6 +113,8 @@ To stop: close the terminal window that appeared, or press `Ctrl+C`.
 
 The desktop app bundles the server internally and starts it automatically.
 
+> **Auto-Update:** The desktop app checks for updates on startup. When a new version is available, you'll see a notification with an **Install & Restart** button — one click to update.
+
 ---
 
 ## Building the Executables Yourself
