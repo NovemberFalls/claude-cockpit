@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time as _time
 import uuid
 import webbrowser
 from pathlib import Path
@@ -21,11 +24,21 @@ from starlette.requests import Request
 
 load_dotenv()
 
+import logging_config
+logging_config.setup()
+logger = logging.getLogger("cockpit.server")
+
 from auth import SECRET_KEY, oauth, user_store
 from pty_manager import pty_manager
 from tunnel import TunnelClient
 
-app = FastAPI(title="Claude Cockpit Web")
+START_TIME = _time.time()
+
+app = FastAPI(
+    title="Claude Cockpit Web",
+    description="Multi-session Claude CLI terminal manager",
+    version="0.2.0-alpha",
+)
 
 # CORS: allow Tauri webview origins + Vite dev server
 app.add_middleware(
@@ -36,8 +49,8 @@ app.add_middleware(
         "http://localhost:5174",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
@@ -56,6 +69,10 @@ else:
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
+
+# PID file for crash detection
+PID_FILE = Path(__file__).parent / ".cockpit.pid"
 
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
@@ -66,6 +83,19 @@ ALLOWED_EXTENSIONS = {
     ".ini", ".cfg", ".env", ".lua", ".kt", ".swift", ".r",
     ".pdf",
 }
+
+
+# ── Health Check ──────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint for monitoring."""
+    return JSONResponse({
+        "status": "ok",
+        "sessions": len(pty_manager.sessions),
+        "uptime_seconds": int(_time.time() - START_TIME),
+    })
 
 
 # ── Auth Routes ──────────────────────────────────────────
@@ -145,6 +175,13 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
 
         # Read with size check
         content = await upload.read()
+
+        # Check total upload directory size
+        current_size = sum(f.stat().st_size for f in UPLOAD_DIR.iterdir() if f.is_file())
+        if current_size + len(content) > MAX_UPLOAD_DIR_SIZE:
+            errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
+            continue
+
         if len(content) > MAX_FILE_SIZE:
             errors.append(f"Rejected '{upload.filename}': exceeds 50MB limit")
             continue
@@ -245,6 +282,7 @@ async def git_status(path: str):
             "files_changed": len(lines),
         })
     except Exception:
+        logger.debug("Git status failed for %s", path, exc_info=True)
         return JSONResponse({"git": False})
 
 
@@ -360,7 +398,8 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                     await asyncio.sleep(0.01)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
                 break
-            except Exception:
+            except Exception as e:
+                logger.debug("PTY->WS forward error: %s", e)
                 await asyncio.sleep(0.05)
 
         # PTY died -- notify client
@@ -369,7 +408,17 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         except Exception:
             pass
 
+    async def heartbeat():
+        """Send periodic ping to detect stale connections."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await websocket.send_text('{"type":"ping"}')
+            except Exception:
+                break
+
     reader_task = asyncio.create_task(pty_to_ws())
+    heartbeat_task = asyncio.create_task(heartbeat())
 
     try:
         while True:
@@ -380,7 +429,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 
             text = msg.get("text")
             if text:
-                # Check for JSON control messages (resize)
+                # Check for JSON control messages (resize, pong)
                 if text.startswith("{"):
                     try:
                         ctrl = json.loads(text)
@@ -390,6 +439,8 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                                 ctrl.get("cols", 120),
                                 ctrl.get("rows", 30),
                             )
+                            continue
+                        if ctrl.get("type") == "pong":
                             continue
                     except json.JSONDecodeError:
                         pass
@@ -403,11 +454,16 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        logger.warning("WS handler error for terminal %s", terminal_id, exc_info=True)
     finally:
         reader_task.cancel()
+        heartbeat_task.cancel()
         try:
             await reader_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await heartbeat_task
         except asyncio.CancelledError:
             pass
 
@@ -478,7 +534,24 @@ async def static_files(path: str):
 
 @app.on_event("startup")
 async def startup_event():
-    """Auto-connect to cloud relay if previously configured."""
+    """Clean up orphans, write PID file, auto-connect tunnel, start idle cleanup."""
+    # 1. Clean up orphaned processes from previous crashes
+    pty_manager.cleanup_orphans()
+
+    # 2. PID file for crash detection
+    try:
+        import psutil
+        if PID_FILE.exists():
+            old_pid = int(PID_FILE.read_text().strip())
+            if psutil.pid_exists(old_pid):
+                logger.warning("Another cockpit instance may be running (PID %d)", old_pid)
+            else:
+                logger.info("Previous instance (PID %d) crashed — cleaned up", old_pid)
+    except Exception:
+        pass
+    PID_FILE.write_text(str(os.getpid()))
+
+    # 3. Auto-connect to cloud relay if previously configured
     settings = TunnelClient.load_settings()
     if settings and settings.get("auto_connect"):
         relay_url = settings.get("relay_url", "")
@@ -486,11 +559,27 @@ async def startup_event():
         if relay_url and api_key:
             await tunnel_client.connect(relay_url, api_key)
 
+    # 4. Start idle session cleanup loop
+    async def idle_cleanup_loop():
+        while True:
+            await asyncio.sleep(60)
+            pty_manager.cleanup_idle_sessions()
+    asyncio.create_task(idle_cleanup_loop())
+
+    logger.info("Startup complete (PID %d)", os.getpid())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    """Graceful shutdown: disconnect tunnel, kill sessions, clean up."""
+    logger.info("Shutdown: disconnecting tunnel...")
     await tunnel_client.disconnect()
+    logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
+    logger.info("Shutdown: cleaning upload dir...")
+    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    PID_FILE.unlink(missing_ok=True)
+    logger.info("Shutdown complete")
 
 
 def main():
@@ -498,7 +587,7 @@ def main():
     port = int(os.getenv("PORT", "8420"))
     host = os.getenv("HOST", "0.0.0.0")
     url = f"http://localhost:{port}"
-    print(f"\n  Claude Cockpit -> {url}\n")
+    logger.info("Claude Cockpit -> %s", url)
     # Auto-open browser unless suppressed
     if os.getenv("NO_BROWSER", "").lower() not in ("1", "true", "yes"):
         import threading

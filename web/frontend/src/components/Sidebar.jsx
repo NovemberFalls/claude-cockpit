@@ -400,6 +400,16 @@ export default function Sidebar({
         </>
       )}
 
+      {/* Empty state */}
+      {!isRelay && tree.length === 0 && sessions.length === 0 && (
+        <p
+          className="text-xs text-center py-8 px-3"
+          style={{ color: "var(--text-muted)" }}
+        >
+          No active sessions
+        </p>
+      )}
+
       {/* Location tree */}
       {!isRelay && tree.length > 0 && (
         <>

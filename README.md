@@ -261,6 +261,40 @@ claude-cockpit/
 
 ---
 
+## Deployment
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SECRET_KEY` | `change-me-in-production` | Session cookie encryption key. **Must change for production.** |
+| `GOOGLE_CLIENT_ID` | _(empty)_ | Google OAuth client ID (required for auth) |
+| `GOOGLE_CLIENT_SECRET` | _(empty)_ | Google OAuth client secret |
+| `ALLOWED_EMAILS` | _(empty)_ | Comma-separated emails/domains (empty = allow all) |
+| `HOST` | `0.0.0.0` | Bind address |
+| `PORT` | `8420` | Server port |
+| `MAX_SESSIONS` | `8` | Maximum concurrent terminal sessions |
+| `IDLE_TIMEOUT` | `7200` | Kill idle sessions after N seconds (0 = disabled) |
+| `NO_BROWSER` | `0` | Set to `1` to suppress auto-opening browser |
+
+### Running with Watchdog
+
+For production, use the watchdog which auto-restarts on crash:
+
+```bash
+cd web
+python watchdog.py
+```
+
+### Security Checklist
+
+- [ ] Set a strong `SECRET_KEY` (e.g., `openssl rand -hex 32`)
+- [ ] Configure `ALLOWED_EMAILS` to restrict access
+- [ ] Use HTTPS via reverse proxy (nginx/Caddy)
+- [ ] Set `NO_BROWSER=1` on headless servers
+
+---
+
 ## Troubleshooting
 
 ### "claude CLI not found"

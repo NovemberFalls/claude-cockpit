@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Loader } from "lucide-react";
 import HexGrid from "./components/HexGrid";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
@@ -8,6 +9,7 @@ import NewSessionDialog from "./components/NewSessionDialog";
 import CloudSettingsDialog from "./components/CloudSettingsDialog";
 import ApiKeysPanel from "./components/ApiKeysPanel";
 import AdminPanel from "./components/AdminPanel";
+import { useToast, ToastContainer } from "./components/Toast";
 import { ModeProvider } from "./hooks/useMode";
 
 const LOCATIONS_KEY = "cockpit-locations";
@@ -59,6 +61,7 @@ const MAX_ZOOM = 28;
 let nextLocalId = 1;
 
 export default function App() {
+  const { toasts, toast, dismiss: dismissToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     try { return parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 224; }
@@ -221,6 +224,7 @@ export default function App() {
       const data = await res.json();
 
       if (data.error) {
+        toast(data.error, "error");
         setSessions((prev) =>
           prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
         );
@@ -233,17 +237,18 @@ export default function App() {
         )
       );
     } catch (err) {
+      toast("Failed to create session", "error");
       setSessions((prev) =>
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, layout, addLocations, isRelay]);
+  }, [model, layout, addLocations, isRelay, toast]);
 
   // Remove a session (kills terminal on both local and relay)
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
     if (session?.terminalId) {
-      fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" }).catch(() => {});
+      fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" }).catch(() => toast("Failed to kill session on server", "error"));
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.filter((id) => id !== localId));
@@ -271,14 +276,38 @@ export default function App() {
   }, [sessions, isRelay]);
 
   // Restore saved sessions once backend is ready (local mode only)
+  // Reconciles with backend: if backend has no terminals, saved sessions are stale (crash recovery)
   const restoredRef = useRef(false);
   useEffect(() => {
     if (!backendReady || restoredRef.current || isRelay) return;
     restoredRef.current = true;
-    const saved = loadSavedSessions();
-    for (const s of saved) {
-      createSession(s.name, s.workdir, s.model);
-    }
+
+    (async () => {
+      const saved = loadSavedSessions();
+      if (!saved.length) return;
+
+      // Check what the backend actually has
+      try {
+        const res = await fetch("/api/terminals");
+        const data = await res.json();
+        const backendTerminals = data.terminals || [];
+
+        if (backendTerminals.length === 0) {
+          // Backend restarted — old sessions are gone. Clear stale data.
+          console.log("[cockpit] Backend has no terminals — clearing stale saved sessions");
+          localStorage.removeItem(SESSIONS_KEY);
+          return;
+        }
+      } catch {
+        // Backend unreachable — don't restore, don't clear
+        return;
+      }
+
+      // Backend has terminals — restore saved sessions
+      for (const s of saved) {
+        createSession(s.name, s.workdir, s.model);
+      }
+    })();
   }, [backendReady, createSession, isRelay]);
 
   // Request notification permission
@@ -673,6 +702,7 @@ export default function App() {
               </>
             ) : (
               <>
+                <Loader size={24} className="state-icon-spin" style={{ color: "var(--accent)", margin: "0 auto 12px" }} />
                 <p className="text-lg mb-2" style={{ color: "var(--text-primary)" }}>
                   Connecting...
                 </p>
@@ -944,6 +974,8 @@ export default function App() {
         {showAdmin && isRelay && user?.is_admin && (
           <AdminPanel onClose={() => setShowAdmin(false)} />
         )}
+
+        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </div>
     </ModeProvider>
   );

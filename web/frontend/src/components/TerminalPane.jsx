@@ -113,6 +113,11 @@ const TerminalPane = forwardRef(function TerminalPane({
     };
 
     ws.onmessage = (evt) => {
+      // Handle heartbeat pings from server
+      if (evt.data && evt.data.startsWith('{"type":"ping"}')) {
+        try { ws.send('{"type":"pong"}'); } catch {}
+        return;
+      }
       if (xtermRef.current) {
         xtermRef.current.write(evt.data);
       }

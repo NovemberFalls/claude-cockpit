@@ -13,6 +13,16 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
+if SECRET_KEY == "change-me-in-production":
+    import warnings
+    host = os.getenv("HOST", "0.0.0.0")
+    if host not in ("127.0.0.1", "localhost"):
+        warnings.warn(
+            "SECRET_KEY is set to the insecure default. "
+            "Set SECRET_KEY environment variable for production use.",
+            stacklevel=1,
+        )
+
 # Allowed email domains/addresses (empty = allow all authenticated users)
 ALLOWED_EMAILS: list[str] = [
     e.strip()

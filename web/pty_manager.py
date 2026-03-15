@@ -7,6 +7,7 @@ and bridges them to WebSocket connections.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -15,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+logger = logging.getLogger("cockpit.pty")
 
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
@@ -109,12 +112,60 @@ class TerminalSession:
     tracker: SessionStateTracker = field(default_factory=SessionStateTracker)
 
 
+MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
+IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", str(2 * 3600)))  # 2 hours default
+
+
 class PtyManager:
     """Manages PTY-backed terminal sessions."""
 
     def __init__(self):
         self.sessions: dict[str, TerminalSession] = {}
         self._pty_executor = ThreadPoolExecutor(max_workers=64)
+
+    def cleanup_orphans(self):
+        """Kill orphaned claude.exe processes from previous crashed instances."""
+        try:
+            import psutil
+        except ImportError:
+            logger.warning("psutil not installed — skipping orphan cleanup")
+            return
+
+        current_pid = os.getpid()
+        killed = 0
+        for proc in psutil.process_iter(["pid", "name", "ppid"]):
+            try:
+                if proc.info["name"] and "claude" in proc.info["name"].lower():
+                    # Don't kill our own children or the user's manual Claude instances
+                    parent_pid = proc.info["ppid"]
+                    if parent_pid == current_pid:
+                        continue
+                    # Check if parent is alive — if not, it's an orphan
+                    if not psutil.pid_exists(parent_pid):
+                        logger.info("Killing orphaned process: %s (PID %d, parent %d dead)",
+                                    proc.info["name"], proc.info["pid"], parent_pid)
+                        proc.kill()
+                        killed += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if killed:
+            logger.info("Cleaned up %d orphaned process(es)", killed)
+        else:
+            logger.debug("No orphaned processes found")
+
+    def cleanup_idle_sessions(self):
+        """Kill sessions that have been idle longer than IDLE_TIMEOUT."""
+        if IDLE_TIMEOUT <= 0:
+            return
+        now = time.time()
+        to_kill = []
+        for tid, session in self.sessions.items():
+            elapsed = now - session.tracker.last_output_time
+            if elapsed > IDLE_TIMEOUT and session.tracker.state == "idle":
+                to_kill.append(tid)
+        for tid in to_kill:
+            logger.info("Killing idle session %s (idle %.0fs)", tid, now - self.sessions[tid].tracker.last_output_time)
+            self.kill_terminal(tid)
 
     def create_terminal(
         self,
@@ -128,6 +179,8 @@ class PtyManager:
         rows: int = 30,
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY."""
+        if len(self.sessions) >= MAX_SESSIONS:
+            raise RuntimeError(f"Maximum session limit ({MAX_SESSIONS}) reached")
         terminal_id = uuid.uuid4().hex[:8]
         if not name:
             name = f"Session {len(self.sessions) + 1}"
@@ -193,19 +246,19 @@ class PtyManager:
             cmd += " --dangerously-skip-permissions"
 
         claude_path = shutil.which("claude", path=current_path)
-        print(f"[pty] Spawning: {cmd}", file=_sys.stderr)
-        print(f"[pty] Claude found at: {claude_path}", file=_sys.stderr)
-        print(f"[pty] CWD: {workdir}", file=_sys.stderr)
-        print(f"[pty] Bundled: {bool(meipass)}", file=_sys.stderr)
+        logger.info("Spawning: %s", cmd)
+        logger.info("Claude found at: %s", claude_path)
+        logger.info("CWD: %s", workdir)
+        logger.debug("Bundled: %s", bool(meipass))
         if bypass_permissions:
-            print("[pty] Permissions: BYPASSED", file=_sys.stderr)
+            logger.warning("Permissions: BYPASSED")
 
         # Inside PyInstaller bundles, pywinpty's C extension causes child
         # processes to fail with 0xC0000142. Use our pure-ctypes ConPTY
         # wrapper instead, which calls the Windows API directly.
         if meipass:
             from conpty import PtyProcess as ConPtyProcess
-            print("[pty] Using ctypes ConPTY (PyInstaller mode)", file=_sys.stderr)
+            logger.info("Using ctypes ConPTY (PyInstaller mode)")
             pty_process = ConPtyProcess.spawn(
                 cmd,
                 dimensions=(rows, cols),
@@ -223,14 +276,14 @@ class PtyManager:
 
         # Post-spawn health check (Claude CLI needs time to initialize Node.js)
         time.sleep(1.5)
-        print(f"[pty] Post-spawn alive: {pty_process.isalive()}", file=_sys.stderr)
+        logger.info("Post-spawn alive: %s", pty_process.isalive())
         if not pty_process.isalive():
             try:
                 out = pty_process.read(4096)
-                print(f"[pty] Dying output: {repr(out[:500])}", file=_sys.stderr)
+                logger.error("Dying output: %s", repr(out[:500]))
             except Exception as e:
-                print(f"[pty] Read error: {e}", file=_sys.stderr)
-            print(f"[pty] Exit status: {pty_process.exitstatus}", file=_sys.stderr)
+                logger.error("Read error on dying process: %s", e)
+            logger.error("Exit status: %s", pty_process.exitstatus)
 
         session = TerminalSession(
             id=terminal_id,
@@ -256,7 +309,7 @@ class PtyManager:
             if session.pty.isalive():
                 session.pty.terminate(force=True)
         except Exception:
-            pass
+            logger.warning("Failed to terminate PTY %s", terminal_id, exc_info=True)
         session.alive = False
         return True
 
@@ -271,6 +324,7 @@ class PtyManager:
             session.rows = rows
             return True
         except Exception:
+            logger.debug("Resize failed for %s", terminal_id, exc_info=True)
             return False
 
     def list_terminals(self) -> list[dict]:
@@ -323,6 +377,7 @@ class PtyManager:
             session.alive = False
             return ""
         except Exception:
+            logger.debug("PTY read error for %s", terminal_id)
             return ""
 
     def write_pty(self, terminal_id: str, data: str) -> bool:
@@ -334,13 +389,18 @@ class PtyManager:
             session.pty.write(data)
             return True
         except Exception:
+            logger.debug("PTY write error for %s", terminal_id)
             return False
 
     def shutdown(self):
         """Kill all sessions and clean up resources."""
+        count = len(self.sessions)
+        if count:
+            logger.info("Shutting down %d session(s)...", count)
         for tid in list(self.sessions.keys()):
             self.kill_terminal(tid)
-        self._pty_executor.shutdown(wait=False)
+        self._pty_executor.shutdown(wait=True, cancel_futures=True)
+        logger.info("PTY manager shutdown complete")
 
 
 # Singleton

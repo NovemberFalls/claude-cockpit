@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { Key, Plus, Trash2, Copy, Eye, EyeOff, X } from "lucide-react";
+import ConfirmDialog from "./ConfirmDialog";
 
 export default function ApiKeysPanel({ onClose }) {
   const [keys, setKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
   const [showCreated, setShowCreated] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -196,7 +198,7 @@ export default function ApiKeysPanel({ onClose }) {
                   {k.enabled ? <Eye size={12} /> : <EyeOff size={12} />}
                 </button>
                 <button
-                  onClick={() => deleteKey(k.id)}
+                  onClick={() => setConfirmDelete(k.id)}
                   className="p-1 rounded"
                   style={{ color: "var(--text-muted)" }}
                   title="Delete key"
@@ -213,6 +215,19 @@ export default function ApiKeysPanel({ onClose }) {
           </div>
         </div>
       </div>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete API Key"
+          message="This key will be permanently revoked. Any clients using it will lose access."
+          confirmLabel="Delete"
+          onConfirm={() => {
+            deleteKey(confirmDelete);
+            setConfirmDelete(null);
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </>
   );
 }
