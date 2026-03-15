@@ -18,7 +18,13 @@ const SESSIONS_KEY = "cockpit-sessions";
 
 function loadSavedLocations() {
   try {
-    return JSON.parse(localStorage.getItem(LOCATIONS_KEY) || "[]");
+    const raw = JSON.parse(localStorage.getItem(LOCATIONS_KEY) || "[]");
+    // Migration: convert legacy string[] to object[]
+    return raw.map((item) =>
+      typeof item === "string"
+        ? { path: item, bypassPermissions: false }
+        : item
+    );
   } catch { return []; }
 }
 
@@ -178,12 +184,16 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Add locations to the curated list (deduped, no cap)
+  // Add locations to the curated list (deduped by path, no cap)
   const addLocations = useCallback((dirs) => {
     setSavedLocations((prev) => {
-      const set = new Set(prev);
-      dirs.forEach((d) => { if (d) set.add(d); });
-      const next = [...set];
+      const byPath = new Map(prev.map((loc) => [loc.path, loc]));
+      dirs.forEach((d) => {
+        if (d && !byPath.has(d)) {
+          byPath.set(d, { path: d, bypassPermissions: false });
+        }
+      });
+      const next = [...byPath.values()];
       saveSavedLocations(next);
       return next;
     });
@@ -192,11 +202,27 @@ export default function App() {
   // Remove a single location from the curated list
   const removeLocation = useCallback((dir) => {
     setSavedLocations((prev) => {
-      const next = prev.filter((l) => l !== dir);
+      const next = prev.filter((l) => l.path !== dir);
       saveSavedLocations(next);
       return next;
     });
   }, []);
+
+  // Toggle bypass permissions for a saved location
+  const toggleLocationBypass = useCallback((dir) => {
+    setSavedLocations((prev) => {
+      const next = prev.map((l) =>
+        l.path === dir ? { ...l, bypassPermissions: !l.bypassPermissions } : l
+      );
+      saveSavedLocations(next);
+      return next;
+    });
+  }, []);
+
+  // Check if a location has bypass enabled
+  const getLocationBypass = useCallback((dir) => {
+    return savedLocations.find((l) => l.path === dir)?.bypassPermissions || false;
+  }, [savedLocations]);
 
   // Create a new terminal session
   const createSession = useCallback(async (name, workdir, sessionModel, options = {}) => {
@@ -491,7 +517,7 @@ export default function App() {
     const fetchGit = async () => {
       const dirs = new Set([
         ...sessionsRef.current.map((s) => s.workdir).filter(Boolean),
-        ...(isRelay ? [] : savedLocationsRef.current),
+        ...(isRelay ? [] : savedLocationsRef.current.map((l) => l.path)),
       ]);
       if (dirs.size === 0) return;
       const results = {};
@@ -782,7 +808,8 @@ export default function App() {
                   activeIds={visibleSessions.map((s) => s.id)}
                   onSelect={selectSession}
                   onNew={() => setShowNewDialog(true)}
-                  onNewAt={(dir) => createSession("", dir)}
+                  onNewAt={(dir) => createSession("", dir, undefined, { bypassPermissions: getLocationBypass(dir) })}
+                  onToggleLocationBypass={toggleLocationBypass}
                   onDelete={removeSession}
                   open={sidebarOpen}
                   savedLocations={savedLocations}
@@ -962,6 +989,7 @@ export default function App() {
         {showNewDialog && (
           <NewSessionDialog
             recentLocations={recentLocations}
+            savedLocations={savedLocations}
             isRelay={isRelay}
             instances={isRelay ? [...new Map(sessions.map(s => [s.instance_id, { instance_id: s.instance_id, hostname: s.hostname }])).values()] : []}
             onConfirm={(name, workdir, bypassPermissions, instanceId) => {

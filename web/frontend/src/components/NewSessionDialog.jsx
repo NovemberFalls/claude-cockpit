@@ -1,16 +1,24 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { X, FolderOpen, Folder, ShieldOff, Monitor } from "lucide-react";
 
+function normPath(dir) {
+  return dir.replace(/\//g, "\\").replace(/\\$/, "");
+}
+
 export default function NewSessionDialog({
   recentLocations,
+  savedLocations = [],
   onConfirm,
   onCancel,
   isRelay = false,
   instances = [],
 }) {
-  const [workdir, setWorkdir] = useState(recentLocations[0] || "C:\\Code");
+  const initialDir = recentLocations[0] || "C:\\Code";
+  const [workdir, setWorkdir] = useState(initialDir);
   const [name, setName] = useState("");
-  const [bypassPermissions, setBypassPermissions] = useState(false);
+  const initialBypass = savedLocations.find((l) => normPath(l.path) === normPath(initialDir))?.bypassPermissions || false;
+  const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
+  const [manualBypassOverride, setManualBypassOverride] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
@@ -23,6 +31,15 @@ export default function NewSessionDialog({
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  // Sync bypass checkbox when changing to a directory with a saved bypass setting
+  const syncBypassForDir = useCallback((dir) => {
+    if (manualBypassOverride) return;
+    const match = savedLocations.find(
+      (l) => normPath(l.path) === normPath(dir.trim())
+    );
+    if (match) setBypassPermissions(match.bypassPermissions);
+  }, [savedLocations, manualBypassOverride]);
 
   // Close suggestions on outside click
   useEffect(() => {
@@ -62,6 +79,7 @@ export default function NewSessionDialog({
   const handleDirChange = (e) => {
     const val = e.target.value;
     setWorkdir(val);
+    syncBypassForDir(val);
     if (val.length >= 2) {
       fetchSuggestions(val);
     } else {
@@ -78,6 +96,7 @@ export default function NewSessionDialog({
 
   const selectSuggestion = (dir) => {
     setWorkdir(dir);
+    syncBypassForDir(dir);
     setShowSuggestions(false);
     setHighlightIdx(-1);
     // Fetch children of selected dir
@@ -305,7 +324,7 @@ export default function NewSessionDialog({
                   <button
                     key={loc}
                     type="button"
-                    onClick={() => setWorkdir(loc)}
+                    onClick={() => { setWorkdir(loc); syncBypassForDir(loc); }}
                     className={`text-left text-xs px-2 py-1 rounded truncate transition-colors ${workdir !== loc ? "hover-bg-surface" : ""}`}
                     style={{
                       color:
@@ -330,7 +349,7 @@ export default function NewSessionDialog({
           <div
             className="flex items-center gap-2 mt-3 cursor-pointer select-none"
             title="Skip all permission prompts (--dangerously-skip-permissions)"
-            onClick={() => setBypassPermissions(!bypassPermissions)}
+            onClick={() => { setBypassPermissions(!bypassPermissions); setManualBypassOverride(true); }}
           >
             <div
               className="flex items-center justify-center rounded"

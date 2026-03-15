@@ -29,17 +29,17 @@ function shortPath(dir) {
 }
 
 /**
- * Build a tree from a flat list of paths.
- * Each node: { path, name, children: [] }
+ * Build a tree from a flat list of location objects.
+ * Each node: { path, name, bypassPermissions, children: [] }
  */
-function buildTree(paths) {
-  const sorted = [...paths].sort((a, b) => norm(a).localeCompare(norm(b)));
+function buildTree(locations) {
+  const sorted = [...locations].sort((a, b) => norm(a.path).localeCompare(norm(b.path)));
   const roots = [];
   const nodes = new Map();
 
-  for (const p of sorted) {
-    const n = norm(p);
-    const node = { path: p, name: shortPath(p), children: [] };
+  for (const loc of sorted) {
+    const n = norm(loc.path);
+    const node = { path: loc.path, name: shortPath(loc.path), bypassPermissions: loc.bypassPermissions || false, children: [] };
     nodes.set(n, node);
 
     let placed = false;
@@ -59,7 +59,7 @@ function buildTree(paths) {
 }
 
 /** Context menu for location nodes */
-function LocationContextMenu({ x, y, path, onExpand, onNewAt, onRemove, onClose }) {
+function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove, onToggleBypass, onClose }) {
   const menuRef = useRef(null);
   const [pos, setPos] = useState({ x, y });
 
@@ -128,6 +128,13 @@ function LocationContextMenu({ x, y, path, onExpand, onNewAt, onRemove, onClose 
         onClick={() => { onNewAt(path); onClose(); }}
       >
         Open session here
+      </div>
+      <div
+        style={{ ...itemStyle, color: isBypass ? "var(--yellow)" : "var(--text-secondary)" }}
+        className="hover-bg-elevated"
+        onClick={() => { onToggleBypass(path); onClose(); }}
+      >
+        {isBypass ? "Disable bypass" : "Enable bypass"}
       </div>
       <div
         style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "4px 0" }}
@@ -220,6 +227,9 @@ function LocationNode({ node, depth = 0, sessions, activeIds, onSelect, onDelete
         >
           <FolderOpen size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
           <span className="text-xs truncate">{node.name}</span>
+          {node.bypassPermissions && (
+            <ShieldOff size={10} style={{ color: "var(--yellow)", flexShrink: 0 }} title="Bypass permissions enabled" />
+          )}
         </button>
 
         {(() => {
@@ -319,6 +329,7 @@ export default function Sidebar({
   savedLocations,
   onAddLocations,
   onRemoveLocation,
+  onToggleLocationBypass,
   gitStatuses = {},
   isRelay = false,
   onShowApiKeys,
@@ -359,8 +370,9 @@ export default function Sidebar({
   }, [onAddLocations]);
 
   const handleContextMenu = useCallback((e, path) => {
-    setCtxMenu({ x: e.clientX, y: e.clientY, path });
-  }, []);
+    const loc = savedLocations.find((l) => l.path === path);
+    setCtxMenu({ x: e.clientX, y: e.clientY, path, isBypass: loc?.bypassPermissions || false });
+  }, [savedLocations]);
 
   return (
     <aside
@@ -507,9 +519,11 @@ export default function Sidebar({
           x={ctxMenu.x}
           y={ctxMenu.y}
           path={ctxMenu.path}
+          isBypass={ctxMenu.isBypass}
           onExpand={handleExpand}
           onNewAt={onNewAt}
           onRemove={onRemoveLocation}
+          onToggleBypass={onToggleLocationBypass}
           onClose={() => setCtxMenu(null)}
         />
       )}
