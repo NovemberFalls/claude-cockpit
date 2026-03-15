@@ -229,35 +229,64 @@ When running on `localhost`, authentication is automatically bypassed — no OAu
 
 ---
 
+## MCP Servers
+
+Claude sessions running inside Cockpit automatically use any [MCP servers](https://modelcontextprotocol.io/) configured in your Claude Code setup. MCP servers extend what Claude can do — browser automation, database access, file management, and more.
+
+### Finding MCP Servers
+
+- **[Official MCP Registry](https://registry.modelcontextprotocol.io/)** — The canonical directory of MCP servers
+- **[MCP Server Repository](https://github.com/modelcontextprotocol/servers)** — Reference implementations and community servers
+
+### Configuring MCP Servers
+
+MCP servers are configured in your Claude Code settings (`~/.claude/settings.json`). Example:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-filesystem"]
+    },
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-browser"]
+    }
+  }
+}
+```
+
+Once configured, MCP tools are available in every Claude session — including those launched from Cockpit. No additional setup needed inside the app.
+
+---
+
 ## Project Structure
 
 ```
 claude-cockpit/
 ├── web/
-│   ├── server.py          # FastAPI backend (REST + WebSocket)
-│   ├── pty_manager.py     # PTY process manager (Windows ConPTY)
-│   ├── auth.py            # Google OAuth (optional)
-│   ├── requirements.txt   # Python dependencies
+│   ├── server.py           # FastAPI backend (REST + WebSocket)
+│   ├── pty_manager.py      # PTY process manager (Windows ConPTY)
+│   ├── logging_config.py   # Structured logging setup
+│   ├── auth.py             # Google OAuth (optional)
+│   ├── tunnel.py           # Cloud relay WebSocket tunnel
+│   ├── tests/              # Python test suite (24 tests)
+│   ├── requirements.txt    # Python dependencies
 │   ├── cockpit-server.spec # PyInstaller build config
-│   ├── static/            # Legacy frontend (fallback)
 │   └── frontend/
 │       ├── src/
 │       │   ├── App.jsx              # Main app component
-│       │   ├── components/
-│       │   │   ├── TerminalPane.jsx  # xterm.js terminal
-│       │   │   ├── Sidebar.jsx       # Session list
-│       │   │   ├── TopBar.jsx        # Model selector
-│       │   │   ├── StatusBar.jsx     # Layout controls
-│       │   │   ├── NewSessionDialog.jsx
-│       │   │   └── HexGrid.jsx       # Animated background
-│       │   ├── themes/themeData.js   # 20 theme definitions
-│       │   └── hooks/useTheme.jsx    # Theme provider
+│       │   ├── components/          # UI components
+│       │   ├── __tests__/           # Frontend tests (70 tests)
+│       │   ├── themes/themeData.js  # 20 theme definitions
+│       │   └── hooks/useTheme.jsx   # Theme provider
 │       ├── src-tauri/               # Tauri desktop wrapper
-│       ├── package.json
-│       └── vite.config.js
-├── src/cockpit/            # Legacy TUI (not actively used)
-├── releases/               # Pre-built executables
+│       ├── vitest.config.js
+│       └── package.json
+├── .github/workflows/       # CI/CD (GitHub Actions)
 ├── pyproject.toml
+├── CONTRIBUTING.md
 └── README.md
 ```
 
