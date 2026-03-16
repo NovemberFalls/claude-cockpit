@@ -108,10 +108,24 @@ export default function App() {
 
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
-    console.log("[updater] __TAURI__:", !!window.__TAURI__);
-    if (!window.__TAURI__) return;
     let cancelled = false;
+
+    // Poll for Tauri IPC bridge (may not be injected immediately on remote URLs)
+    const waitForTauri = () => new Promise((resolve) => {
+      const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
+      if (isTauri()) return resolve(true);
+      let attempts = 0;
+      const interval = setInterval(() => {
+        attempts++;
+        if (isTauri()) { clearInterval(interval); resolve(true); }
+        else if (attempts >= 20) { clearInterval(interval); resolve(false); } // 2s max
+      }, 100);
+    });
+
     (async () => {
+      const hasTauri = await waitForTauri();
+      console.log("[updater] IPC bridge:", hasTauri ? "available" : "not found (browser mode)");
+      if (!hasTauri || cancelled) return;
       try {
         console.log("[updater] Checking for updates...");
         const { check } = await import("@tauri-apps/plugin-updater");
