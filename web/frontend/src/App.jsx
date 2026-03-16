@@ -147,11 +147,12 @@ export default function App() {
     isAdmin: user?.is_admin || false,
   }), [appMode, isRelay, user]);
 
-  // Health-check polling: wait for backend to be ready
+  // Health-check polling: wait for backend to be ready (re-runs on crash recovery)
   useEffect(() => {
+    if (backendReady) return; // Already connected, nothing to do
     let cancelled = false;
     let attempts = 0;
-    const maxAttempts = 30; // 15s at 500ms intervals
+    const maxAttempts = 60; // 30s at 500ms intervals (longer for crash recovery)
 
     const check = async () => {
       while (!cancelled && attempts < maxAttempts) {
@@ -166,6 +167,7 @@ export default function App() {
                 return;
               }
               setBackendReady(true);
+              setBackendError(false);
               if (data.authenticated) setUser(data);
               if (data.mode) setAppMode(data.mode);
             }
@@ -182,7 +184,7 @@ export default function App() {
 
     check();
     return () => { cancelled = true; };
-  }, []);
+  }, [backendReady]);
 
   // Add locations to the curated list (deduped by path, no cap)
   const addLocations = useCallback((dirs) => {
@@ -381,13 +383,16 @@ export default function App() {
     }
   }, [sessions.length]);
 
-  // Poll /api/terminals every 3s
+  // Poll /api/terminals every 3s — detect backend death and trigger recovery
+  const pollFailCount = useRef(0);
   useEffect(() => {
     if (!backendReady) return;
+    pollFailCount.current = 0;
     const poll = async () => {
       try {
         const res = await fetch("/api/terminals");
-        if (!res.ok) return;
+        if (!res.ok) throw new Error("not ok");
+        pollFailCount.current = 0; // Reset on success
         const data = await res.json();
         const termMap = {};
         for (const t of data.terminals) {
@@ -498,7 +503,13 @@ export default function App() {
           });
         }
       } catch {
-        // ignore poll errors
+        pollFailCount.current++;
+        // After 3 consecutive failures (~9s), backend is dead — trigger recovery
+        if (pollFailCount.current >= 3) {
+          console.warn("[cockpit] Backend unreachable — entering recovery mode");
+          setBackendReady(false);
+          restoredRef.current = false; // Allow session restore on reconnect
+        }
       }
     };
     const id = setInterval(poll, 3000);

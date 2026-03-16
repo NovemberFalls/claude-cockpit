@@ -147,19 +147,25 @@ const TerminalPane = forwardRef(function TerminalPane({
         return;
       }
 
-      // Auto-reconnect with backoff (max 3 attempts, 1s/2s/4s)
-      if (reconnectAttempts.current < 3) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 4000);
-        reconnectAttempts.current++;
-        if (xtermRef.current) {
+      // Auto-reconnect: fast backoff (1s/2s/4s), then slow poll (10s) indefinitely
+      const attempt = reconnectAttempts.current;
+      const delay = attempt < 3
+        ? Math.min(1000 * Math.pow(2, attempt), 4000)  // 1s, 2s, 4s
+        : 10000;  // Then every 10s while waiting for backend recovery
+      reconnectAttempts.current++;
+      if (xtermRef.current) {
+        if (attempt < 3) {
           xtermRef.current.write(
             `\r\n\x1b[33m[Reconnecting in ${delay / 1000}s...]\x1b[0m\r\n`
           );
+        } else if (attempt === 3) {
+          xtermRef.current.write(
+            "\r\n\x1b[33m[Backend down — waiting for recovery...]\x1b[0m\r\n"
+          );
         }
-        reconnectTimer.current = setTimeout(() => connectWs(terminalId), delay);
-      } else if (xtermRef.current) {
-        xtermRef.current.write("\r\n\x1b[31m[Connection lost — close and open a new session]\x1b[0m\r\n");
+        // After attempt 3, reconnect silently every 10s
       }
+      reconnectTimer.current = setTimeout(() => connectWs(terminalId), delay);
     };
 
     ws.onerror = () => {

@@ -1,6 +1,6 @@
 [package]
 name = "claude-cockpit"
-version = "0.2.1-alpha"
+version = "0.2.2-alpha"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 

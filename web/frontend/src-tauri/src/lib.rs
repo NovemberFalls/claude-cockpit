@@ -1,5 +1,77 @@
-use tauri::Manager;
+use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tauri_plugin_shell::ShellExt;
+
+/// Kill orphaned claude.exe processes.
+fn kill_orphan_claudes() {
+    use std::process::Command;
+    let _ = Command::new("taskkill")
+        .args(["/F", "/IM", "claude.exe"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output();
+    eprintln!("[tauri] Killed orphaned claude.exe processes");
+}
+
+fn spawn_sidecar(
+    app: &tauri::AppHandle,
+    restart_count: Arc<AtomicU32>,
+) {
+    let shell = app.shell();
+    let cmd = shell
+        .sidecar("cockpit-server")
+        .expect("failed to find cockpit-server sidecar")
+        .env("NO_BROWSER", "1");
+
+    let (mut rx, _child) = cmd.spawn().expect("failed to spawn cockpit-server");
+
+    let app_handle = app.clone();
+    let rc = restart_count.clone();
+
+    // Log sidecar output and handle crash recovery
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_shell::process::CommandEvent;
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    println!("[server] {}", String::from_utf8_lossy(&line));
+                }
+                CommandEvent::Stderr(line) => {
+                    eprintln!("[server] {}", String::from_utf8_lossy(&line));
+                }
+                CommandEvent::Terminated(status) => {
+                    eprintln!("[server] terminated with {:?}", status);
+
+                    let attempts = rc.fetch_add(1, Ordering::SeqCst);
+                    if attempts < 3 {
+                        eprintln!(
+                            "[tauri] Sidecar crashed — restarting (attempt {}/3)...",
+                            attempts + 1
+                        );
+
+                        // Kill orphaned claude.exe processes before restart
+                        kill_orphan_claudes();
+
+                        // Wait before restart to let port free up
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+
+                        // Respawn
+                        spawn_sidecar(&app_handle, rc);
+                    } else {
+                        eprintln!(
+                            "[tauri] Sidecar crashed 3 times — giving up. Restart the app."
+                        );
+                    }
+                    break;
+                }
+                CommandEvent::Error(err) => {
+                    eprintln!("[server] error: {}", err);
+                }
+                _ => {}
+            }
+        }
+    });
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -7,38 +79,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            let shell = app.shell();
+            let restart_count = Arc::new(AtomicU32::new(0));
 
-            // Spawn the cockpit-server sidecar with NO_BROWSER=1
-            let cmd = shell
-                .sidecar("cockpit-server")
-                .expect("failed to find cockpit-server sidecar")
-                .env("NO_BROWSER", "1");
-
-            let (mut rx, _child) = cmd.spawn().expect("failed to spawn cockpit-server");
-
-            // Log sidecar output in background
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_shell::process::CommandEvent;
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        CommandEvent::Stdout(line) => {
-                            println!("[server] {}", String::from_utf8_lossy(&line));
-                        }
-                        CommandEvent::Stderr(line) => {
-                            eprintln!("[server] {}", String::from_utf8_lossy(&line));
-                        }
-                        CommandEvent::Terminated(status) => {
-                            eprintln!("[server] terminated with {:?}", status);
-                            break;
-                        }
-                        CommandEvent::Error(err) => {
-                            eprintln!("[server] error: {}", err);
-                        }
-                        _ => {}
-                    }
-                }
-            });
+            // Spawn the sidecar and monitor it
+            spawn_sidecar(&app.handle(), restart_count);
 
             // Wait for the server to be ready before the webview loads
             let start = std::time::Instant::now();
