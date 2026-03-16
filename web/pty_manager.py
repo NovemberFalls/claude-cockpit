@@ -364,7 +364,7 @@ class PtyManager:
             session.alive = False
         return session
 
-    async def read_pty(self, terminal_id: str, size: int = 4096) -> str:
+    async def read_pty(self, terminal_id: str, size: int = 65536) -> str:
         """Read from PTY (runs in dedicated executor to avoid blocking)."""
         session = self.sessions.get(terminal_id)
         if not session or not session.pty.isalive():

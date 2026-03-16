@@ -533,12 +533,14 @@ class PtyProcess:
             return False
         return True
 
-    def read(self, size: int = 4096, timeout_ms: int = 500) -> str:
+    def read(self, size: int = 65536, timeout_ms: int = 500) -> str:
         """Read from the pseudo-console output with timeout.
 
         Uses PeekNamedPipe to poll for available data, avoiding indefinite
         blocking that can strand executor threads when a session dies.
         Returns empty string on timeout (no data within timeout_ms).
+        Reads ALL available data (up to *size* bytes) in one call to avoid
+        delivering partial output across multiple read cycles.
         """
         if self._server_pipe is None:
             raise EOFError("Pty is closed")
@@ -563,7 +565,7 @@ class PtyProcess:
         else:
             return ""  # Timeout — no data available
 
-        # Data is available, read it (won't block)
+        # Read all available data up to *size* bytes (won't block)
         read_size = min(size, avail.value)
         buf = ctypes.create_string_buffer(read_size)
         n = wt.DWORD()
@@ -578,14 +580,39 @@ class PtyProcess:
         return buf.raw[: n.value].decode("utf-8", errors="replace")
 
     def write(self, data: str) -> None:
-        """Write to the pseudo-console input."""
+        """Write to the pseudo-console input.
+
+        Handles partial writes by looping until all bytes are sent.
+        Large pastes are written in chunks to avoid overwhelming the pipe.
+        """
         if self._server_pipe is None:
             return
         raw = data.encode("utf-8") if isinstance(data, str) else data
-        n = wt.DWORD()
-        kernel32.WriteFile(
-            wt.HANDLE(self._server_pipe), raw, wt.DWORD(len(raw)), ctypes.byref(n), None,
-        )
+        total = len(raw)
+        offset = 0
+        chunk_size = 4096  # Write in manageable chunks for ConPTY
+
+        while offset < total:
+            chunk = raw[offset:offset + chunk_size]
+            n = wt.DWORD()
+            ok = kernel32.WriteFile(
+                wt.HANDLE(self._server_pipe), chunk, wt.DWORD(len(chunk)),
+                ctypes.byref(n), None,
+            )
+            if not ok:
+                import logging
+                logging.getLogger("cockpit.pty").warning(
+                    "WriteFile failed at offset %d/%d (error %d)",
+                    offset, total, ctypes.get_last_error(),
+                )
+                return
+            if n.value == 0:
+                import logging
+                logging.getLogger("cockpit.pty").warning(
+                    "WriteFile wrote 0 bytes at offset %d/%d", offset, total,
+                )
+                return
+            offset += n.value
 
     def setwinsize(self, rows: int, cols: int) -> None:
         """Resize the pseudo-console."""
