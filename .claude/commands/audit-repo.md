@@ -6,7 +6,7 @@ Comprehensive security and health audit of the Claude Cockpit repository. Run th
 
 1. **Check for exposed secrets**:
    ```
-   cd /c/Code/claude-cockpit
+   cd /c/Code/Personal/claude-cockpit
    git log --all --diff-filter=A -- "*.env" "*.pem" "*.key" "*credentials*" "*secret*" 2>/dev/null
    ```
    Also search tracked files for hardcoded secrets:
@@ -17,10 +17,10 @@ Comprehensive security and health audit of the Claude Cockpit repository. Run th
 
 2. **Dependency vulnerability scan**:
    ```
-   cd /c/Code/claude-cockpit/web/frontend && npm audit 2>&1
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npm audit 2>&1
    ```
    ```
-   cd /c/Code/claude-cockpit && pip audit 2>/dev/null || echo "pip-audit not installed — install via: pip install pip-audit"
+   cd /c/Code/Personal/claude-cockpit && pip audit 2>/dev/null || echo "pip-audit not installed — install via: pip install pip-audit"
    ```
    - Flag any high/critical vulnerabilities
    - Check for typosquatting: verify each dependency name is the official package
@@ -28,7 +28,7 @@ Comprehensive security and health audit of the Claude Cockpit repository. Run th
 3. **License compliance**:
    - Verify all npm dependencies are AGPL-3.0 compatible (MIT, Apache-2.0, BSD, ISC are fine; GPL-2.0-only is NOT)
    ```
-   cd /c/Code/claude-cockpit/web/frontend && npx license-checker --summary 2>/dev/null || echo "Run: npx license-checker --summary"
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npx license-checker --summary 2>/dev/null || echo "Run: npx license-checker --summary"
    ```
    - Check for copyleft license conflicts
 
@@ -46,16 +46,16 @@ Comprehensive security and health audit of the Claude Cockpit repository. Run th
 
 6. **Test suite health**:
    ```
-   cd /c/Code/claude-cockpit && python -m pytest web/tests/ -v
-   cd /c/Code/claude-cockpit/web/frontend && npm test
-   cd /c/Code/claude-cockpit/web/frontend && npm run lint
+   cd /c/Code/Personal/claude-cockpit && python -m pytest web/tests/ -v
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npm test
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npm run lint
    ```
    - All tests must pass
    - No lint errors
 
 7. **Build verification**:
    ```
-   cd /c/Code/claude-cockpit/web/frontend && npm run build
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npm run build
    ```
    - Build must complete with zero errors
 

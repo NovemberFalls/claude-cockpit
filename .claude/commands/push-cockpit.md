@@ -6,30 +6,30 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
 
 1. **Build React frontend**:
    ```
-   cd /c/Code/claude-cockpit/web/frontend && npm run build
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npm run build
    ```
 
 2. **Build PyInstaller browser exe**:
    ```
-   cd /c/Code/claude-cockpit/web && python -m PyInstaller --clean --noconfirm cockpit-server.spec
+   cd /c/Code/Personal/claude-cockpit/web && python -m PyInstaller --clean --noconfirm cockpit-server.spec
    ```
 
 3. **Copy browser exe to local releases** (gitignored):
    ```
-   mkdir -p /c/Code/claude-cockpit/releases
-   cp /c/Code/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/claude-cockpit/releases/claude-cockpit-browser.exe
+   mkdir -p /c/Code/Personal/claude-cockpit/releases
+   cp /c/Code/Personal/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/Personal/claude-cockpit/releases/claude-cockpit-browser.exe
    ```
 
 4. **Build Tauri desktop installer**:
    ```
-   cp /c/Code/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
-   cd /c/Code/claude-cockpit/web/frontend && npx @tauri-apps/cli build
+   cp /c/Code/Personal/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/Personal/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
+   cd /c/Code/Personal/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
 5. **Copy Tauri installer to local releases and generate latest.json** (gitignored):
    ```
-   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/claude-cockpit/releases/
-   cp "/c/Code/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/claude-cockpit/releases/
+   cp "/c/Code/Personal/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/Personal/claude-cockpit/releases/
+   cp "/c/Code/Personal/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/Personal/claude-cockpit/releases/
    ```
    Then generate `latest.json` from the `.sig` file (Tauri does NOT auto-generate this):
    - Read the signature from the `.nsis.zip.sig` file
@@ -53,7 +53,7 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
 
 8. **Report** — List release artifacts with file sizes:
    ```
-   ls -lh /c/Code/claude-cockpit/releases/
+   ls -lh /c/Code/Personal/claude-cockpit/releases/
    ```
 
 ## Important

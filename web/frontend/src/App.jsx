@@ -108,12 +108,15 @@ export default function App() {
 
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
+    console.log("[updater] __TAURI__:", !!window.__TAURI__);
     if (!window.__TAURI__) return;
     let cancelled = false;
     (async () => {
       try {
+        console.log("[updater] Checking for updates...");
         const { check } = await import("@tauri-apps/plugin-updater");
         const update = await check();
+        console.log("[updater] Result:", update ? `v${update.version} available` : "up to date");
         if (cancelled || !update) return;
         toast(
           `Update available: v${update.version}`,
