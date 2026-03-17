@@ -37,7 +37,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.4-alpha",
+    version="0.2.5-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server

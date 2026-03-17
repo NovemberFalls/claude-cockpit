@@ -242,11 +242,7 @@ class PtyManager:
             # that simply hasn't written to the terminal in a while)
             try:
                 import psutil
-                child_pid = getattr(session.pty, "pid", None)
-                if child_pid is None:
-                    pi = getattr(session.pty, "_pi", None)
-                    if pi:
-                        child_pid = getattr(pi, "dwProcessId", None)
+                child_pid = self._get_child_pid(session)
                 if child_pid:
                     proc = psutil.Process(child_pid)
                     cpu = proc.cpu_percent(interval=0.1)
@@ -402,31 +398,36 @@ class PtyManager:
         self.sessions[terminal_id] = session
 
         # Track child PID for crash-recovery cleanup
-        child_pid = getattr(pty_process, "pid", None)
-        if child_pid is None:
-            # conpty.PtyProcess stores PID in _pi.dwProcessId
-            pi = getattr(pty_process, "_pi", None)
-            if pi:
-                child_pid = getattr(pi, "dwProcessId", None)
+        child_pid = self._get_child_pid(session)
         if child_pid:
             self._save_child_pid(child_pid)
 
         return session
 
+    def _get_child_pid(self, session: TerminalSession) -> int | None:
+        """Extract the child PID from a PTY session."""
+        pid = getattr(session.pty, "pid", None)
+        if pid is None:
+            pi = getattr(session.pty, "_pi", None)
+            if pi:
+                pid = getattr(pi, "dwProcessId", None)
+        return pid
+
     def kill_terminal(self, terminal_id: str) -> bool:
-        """Kill a terminal session."""
+        """Kill a terminal session and its entire process tree."""
         session = self.sessions.pop(terminal_id, None)
         if not session:
             return False
 
-        # Untrack child PID
-        child_pid = getattr(session.pty, "pid", None)
-        if child_pid is None:
-            pi = getattr(session.pty, "_pi", None)
-            if pi:
-                child_pid = getattr(pi, "dwProcessId", None)
+        child_pid = self._get_child_pid(session)
         if child_pid:
             self._remove_child_pid(child_pid)
+
+        # conpty.PtyProcess uses Job Objects internally for tree killing.
+        # For pywinpty, kill the process tree via psutil before terminating.
+        has_job = getattr(session.pty, "_job", None) is not None
+        if not has_job and child_pid:
+            self._kill_process_tree(child_pid)
 
         try:
             if session.pty.isalive():
@@ -435,6 +436,21 @@ class PtyManager:
             logger.warning("Failed to terminate PTY %s", terminal_id, exc_info=True)
         session.alive = False
         return True
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """Kill a process and all its descendants (for pywinpty mode)."""
+        try:
+            import psutil
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except (ImportError, psutil.NoSuchProcess):
+            pass
 
     def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> bool:
         """Resize a terminal's PTY dimensions."""

@@ -49,6 +49,10 @@ STD_ERROR_HANDLE = 0xFFFFFFF4
 STD_INPUT_HANDLE = 0xFFFFFFF6
 SW_HIDE = 0
 
+# Job Object constants — used to kill entire process trees
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JobObjectExtendedLimitInformation = 9
+
 
 # ── Structures ──
 
@@ -103,6 +107,42 @@ class PROCESS_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("hProcess", wt.HANDLE), ("hThread", wt.HANDLE),
         ("dwProcessId", wt.DWORD), ("dwThreadId", wt.DWORD),
+    ]
+
+
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wt.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wt.DWORD),
+        ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+        ("PriorityClass", wt.DWORD),
+        ("SchedulingClass", wt.DWORD),
+    ]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
     ]
 
 
@@ -214,6 +254,21 @@ kernel32.PeekNamedPipe.argtypes = [
     ctypes.POINTER(wt.DWORD), ctypes.POINTER(wt.DWORD), ctypes.POINTER(wt.DWORD),
 ]
 kernel32.PeekNamedPipe.restype = wt.BOOL
+
+# Job Object functions — kill entire process trees on session close
+kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+kernel32.CreateJobObjectW.restype = wt.HANDLE
+
+kernel32.SetInformationJobObject.argtypes = [
+    wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD,
+]
+kernel32.SetInformationJobObject.restype = wt.BOOL
+
+kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+kernel32.AssignProcessToJobObject.restype = wt.BOOL
+
+kernel32.TerminateJobObject.argtypes = [wt.HANDLE, wt.UINT]
+kernel32.TerminateJobObject.restype = wt.BOOL
 
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wt.BOOL
@@ -383,6 +438,7 @@ class PtyProcess:
         self._hpc = ctypes.c_void_p()
         self._pi = PROCESS_INFORMATION()
         self._server_pipe = None  # Bidirectional pipe for read/write
+        self._job = None  # Job Object handle for process tree management
         self._alive = False
         self.exitstatus = None
 
@@ -522,6 +578,22 @@ class PtyProcess:
 
         inst._pi = pi
         inst._alive = True
+
+        # Create a Job Object so we can kill the entire process tree
+        # (cmd.exe → node.exe → child workers) when the session ends.
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE ensures all processes die
+        # when the Job handle is closed, even if we crash.
+        job = kernel32.CreateJobObjectW(None, None)
+        if job:
+            info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            kernel32.SetInformationJobObject(
+                job, JobObjectExtendedLimitInformation,
+                ctypes.byref(info), ctypes.sizeof(info),
+            )
+            kernel32.AssignProcessToJobObject(job, pi.hProcess)
+            inst._job = job
+
         return inst
 
     def isalive(self) -> bool:
@@ -623,7 +695,7 @@ class PtyProcess:
         kernel32.ResizePseudoConsole(self._hpc, size)
 
     def terminate(self, force: bool = False) -> None:
-        """Terminate the process. Sends Ctrl+C first for graceful shutdown."""
+        """Terminate the process and all its children via Job Object."""
         if not self._alive and not self._pi.hProcess:
             return
         if self._pi.hProcess and not force:
@@ -636,12 +708,15 @@ class PtyProcess:
                         return
             except Exception:
                 pass
-        if self._pi.hProcess:
+        # Kill entire process tree via Job Object (cmd.exe + node.exe + children)
+        if self._job:
+            kernel32.TerminateJobObject(self._job, 1)
+        elif self._pi.hProcess:
             kernel32.TerminateProcess(self._pi.hProcess, 1)
         self._cleanup()
 
     def _cleanup(self):
-        """Close all handles."""
+        """Close all handles including the Job Object."""
         self._alive = False
         if self._hpc:
             kernel32.ClosePseudoConsole(self._hpc)
@@ -655,6 +730,11 @@ class PtyProcess:
         if self._server_pipe:
             kernel32.CloseHandle(wt.HANDLE(self._server_pipe))
             self._server_pipe = None
+        # Close Job Object last — JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        # ensures any remaining processes in the job are killed
+        if self._job:
+            kernel32.CloseHandle(self._job)
+            self._job = None
 
     def __del__(self):
         try:
