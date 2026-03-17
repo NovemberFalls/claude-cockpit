@@ -513,6 +513,9 @@ class PtyProcess:
 
         if not ok:
             err = ctypes.get_last_error()
+            # Clean up all allocated resources on failure
+            kernel32.ClosePseudoConsole(inst._hpc)
+            inst._hpc = ctypes.c_void_p()
             kernel32.CloseHandle(wt.HANDLE(inst._server_pipe))
             inst._server_pipe = None
             raise OSError(f"CreateProcessW failed: error {err} (0x{err:08x})")

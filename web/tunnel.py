@@ -159,11 +159,6 @@ class TunnelClient:
         while self._running:
             try:
                 url = self._relay_url
-                if "?" in url:
-                    url += f"&key={self._api_key}"
-                else:
-                    url += f"?key={self._api_key}"
-
                 logger.info("Connecting to relay: %s", self._relay_url)
 
                 async with websockets.connect(

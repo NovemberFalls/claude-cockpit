@@ -1,17 +1,10 @@
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri_plugin_shell::ShellExt;
 
-/// Kill orphaned claude.exe processes.
-fn kill_orphan_claudes() {
-    use std::process::Command;
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "claude.exe"])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output();
-    eprintln!("[tauri] Killed orphaned claude.exe processes");
-}
+/// Note: orphan cleanup is handled by the Python sidecar on startup.
+/// It only kills processes whose PIDs were tracked in .cockpit-child-pids,
+/// never random Claude sessions running in other terminals.
 
 fn spawn_sidecar(
     app: &tauri::AppHandle,
@@ -49,8 +42,8 @@ fn spawn_sidecar(
                             attempts + 1
                         );
 
-                        // Kill orphaned claude.exe processes before restart
-                        kill_orphan_claudes();
+                        // Orphan cleanup is handled by the Python sidecar on restart
+                        // (only kills tracked cockpit-spawned processes, not user sessions)
 
                         // Wait before restart to let port free up
                         std::thread::sleep(std::time::Duration::from_secs(2));

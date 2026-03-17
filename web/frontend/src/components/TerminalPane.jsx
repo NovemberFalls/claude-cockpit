@@ -387,8 +387,10 @@ const TerminalPane = forwardRef(function TerminalPane({
         return;
       }
       if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-        // Paste file paths into the terminal
-        const pathStr = data.paths.join(" ");
+        // Paste file paths into the terminal (quote paths with spaces)
+        const pathStr = data.paths
+          .map((p) => (p.includes(" ") ? `"${p}"` : p))
+          .join(" ");
         wsRef.current.send(pathStr);
         toast?.(`Dropped ${data.paths.length} file${data.paths.length > 1 ? "s" : ""}`, "success");
       } else if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {

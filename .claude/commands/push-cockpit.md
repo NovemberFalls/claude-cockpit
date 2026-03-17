@@ -23,7 +23,7 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
 4. **Build Tauri desktop installer**:
    ```
    cp /c/Code/Personal/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/Personal/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
-   cd /c/Code/Personal/claude-cockpit/web/frontend && npx @tauri-apps/cli build
+   cd /c/Code/Personal/claude-cockpit/web/frontend && TAURI_SIGNING_PRIVATE_KEY=$(cat /c/Code/.tauri/claude-cockpit.key) TAURI_SIGNING_PRIVATE_KEY_PASSWORD='abC!@#123loa' npx @tauri-apps/cli build
    ```
 
 5. **Copy Tauri installer to local releases and generate latest.json** (gitignored):
