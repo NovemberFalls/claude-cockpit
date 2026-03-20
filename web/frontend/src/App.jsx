@@ -16,46 +16,40 @@ const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
 const SESSIONS_KEY = "cockpit-sessions";
 
+/** Safe localStorage helpers — silently swallow quota/security errors */
+function lsLoad(key, fallback = []) {
+  try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
+  catch { return fallback; }
+}
+function lsSave(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
 function loadSavedLocations() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(LOCATIONS_KEY) || "[]");
-    // Migration: convert legacy string[] to object[]
-    return raw.map((item) =>
-      typeof item === "string"
-        ? { path: item, bypassPermissions: false }
-        : item
-    );
-  } catch { return []; }
+  const raw = lsLoad(LOCATIONS_KEY);
+  return raw.map((item) =>
+    typeof item === "string" ? { path: item, bypassPermissions: false } : item
+  );
 }
 
-function saveSavedLocations(locs) {
-  try { localStorage.setItem(LOCATIONS_KEY, JSON.stringify(locs)); } catch {}
-}
-
-function loadRecentLocations() {
-  try {
-    return JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
-  } catch { return []; }
-}
-
-function saveRecentLocations(locs) {
-  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(locs)); } catch {}
-}
-
-function loadSavedSessions() {
-  try {
-    return JSON.parse(localStorage.getItem(SESSIONS_KEY) || "[]");
-  } catch { return []; }
-}
+function loadSavedSessions() { return lsLoad(SESSIONS_KEY); }
 
 function saveSessions(sessions) {
-  try {
-    // Only persist recoverable sessions (not errors)
-    const toSave = sessions
-      .filter((s) => s.status !== "error")
-      .map(({ name, model, workdir }) => ({ name, model, workdir }));
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(toSave));
-  } catch {}
+  const toSave = sessions
+    .filter((s) => s.status !== "error")
+    .map(({ name, model, workdir }) => ({ name, model, workdir }));
+  lsSave(SESSIONS_KEY, toSave);
+}
+
+/** Send a desktop notification if the window is not focused */
+function notifyActivityChange(name, terminalId, prevState, currState) {
+  if (!("Notification" in window) || Notification.permission !== "granted" || document.hasFocus()) return;
+  if (!prevState || !currState) return;
+  if (currState === "waiting" && prevState !== "waiting") {
+    new Notification("Action Required", { body: `${name} is waiting for approval`, tag: `cockpit-${terminalId}` });
+  } else if (currState === "idle" && prevState === "busy") {
+    new Notification("Task Complete", { body: `${name} has finished`, tag: `cockpit-${terminalId}` });
+  }
 }
 
 const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
@@ -69,15 +63,10 @@ let nextLocalId = 1;
 export default function App() {
   const { toasts, toast, dismiss: dismissToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    try { return parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 224; }
-    catch { return 224; }
-  });
+  const [sidebarWidth, setSidebarWidth] = useState(() => lsLoad(SIDEBAR_WIDTH_KEY, 224));
   const [terminalZoom, setTerminalZoom] = useState(() => {
-    try {
-      const saved = parseInt(localStorage.getItem(ZOOM_KEY));
-      return (saved >= MIN_ZOOM && saved <= MAX_ZOOM) ? saved : DEFAULT_ZOOM;
-    } catch { return DEFAULT_ZOOM; }
+    const saved = lsLoad(ZOOM_KEY, DEFAULT_ZOOM);
+    return (saved >= MIN_ZOOM && saved <= MAX_ZOOM) ? saved : DEFAULT_ZOOM;
   });
   const [zoomToast, setZoomToast] = useState(null);
   const zoomToastTimer = useRef(null);
@@ -92,7 +81,7 @@ export default function App() {
   const [sessions, setSessions] = useState([]);
   const [activeIds, setActiveIds] = useState([]);
   const [savedLocations, setSavedLocations] = useState(loadSavedLocations);
-  const [recentLocations, setRecentLocations] = useState(loadRecentLocations);
+  const [recentLocations, setRecentLocations] = useState(() => lsLoad(RECENTS_KEY));
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
@@ -204,39 +193,34 @@ export default function App() {
   }, [backendReady]);
 
   // Add locations to the curated list (deduped by path, no cap)
-  const addLocations = useCallback((dirs) => {
+  /** Update savedLocations with a transform and persist */
+  const updateLocations = useCallback((fn) => {
     setSavedLocations((prev) => {
+      const next = fn(prev);
+      lsSave(LOCATIONS_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const addLocations = useCallback((dirs) => {
+    updateLocations((prev) => {
       const byPath = new Map(prev.map((loc) => [loc.path, loc]));
       dirs.forEach((d) => {
-        if (d && !byPath.has(d)) {
-          byPath.set(d, { path: d, bypassPermissions: false });
-        }
+        if (d && !byPath.has(d)) byPath.set(d, { path: d, bypassPermissions: false });
       });
-      const next = [...byPath.values()];
-      saveSavedLocations(next);
-      return next;
+      return [...byPath.values()];
     });
-  }, []);
+  }, [updateLocations]);
 
-  // Remove a single location from the curated list
   const removeLocation = useCallback((dir) => {
-    setSavedLocations((prev) => {
-      const next = prev.filter((l) => l.path !== dir);
-      saveSavedLocations(next);
-      return next;
-    });
-  }, []);
+    updateLocations((prev) => prev.filter((l) => l.path !== dir));
+  }, [updateLocations]);
 
-  // Toggle bypass permissions for a saved location
   const toggleLocationBypass = useCallback((dir) => {
-    setSavedLocations((prev) => {
-      const next = prev.map((l) =>
-        l.path === dir ? { ...l, bypassPermissions: !l.bypassPermissions } : l
-      );
-      saveSavedLocations(next);
-      return next;
-    });
-  }, []);
+    updateLocations((prev) =>
+      prev.map((l) => l.path === dir ? { ...l, bypassPermissions: !l.bypassPermissions } : l)
+    );
+  }, [updateLocations]);
 
   // Check if a location has bypass enabled
   const getLocationBypass = useCallback((dir) => {
@@ -255,7 +239,7 @@ export default function App() {
     if (!isRelay) {
       setRecentLocations((prev) => {
         const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
-        saveRecentLocations(next);
+        lsSave(RECENTS_KEY, next);
         return next;
       });
     }
@@ -350,7 +334,7 @@ export default function App() {
     if (sessions.length !== sessionCountRef.current) {
       sessionCountRef.current = sessions.length;
       if (sessions.length > 0) saveSessions(sessions);
-      else try { localStorage.removeItem(SESSIONS_KEY); } catch {}
+      else { try { localStorage.removeItem(SESSIONS_KEY); } catch {} }
     }
   }, [sessions, isRelay]);
 
@@ -433,26 +417,9 @@ export default function App() {
               instance_id: t.instance_id || "",
             }));
 
-            // Notifications
-            if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
-              for (const s of newSessions) {
-                const prevState = prevStatesRef.current[s.terminalId];
-                const curr = s.activityState;
-                if (prevState && curr) {
-                  if (curr === "waiting" && prevState !== "waiting") {
-                    new Notification("Action Required", {
-                      body: `${s.name} is waiting for approval`,
-                      tag: `cockpit-${s.terminalId}`,
-                    });
-                  } else if (curr === "idle" && prevState === "busy") {
-                    new Notification("Task Complete", {
-                      body: `${s.name} has finished`,
-                      tag: `cockpit-${s.terminalId}`,
-                    });
-                  }
-                }
-                prevStatesRef.current[s.terminalId] = curr;
-              }
+            for (const s of newSessions) {
+              notifyActivityChange(s.name, s.terminalId, prevStatesRef.current[s.terminalId], s.activityState);
+              prevStatesRef.current[s.terminalId] = s.activityState;
             }
 
             // Auto-select first session if none active
@@ -494,26 +461,10 @@ export default function App() {
               return { ...s, activityState: newState, tokens: newTokens, cost: newCost };
             });
 
-            if ("Notification" in window && Notification.permission === "granted" && !document.hasFocus()) {
-              for (const s of updated) {
-                if (!s.terminalId) continue;
-                const prevState = prevStatesRef.current[s.terminalId];
-                const curr = s.activityState;
-                if (prevState && curr) {
-                  if (curr === "waiting" && prevState !== "waiting") {
-                    new Notification("Action Required", {
-                      body: `${s.name} is waiting for approval`,
-                      tag: `cockpit-${s.terminalId}`,
-                    });
-                  } else if (curr === "idle" && prevState === "busy") {
-                    new Notification("Task Complete", {
-                      body: `${s.name} has finished`,
-                      tag: `cockpit-${s.terminalId}`,
-                    });
-                  }
-                }
-                prevStatesRef.current[s.terminalId] = curr;
-              }
+            for (const s of updated) {
+              if (!s.terminalId) continue;
+              notifyActivityChange(s.name, s.terminalId, prevStatesRef.current[s.terminalId], s.activityState);
+              prevStatesRef.current[s.terminalId] = s.activityState;
             }
 
             return changed ? updated : prev;
@@ -627,35 +578,24 @@ export default function App() {
     );
   }, [visibleSessions]);
 
-  const zoomIn = useCallback(() => {
-    setTerminalZoom((prev) => {
-      const next = Math.min(prev + 1, MAX_ZOOM);
-      try { localStorage.setItem(ZOOM_KEY, String(next)); } catch {}
-      clearTimeout(zoomToastTimer.current);
-      setZoomToast(next);
-      zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
-      return next;
-    });
-  }, []);
-
-  const zoomOut = useCallback(() => {
-    setTerminalZoom((prev) => {
-      const next = Math.max(prev - 1, MIN_ZOOM);
-      try { localStorage.setItem(ZOOM_KEY, String(next)); } catch {}
-      clearTimeout(zoomToastTimer.current);
-      setZoomToast(next);
-      zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
-      return next;
-    });
-  }, []);
-
-  const zoomReset = useCallback(() => {
-    setTerminalZoom(DEFAULT_ZOOM);
-    try { localStorage.setItem(ZOOM_KEY, String(DEFAULT_ZOOM)); } catch {}
+  /** Apply a zoom level: persist, show toast, update state */
+  const applyZoom = useCallback((value) => {
+    setTerminalZoom(value);
+    lsSave(ZOOM_KEY, value);
     clearTimeout(zoomToastTimer.current);
-    setZoomToast(DEFAULT_ZOOM);
+    setZoomToast(value);
     zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
   }, []);
+
+  const zoomIn = useCallback(() => {
+    setTerminalZoom((prev) => { const next = Math.min(prev + 1, MAX_ZOOM); applyZoom(next); return next; });
+  }, [applyZoom]);
+
+  const zoomOut = useCallback(() => {
+    setTerminalZoom((prev) => { const next = Math.max(prev - 1, MIN_ZOOM); applyZoom(next); return next; });
+  }, [applyZoom]);
+
+  const zoomReset = useCallback(() => applyZoom(DEFAULT_ZOOM), [applyZoom]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -750,7 +690,7 @@ export default function App() {
       cancelAnimationFrame(rafId);
       const finalW = Math.min(Math.max(startW + latestX - startX, 140), 500);
       setSidebarWidth(finalW);
-      try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(finalW)); } catch {}
+      lsSave(SIDEBAR_WIDTH_KEY, finalW);
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
     };

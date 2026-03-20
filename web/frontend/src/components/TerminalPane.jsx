@@ -2,24 +2,10 @@ import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHand
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { X, GripVertical, Pencil, Brain, CircleHelp, CircleCheck, CircleX, Loader, Send } from "lucide-react";
+import { X, GripVertical, Send } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
+import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
-
-const stateIconMap = {
-  busy: { icon: Pencil, color: "var(--accent)", className: "state-icon-busy" },
-  thinking: { icon: Brain, color: "var(--accent)", className: "state-icon-busy" },
-  waiting: { icon: CircleHelp, color: "var(--yellow)", className: "" },
-  idle: { icon: CircleCheck, color: "var(--green)", className: "" },
-  error: { icon: CircleX, color: "var(--red)", className: "" },
-  starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
-};
-
-function StateIcon({ state }) {
-  const entry = stateIconMap[state] || stateIconMap.idle;
-  const Icon = entry.icon;
-  return <Icon size={12} style={{ color: entry.color, flexShrink: 0 }} className={entry.className} />;
-}
 
 /**
  * Build an xterm.js theme from our cockpit theme palette.

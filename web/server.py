@@ -37,7 +37,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.5-alpha",
+    version="0.2.6-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -70,6 +70,7 @@ else:
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
+_upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
 
 # PID file for crash detection
 PID_FILE = Path(__file__).parent / ".cockpit.pid"
@@ -164,6 +165,7 @@ async def me(request: Request):
 @app.post("/api/upload")
 async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     """Accept multipart file uploads, save to temp dir, return paths."""
+    global _upload_dir_size
     saved_paths: list[str] = []
     errors: list[str] = []
 
@@ -173,23 +175,21 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
             errors.append(f"Rejected '{upload.filename}': unsupported file type '{ext}'")
             continue
 
-        # Read with size check
         content = await upload.read()
+        file_size = len(content)
 
-        # Check total upload directory size
-        current_size = sum(f.stat().st_size for f in UPLOAD_DIR.iterdir() if f.is_file())
-        if current_size + len(content) > MAX_UPLOAD_DIR_SIZE:
-            errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
-            continue
-
-        if len(content) > MAX_FILE_SIZE:
+        if file_size > MAX_FILE_SIZE:
             errors.append(f"Rejected '{upload.filename}': exceeds 50MB limit")
             continue
 
-        # Save with unique prefix to avoid collisions
+        if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
+            errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
+            continue
+
         safe_name = f"{uuid.uuid4().hex[:8]}_{upload.filename}"
         dest = UPLOAD_DIR / safe_name
         dest.write_bytes(content)
+        _upload_dir_size += file_size
         saved_paths.append(str(dest))
 
     result: dict = {"paths": saved_paths}
@@ -384,20 +384,17 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
+    last_pong = _time.time()
+
     async def pty_to_ws():
         """Read from PTY and forward to WebSocket."""
-        # Use session.alive (bool) instead of session.pty.isalive() (kernel call)
-        # in the loop condition. read_pty handles EOFError and sets alive=False.
         while session.alive:
             try:
                 data = await pty_manager.read_pty(terminal_id)
                 if data:
                     session.tracker.feed(data)
                     await websocket.send_text(data)
-                    # Forward to cloud relay if connected
                     tunnel_client.forward_pty_output(terminal_id, data)
-                    # Yield to event loop so the WS receive handler (user input)
-                    # gets a chance to run during heavy output bursts
                     await asyncio.sleep(0)
                 else:
                     await asyncio.sleep(0.01)
@@ -407,16 +404,24 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 logger.debug("PTY->WS forward error: %s", e)
                 await asyncio.sleep(0.05)
 
-        # PTY died -- notify client
         try:
             await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
         except Exception:
             pass
 
     async def heartbeat():
-        """Send periodic ping to detect stale connections."""
+        """Send periodic ping; close connection if client stops responding."""
+        nonlocal last_pong
         while True:
             await asyncio.sleep(30)
+            # If no pong received for 2 heartbeat cycles, connection is dead
+            if _time.time() - last_pong > 90:
+                logger.info("WS client unresponsive for terminal %s — closing", terminal_id)
+                try:
+                    await websocket.close(code=1001, reason="Pong timeout")
+                except Exception:
+                    pass
+                break
             try:
                 await websocket.send_text('{"type":"ping"}')
             except Exception:
@@ -434,7 +439,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 
             text = msg.get("text")
             if text:
-                # Check for JSON control messages (resize, pong)
                 if text.startswith("{"):
                     try:
                         ctrl = json.loads(text)
@@ -446,10 +450,10 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                             )
                             continue
                         if ctrl.get("type") == "pong":
+                            last_pong = _time.time()
                             continue
                     except json.JSONDecodeError:
                         pass
-                # Regular terminal input (async to avoid blocking event loop)
                 await pty_manager.write_pty_async(terminal_id, text)
 
             data = msg.get("bytes")
@@ -579,12 +583,15 @@ async def startup_event():
         if relay_url and api_key:
             await tunnel_client.connect(relay_url, api_key)
 
-    # 4. Start idle session cleanup loop
+    # 4. Start idle session cleanup loop (tracked for graceful shutdown)
     async def idle_cleanup_loop():
-        while True:
-            await asyncio.sleep(60)
-            pty_manager.cleanup_idle_sessions()
-    asyncio.create_task(idle_cleanup_loop())
+        try:
+            while True:
+                await asyncio.sleep(60)
+                pty_manager.cleanup_idle_sessions()
+        except asyncio.CancelledError:
+            pass
+    app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
     logger.info("Startup complete (PID %d)", os.getpid())
 
@@ -592,6 +599,14 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Graceful shutdown: disconnect tunnel, kill sessions, clean up."""
+    # Cancel idle cleanup loop
+    cleanup_task = getattr(app.state, "idle_cleanup_task", None)
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutdown: disconnecting tunnel...")
     await tunnel_client.disconnect()
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))

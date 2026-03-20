@@ -58,6 +58,8 @@ def parse_terminal_frame(data: bytes) -> tuple[str, bytes] | None:
 class TunnelClient:
     """Manages outbound WebSocket connection to cockpit relay server."""
 
+    _SEND_QUEUE_MAX = 256  # Max queued frames before dropping (backpressure)
+
     def __init__(self, pty_manager):
         self._pty_manager = pty_manager
         self._ws = None
@@ -69,6 +71,8 @@ class TunnelClient:
         self._tasks: list[asyncio.Task] = []
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 60.0
+        self._send_queue: asyncio.Queue | None = None
+        self._last_metadata_hash: str = ""
 
     @property
     def connected(self) -> bool:
@@ -135,18 +139,26 @@ class TunnelClient:
 
     def forward_pty_output(self, terminal_id: str, data: str):
         """Queue terminal output to be sent to relay. Called from WS bridge."""
-        if not self._connected or not self._ws:
+        if not self._connected or not self._send_queue:
             return
         frame = make_terminal_frame(terminal_id, data.encode("utf-8"))
-        asyncio.create_task(self._send_bytes(frame))
+        try:
+            self._send_queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            logger.debug("Send queue full — dropping frame for %s", terminal_id)
 
-    async def _send_bytes(self, data: bytes):
-        """Send binary data to relay WebSocket."""
-        if self._ws:
-            try:
-                await self._ws.send(data)
-            except Exception:
-                pass
+    async def _send_loop(self):
+        """Drain the send queue and write to the relay WebSocket."""
+        try:
+            while self._running:
+                data = await self._send_queue.get()
+                if self._ws:
+                    try:
+                        await self._ws.send(data)
+                    except Exception:
+                        logger.debug("Relay send failed", exc_info=True)
+        except asyncio.CancelledError:
+            pass
 
     async def _connection_loop(self):
         """Connect with auto-reconnect on failure."""
@@ -169,6 +181,7 @@ class TunnelClient:
                 ) as ws:
                     self._ws = ws
                     self._reconnect_delay = 1.0  # Reset backoff on success
+                    self._send_queue = asyncio.Queue(maxsize=self._SEND_QUEUE_MAX)
 
                     # Wait for welcome
                     welcome_raw = await asyncio.wait_for(ws.recv(), timeout=10)
@@ -189,9 +202,11 @@ class TunnelClient:
                         "platform": platform.system(),
                     }))
 
-                    # Start metadata sync task
+                    # Start send loop and metadata sync tasks
+                    send_task = asyncio.create_task(self._send_loop())
                     meta_task = asyncio.create_task(self._metadata_loop())
-                    self._tasks.append(meta_task)
+                    session_tasks = [send_task, meta_task]
+                    self._tasks.extend(session_tasks)
 
                     try:
                         # Message receive loop
@@ -206,13 +221,16 @@ class TunnelClient:
                             elif isinstance(msg, str):
                                 await self._handle_control_message(msg)
                     finally:
-                        meta_task.cancel()
-                        try:
-                            await meta_task
-                        except asyncio.CancelledError:
-                            pass
-                        if meta_task in self._tasks:
-                            self._tasks.remove(meta_task)
+                        for t in session_tasks:
+                            t.cancel()
+                        for t in session_tasks:
+                            try:
+                                await t
+                            except asyncio.CancelledError:
+                                pass
+                            if t in self._tasks:
+                                self._tasks.remove(t)
+                        self._send_queue = None
 
             except asyncio.CancelledError:
                 break
@@ -305,15 +323,14 @@ class TunnelClient:
                 }))
 
     async def _metadata_loop(self):
-        """Send terminal metadata to relay every 10 seconds."""
+        """Send terminal metadata to relay every 10 seconds, only when changed."""
         try:
             while self._running and self._connected:
                 terminals = self._pty_manager.list_terminals()
-                if self._ws:
-                    await self._ws.send(json.dumps({
-                        "type": "terminal_list",
-                        "terminals": terminals,
-                    }))
+                payload = json.dumps({"type": "terminal_list", "terminals": terminals}, sort_keys=True)
+                if payload != self._last_metadata_hash and self._ws:
+                    await self._ws.send(payload)
+                    self._last_metadata_hash = payload
                 await asyncio.sleep(10)
         except asyncio.CancelledError:
             pass
@@ -338,7 +355,7 @@ class TunnelClient:
             if SETTINGS_PATH.exists():
                 return json.loads(SETTINGS_PATH.read_text())
         except Exception:
-            pass
+            logger.debug("Failed to load relay settings", exc_info=True)
         return None
 
     @classmethod
@@ -348,4 +365,4 @@ class TunnelClient:
             if SETTINGS_PATH.exists():
                 SETTINGS_PATH.unlink()
         except Exception:
-            pass
+            logger.debug("Failed to clear relay settings", exc_info=True)

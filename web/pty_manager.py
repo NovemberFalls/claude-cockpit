@@ -138,28 +138,6 @@ class PtyManager:
         self._lock = threading.Lock()  # Protects sessions dict and PID file
         self._pty_executor = ThreadPoolExecutor(max_workers=64)
 
-    def _save_child_pid(self, pid: int) -> None:
-        """Record a spawned child PID for crash-recovery cleanup."""
-        with self._lock:
-            pids = self._load_child_pids()
-            pids.add(pid)
-            try:
-                with open(self._PID_TRACK_FILE, "w") as f:
-                    f.write("\n".join(str(p) for p in pids))
-            except Exception:
-                logger.debug("Failed to save child PID %d", pid, exc_info=True)
-
-    def _remove_child_pid(self, pid: int) -> None:
-        """Remove a child PID after graceful termination."""
-        with self._lock:
-            pids = self._load_child_pids()
-            pids.discard(pid)
-            try:
-                with open(self._PID_TRACK_FILE, "w") as f:
-                    f.write("\n".join(str(p) for p in pids))
-            except Exception:
-                logger.debug("Failed to remove child PID %d", pid, exc_info=True)
-
     def _load_child_pids(self) -> set[int]:
         """Load previously tracked child PIDs."""
         try:
@@ -171,13 +149,31 @@ class PtyManager:
             logger.debug("Failed to load child PIDs", exc_info=True)
             return set()
 
-    def _clear_child_pids(self) -> None:
-        """Clear the PID tracking file."""
+    def _write_child_pids(self, pids: set[int]) -> None:
+        """Persist child PID set to disk."""
         try:
             with open(self._PID_TRACK_FILE, "w") as f:
-                f.write("")
+                f.write("\n".join(str(p) for p in pids))
         except Exception:
-            pass
+            logger.debug("Failed to write child PIDs", exc_info=True)
+
+    def _save_child_pid(self, pid: int) -> None:
+        """Record a spawned child PID for crash-recovery cleanup."""
+        with self._lock:
+            pids = self._load_child_pids()
+            pids.add(pid)
+            self._write_child_pids(pids)
+
+    def _remove_child_pid(self, pid: int) -> None:
+        """Remove a child PID after graceful termination."""
+        with self._lock:
+            pids = self._load_child_pids()
+            pids.discard(pid)
+            self._write_child_pids(pids)
+
+    def _clear_child_pids(self) -> None:
+        """Clear the PID tracking file."""
+        self._write_child_pids(set())
 
     def cleanup_orphans(self):
         """Kill cockpit-spawned claude processes left over from a previous crash.
@@ -225,36 +221,67 @@ class PtyManager:
         produced no output. Sessions whose process is actively consuming CPU
         (e.g. long-running Claude tasks) are spared even if they haven't
         produced terminal output recently.
+
+        Uses a two-pass CPU check: first pass primes psutil's internal
+        counters (interval=None returns 0.0 on first call), second pass
+        after a single short sleep gets the actual reading — avoiding the
+        blocking cpu_percent(interval=0.1) per session.
         """
         if IDLE_TIMEOUT <= 0:
             return
         now = time.time()
-        to_kill = []
+        candidates = []
         for tid, session in self.sessions.items():
             elapsed = now - session.tracker.last_output_time
             if elapsed <= IDLE_TIMEOUT:
                 continue
-            # tick() to refresh state from buffer
             session.tracker.tick()
             if session.tracker.state != "idle":
                 continue
-            # Double-check the process isn't busy (e.g. CPU-bound Claude task
-            # that simply hasn't written to the terminal in a while)
-            try:
-                import psutil
+            candidates.append((tid, elapsed))
+
+        if not candidates:
+            return
+
+        # Two-pass CPU check: prime all processes, sleep once, then read
+        pid_procs = {}
+        try:
+            import psutil
+            for tid, _ in candidates:
+                session = self.sessions.get(tid)
+                if not session:
+                    continue
                 child_pid = self._get_child_pid(session)
                 if child_pid:
-                    proc = psutil.Process(child_pid)
-                    cpu = proc.cpu_percent(interval=0.1)
+                    try:
+                        proc = psutil.Process(child_pid)
+                        proc.cpu_percent(interval=None)  # Prime (non-blocking)
+                        pid_procs[tid] = proc
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            if pid_procs:
+                time.sleep(0.1)  # Single sleep for all sessions
+        except ImportError:
+            pass
+
+        to_kill = []
+        for tid, elapsed in candidates:
+            proc = pid_procs.get(tid)
+            if proc:
+                try:
+                    cpu = proc.cpu_percent(interval=None)
                     if cpu > 5.0:
                         logger.debug("Session %s idle %.0fs but CPU %.1f%% — sparing", tid, elapsed, cpu)
                         continue
-            except Exception:
-                pass  # If we can't check CPU, proceed with kill
+                except Exception:
+                    pass
             to_kill.append(tid)
+
         for tid in to_kill:
-            logger.info("Killing idle session %s (idle %.0fs)", tid, now - self.sessions[tid].tracker.last_output_time)
-            self.kill_terminal(tid)
+            session = self.sessions.get(tid)
+            if session:
+                logger.info("Killing idle session %s (idle %.0fs)", tid, now - session.tracker.last_output_time)
+                self.kill_terminal(tid)
 
     def create_terminal(
         self,
@@ -467,7 +494,7 @@ class PtyManager:
             return False
 
     def list_terminals(self) -> list[dict]:
-        """List all active terminals."""
+        """List all active terminals, removing dead ones in a single pass."""
         result = []
         dead_ids = []
         for tid, session in self.sessions.items():
@@ -491,7 +518,6 @@ class PtyManager:
                 "tokens": session.tracker.total_tokens,
                 "cost": session.tracker.total_cost,
             })
-        # Clean up dead sessions
         for tid in dead_ids:
             self.sessions.pop(tid, None)
         return result

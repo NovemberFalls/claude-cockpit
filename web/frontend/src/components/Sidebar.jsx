@@ -1,20 +1,6 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, Pencil, CircleHelp, CircleCheck, CircleX, Loader, GitBranch, ShieldOff, Monitor, Key, Shield, Puzzle } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Monitor, Key, Shield, Puzzle } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
-
-const stateIconMap = {
-  busy: { icon: Pencil, color: "var(--accent)", className: "state-icon-busy" },
-  waiting: { icon: CircleHelp, color: "var(--yellow)", className: "" },
-  idle: { icon: CircleCheck, color: "var(--green)", className: "" },
-  running: { icon: CircleCheck, color: "var(--green)", className: "" },
-  error: { icon: CircleX, color: "var(--red)", className: "" },
-  starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
-};
-
-function StateIcon({ state }) {
-  const entry = stateIconMap[state] || stateIconMap.idle;
-  const Icon = entry.icon;
-  return <Icon size={12} style={{ color: entry.color, flexShrink: 0 }} className={entry.className} />;
-}
+import StateIcon from "./StateIcon";
 
 /** Normalize path separators to backslash for comparison */
 function norm(dir) {
@@ -184,8 +170,8 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
   );
 }
 
-function LocationNode({ node, depth = 0, sessions, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu }) {
-  const sessionsHere = sessions.filter((s) => norm(s.workdir) === norm(node.path));
+function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu }) {
+  const sessionsHere = sessionsByDir[norm(node.path)] || [];
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
 
@@ -281,7 +267,7 @@ function LocationNode({ node, depth = 0, sessions, activeIds, onSelect, onDelete
             </div>
           )}
           {node.children.map((child) => (
-            <LocationNode key={child.path} node={child} depth={depth + 1} sessions={sessions} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} />
+            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} />
           ))}
         </>
       )}
@@ -342,6 +328,17 @@ export default function Sidebar({
   const [ctxMenu, setCtxMenu] = useState(null);
 
   const tree = useMemo(() => buildTree(savedLocations), [savedLocations]);
+
+  // Pre-compute workdir → sessions[] map (O(n) once, not per LocationNode)
+  const sessionsByDir = useMemo(() => {
+    const map = {};
+    for (const s of sessions) {
+      const key = norm(s.workdir);
+      if (!map[key]) map[key] = [];
+      map[key].push(s);
+    }
+    return map;
+  }, [sessions]);
 
   // Group sessions by hostname for relay mode
   const instanceGroups = useMemo(() => {
@@ -433,7 +430,7 @@ export default function Sidebar({
           </p>
           <div className="flex flex-col">
             {tree.map((node) => (
-              <LocationNode key={node.path} node={node} depth={0} sessions={sessions} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
+              <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
             ))}
           </div>
         </>
