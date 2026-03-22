@@ -15,10 +15,10 @@ const SESSIONS_KEY = "cockpit-sessions";
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
   try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
-  catch { return fallback; }
+  catch (_) { return fallback; }
 }
 function lsSave(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
 }
 
 function loadSavedLocations() {
@@ -161,7 +161,7 @@ export default function App() {
             }
             return;
           }
-        } catch {
+        } catch (_) {
           // Backend not up yet
         }
         attempts++;
@@ -309,7 +309,7 @@ export default function App() {
     if (sessions.length !== sessionCountRef.current) {
       sessionCountRef.current = sessions.length;
       if (sessions.length > 0) saveSessions(sessions);
-      else { try { localStorage.removeItem(SESSIONS_KEY); } catch {} }
+      else { try { localStorage.removeItem(SESSIONS_KEY); } catch (_) {} }
     }
   }, [sessions]);
 
@@ -336,7 +336,7 @@ export default function App() {
           localStorage.removeItem(SESSIONS_KEY);
           return;
         }
-      } catch {
+      } catch (_) {
         // Backend unreachable — don't restore, don't clear
         return;
       }
@@ -375,9 +375,8 @@ export default function App() {
           termMap[t.id] = t;
         }
 
-        {
-          // Update existing sessions with poll data
-          setSessions((prev) => {
+        // Update existing sessions with poll data
+        setSessions((prev) => {
             let changed = false;
             const updated = prev.map((s) => {
               if (!s.terminalId || !termMap[s.terminalId]) return s;
@@ -400,7 +399,7 @@ export default function App() {
 
             return changed ? updated : prev;
           });
-      } catch {
+      } catch (_) {
         pollFailCount.current++;
         // After 3 consecutive failures (~9s), backend is dead — trigger recovery
         if (pollFailCount.current >= 3) {
@@ -440,7 +439,7 @@ export default function App() {
             const normPath = dir.replace(/\//g, "\\").replace(/\\$/, "");
             results[normPath] = data;
           }
-        } catch { /* skip */ }
+        } catch (_) { /* skip */ }
       });
       await Promise.all(fetches);
       setGitStatuses(results);
