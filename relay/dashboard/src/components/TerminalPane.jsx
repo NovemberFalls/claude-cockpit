@@ -35,7 +35,7 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize: mobile ? 9 : 13,
       fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace",
       disableStdin: mobile,  // on mobile, input bar handles it
       scrollback: 5000,

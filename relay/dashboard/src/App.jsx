@@ -16,7 +16,11 @@ import {
   RefreshCw,
   LogOut,
   Cloud,
+  ChevronLeft,
 } from "lucide-react";
+
+const isMobile = () =>
+  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768;
 import TerminalPane from "./components/TerminalPane";
 
 function LoginPage() {
@@ -393,6 +397,7 @@ export default function App() {
   const [instances, setInstances] = useState([]);
   const [selectedTerminal, setSelectedTerminal] = useState(null);
   const [activeTab, setActiveTab] = useState("instances");
+  const [mobile] = useState(isMobile);
 
   // Auth check
   useEffect(() => {
@@ -444,13 +449,18 @@ export default function App() {
     ...(user.is_admin ? [{ id: "admin", label: "Admin", icon: Shield }] : []),
   ];
 
+  // On mobile: show sidebar when no terminal selected, terminal when selected
+  const showSidebar = !mobile || !selectedTerminal;
+  const showTerminal = !mobile || !!selectedTerminal;
+
   return (
     <div className="flex h-screen">
       {/* Left panel */}
       <div
         className="flex flex-col flex-shrink-0"
         style={{
-          width: 320,
+          width: mobile ? "100%" : 320,
+          display: showSidebar ? "flex" : "none",
           borderRight: "1px solid var(--border-color)",
         }}
       >
@@ -523,13 +533,22 @@ export default function App() {
       </div>
 
       {/* Main content — terminal */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0" style={{ display: showTerminal ? "flex" : "none" }}>
         {selectedTerminal ? (
           <>
             <div
               className="flex items-center gap-2 px-4 h-10 flex-shrink-0"
               style={{ borderBottom: "1px solid var(--border-color)" }}
             >
+              {mobile && (
+                <button
+                  onClick={() => setSelectedTerminal(null)}
+                  className="p-1 rounded"
+                  style={{ color: "var(--text-muted)", marginRight: 4 }}
+                >
+                  <ChevronLeft size={18} />
+                </button>
+              )}
               <Terminal size={14} style={{ color: "var(--accent)" }} />
               <span className="text-sm font-medium">
                 {selectedTerminal.name || selectedTerminal.terminal_id}
