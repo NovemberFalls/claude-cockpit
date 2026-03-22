@@ -34,7 +34,7 @@ Build, commit, push source changes, and upload release artifacts to GitHub Relea
    Then generate `latest.json` from the `.sig` file (Tauri does NOT auto-generate this):
    - Read the signature from the `.nsis.zip.sig` file
    - Read the version from `pyproject.toml`
-   - Build `latest.json` with: version, notes (brief changelog), pub_date (UTC ISO), platforms.windows-x86_64.signature, platforms.windows-x86_64.url pointing to the GitHub Release download URL
+   - Build `latest.json` with: version, notes (brief changelog), pub_date (UTC ISO), platforms.windows-x86_64.signature, platforms.windows-x86_64.url pointing to `https://github.com/NovemberFalls/claude-cockpit/releases/download/v{version}/Claude.Cockpit_{version}_x64-setup.nsis.zip`
    - Write to `releases/latest.json`
 
 6. **Stage, commit, and push source changes only**:

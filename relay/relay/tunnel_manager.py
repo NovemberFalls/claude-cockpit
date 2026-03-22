@@ -80,6 +80,7 @@ class ConnectedInstance:
     missed_heartbeats: int = 0
     terminals: dict[str, TerminalMeta] = field(default_factory=dict)
     browser_clients: dict[str, list[WebSocket]] = field(default_factory=dict)
+    output_buffers: dict[str, bytearray] = field(default_factory=dict)  # terminal_id -> recent output
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     @property
@@ -130,6 +131,9 @@ class ConnectedInstance:
                 for t in self.terminals.values()
             ],
         }
+
+
+_SCROLLBACK_BYTES = 50 * 1024  # 50 KB per terminal
 
 
 class TunnelManager:
@@ -270,6 +274,15 @@ class TunnelManager:
         count = len(instance.browser_clients.get(terminal_id, []))
         await self._send_viewer_update(instance, terminal_id, count)
         logger.info("Browser client added for %s/%s (viewers=%d)", instance_id, terminal_id, count)
+
+        # Replay scrollback buffer so new viewers see existing terminal content
+        buf = instance.output_buffers.get(terminal_id)
+        if buf:
+            try:
+                await ws.send_text(buf.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+
         return True
 
     async def remove_browser_client(self, instance_id: str, terminal_id: str, ws: WebSocket):
@@ -308,6 +321,15 @@ class TunnelManager:
         instance = self._instances.get(instance_id)
         if not instance:
             return
+
+        # Append to scrollback buffer (capped at 50KB)
+        buf = instance.output_buffers.get(terminal_id)
+        if buf is None:
+            buf = bytearray()
+            instance.output_buffers[terminal_id] = buf
+        buf.extend(data)
+        if len(buf) > _SCROLLBACK_BYTES:
+            del buf[: len(buf) - _SCROLLBACK_BYTES]
 
         clients = instance.browser_clients.get(terminal_id, [])
         dead = []
