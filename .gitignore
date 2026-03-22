@@ -24,6 +24,7 @@ relay/dashboard/dist/
 # Relay runtime
 relay/.env
 relay/venv/
+relay/data/
 relay/__pycache__/
 relay/relay/__pycache__/
 relay/relay/routes/__pycache__/
