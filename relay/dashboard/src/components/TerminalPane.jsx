@@ -72,7 +72,8 @@ export default function TerminalPane({ instanceId, terminalId }) {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      term.writeln("\x1b[32mConnected\x1b[0m\r\n");
+      term.clear();
+      term.writeln("\x1b[32mConnected\x1b[0m");
     };
 
     ws.onmessage = (event) => {
@@ -109,33 +110,25 @@ export default function TerminalPane({ instanceId, terminalId }) {
         style={{ flex: 1, minHeight: 0, backgroundColor: "#0f1117", overflow: "hidden" }}
       />
 
-      {/* Mobile input bar — single compact row */}
+      {/* Mobile input bar */}
       {mobile && (
         <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "4px",
-          padding: "6px 8px",
-          borderTop: "2px solid #334155",
+          borderTop: "2px solid #6366f1",
           backgroundColor: "#0d1117",
           flexShrink: 0,
-          flexWrap: "wrap",
         }}>
-          {[
-            ["Esc", "\x1b"],
-            ["^C", "\x03"],
-            ["▲", "\x1b[A"],
-            ["▼", "\x1b[B"],
-            ["Tab", "\t"],
-            ["◀", "\x1b[D"],
-            ["▶", "\x1b[C"],
-          ].map(([label, seq]) => (
-            <button
-              key={label}
-              onClick={() => sendSpecial(seq)}
-              style={{
-                padding: "5px 8px",
-                fontSize: "11px",
+          {/* Special keys — horizontally scrollable */}
+          <div style={{
+            display: "flex",
+            gap: "4px",
+            padding: "6px 8px 4px",
+            overflowX: "auto",
+            WebkitOverflowScrolling: "touch",
+          }}>
+            {[["Esc","\x1b"],["^C","\x03"],["▲","\x1b[A"],["▼","\x1b[B"],["◀","\x1b[D"],["▶","\x1b[C"],["Tab","\t"]].map(([label, seq]) => (
+              <button key={label} onClick={() => sendSpecial(seq)} style={{
+                padding: "4px 10px",
+                fontSize: "12px",
                 fontFamily: "monospace",
                 borderRadius: "6px",
                 border: "1px solid #334155",
@@ -144,50 +137,45 @@ export default function TerminalPane({ instanceId, terminalId }) {
                 cursor: "pointer",
                 flexShrink: 0,
                 WebkitTapHighlightColor: "transparent",
+              }}>{label}</button>
+            ))}
+          </div>
+          {/* Text input — full width */}
+          <div style={{ display: "flex", gap: "6px", padding: "4px 8px 8px" }}>
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendText(); } }}
+              placeholder="Type command…"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              style={{
+                flex: 1,
+                padding: "8px 12px",
+                borderRadius: "8px",
+                border: "1px solid #334155",
+                backgroundColor: "#1e293b",
+                color: "#e2e8f0",
+                fontSize: "14px",
+                outline: "none",
               }}
-            >
-              {label}
-            </button>
-          ))}
-          <input
-            ref={inputRef}
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendText(); } }}
-            placeholder="Type command…"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            style={{
-              flex: 1,
-              minWidth: 80,
-              padding: "5px 10px",
-              borderRadius: "6px",
-              border: "1px solid #334155",
-              backgroundColor: "#1e293b",
-              color: "#e2e8f0",
-              fontSize: "13px",
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={sendText}
-            style={{
-              padding: "5px 14px",
-              borderRadius: "6px",
+            />
+            <button onClick={sendText} style={{
+              padding: "8px 18px",
+              borderRadius: "8px",
               border: "none",
               backgroundColor: "#6366f1",
               color: "#fff",
               fontWeight: "600",
-              fontSize: "13px",
+              fontSize: "14px",
               cursor: "pointer",
               flexShrink: 0,
               WebkitTapHighlightColor: "transparent",
-            }}
-          >
-            Send
-          </button>
+            }}>Send</button>
+          </div>
         </div>
       )}
     </div>
