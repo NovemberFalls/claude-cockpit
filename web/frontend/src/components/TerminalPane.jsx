@@ -43,6 +43,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onNameChange,  // (name) => void
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
+  onPlace,       // (sessionId, slotIndex) => void — drag from sidebar
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
 }, ref) {
@@ -316,18 +317,24 @@ const TerminalPane = forwardRef(function TerminalPane({
         onDragStart={(e) => {
           if (paneIndex == null) return;
           e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData("text/plain", String(paneIndex));
+          e.dataTransfer.setData("text/plain", `pane:${paneIndex}`);
         }}
         onDragOver={(e) => {
-          if (!onSwap) return;
+          if (!onSwap && !onPlace) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
         }}
         onDrop={(e) => {
-          if (!onSwap || paneIndex == null) return;
+          if (paneIndex == null) return;
           e.preventDefault();
-          const from = parseInt(e.dataTransfer.getData("text/plain"), 10);
-          if (!isNaN(from) && from !== paneIndex) onSwap(from, paneIndex);
+          const data = e.dataTransfer.getData("text/plain");
+          if (data.startsWith("session:")) {
+            const sessionId = data.slice(8);
+            onPlace?.(sessionId, paneIndex);
+          } else if (data.startsWith("pane:") && onSwap) {
+            const from = parseInt(data.slice(5), 10);
+            if (!isNaN(from) && from !== paneIndex) onSwap(from, paneIndex);
+          }
         }}
       >
         <div className="flex items-center gap-2 min-w-0">

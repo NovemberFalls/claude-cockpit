@@ -293,12 +293,44 @@ export default function App() {
     setActiveIds((prev) => prev.filter((id) => id !== localId));
   }, [sessions]);
 
-  // Select a session into the first pane
+  // Select a session: fill an empty pane slot if available, otherwise bump to front
   const selectSession = useCallback((id) => {
     setActiveIds((prev) => {
-      if (prev.includes(id)) return prev;
+      if (prev.slice(0, layout).includes(id)) return prev; // already visible
+      const from = prev.indexOf(id);
+      if (from !== -1) {
+        // In activeIds but not visible: swap with slot 0
+        const next = [...prev];
+        next[from] = next[0];
+        next[0] = id;
+        return next;
+      }
+      // Not in activeIds: fill next empty slot or push to front
       const next = [...prev];
-      next[0] = id;
+      if (next.length < layout) {
+        next.push(id); // fills the next empty pane slot
+      } else {
+        next.unshift(id); // all panes full: bump to front, rest shift back
+      }
+      return next;
+    });
+  }, [layout]);
+
+  // Explicitly place a session into a specific pane slot index
+  const placeSession = useCallback((sessionId, slotIndex) => {
+    setActiveIds((prev) => {
+      const from = prev.indexOf(sessionId);
+      if (from === slotIndex) return prev;
+      const next = [...prev];
+      if (from !== -1) {
+        // Already in activeIds: swap positions
+        const tmp = next[slotIndex];
+        next[slotIndex] = sessionId;
+        next[from] = tmp;
+        return next;
+      }
+      // Not in activeIds: insert at target slot, shifting others right
+      next.splice(Math.min(slotIndex, next.length), 0, sessionId);
       return next;
     });
   }, []);
@@ -783,6 +815,7 @@ export default function App() {
                     onClose={() => removeSession(session.id)}
                     paneIndex={idx}
                     onSwap={layout > 1 ? swapPanes : undefined}
+                    onPlace={placeSession}
                     terminalZoom={terminalZoom}
                     toast={toast}
                   />
@@ -791,21 +824,34 @@ export default function App() {
 
               {/* Empty pane placeholders */}
               {visibleSessions.length < layout &&
-                Array.from({ length: layout - visibleSessions.length }).map((_, i) => (
-                  <div
-                    key={`empty-${i}`}
-                    className="flex items-center justify-center"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    <button
-                      onClick={() => setShowNewDialog(true)}
-                      className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
-                      style={{ border: "1px solid var(--border-color)" }}
+                Array.from({ length: layout - visibleSessions.length }).map((_, i) => {
+                  const slotIndex = visibleSessions.length + i;
+                  return (
+                    <div
+                      key={`empty-${i}`}
+                      className="flex items-center justify-center"
+                      style={{ color: "var(--text-muted)" }}
+                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const data = e.dataTransfer.getData("text/plain");
+                        if (data.startsWith("session:")) placeSession(data.slice(8), slotIndex);
+                        else if (data.startsWith("pane:")) {
+                          const from = parseInt(data.slice(5), 10);
+                          if (!isNaN(from)) swapPanes(from, slotIndex);
+                        }
+                      }}
                     >
-                      + New Session
-                    </button>
-                  </div>
-                ))}
+                      <button
+                        onClick={() => setShowNewDialog(true)}
+                        className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
+                        style={{ border: "1px solid var(--border-color)" }}
+                      >
+                        + New Session
+                      </button>
+                    </div>
+                  );
+                })}
             </main>
           </div>
 

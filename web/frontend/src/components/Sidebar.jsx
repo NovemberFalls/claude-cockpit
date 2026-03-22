@@ -138,7 +138,14 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
 
 function SessionItem({ session, isActive, onSelect, onDelete }) {
   return (
-    <div className="group flex items-center">
+    <div
+      className="group flex items-center"
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", `session:${session.id}`);
+      }}
+    >
       <button
         onClick={() => onSelect(session.id)}
         className={`flex items-center gap-2 flex-1 text-left px-3 py-1.5 rounded-md text-sm transition-colors min-w-0 ${!isActive ? "hover-bg-surface" : ""}`}
