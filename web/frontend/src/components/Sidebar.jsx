@@ -160,11 +160,11 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
       </button>
       <button
         onClick={(e) => { e.stopPropagation(); onDelete(session.id); }}
-        className="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-all flex-shrink-0 mr-1 hover-color-red"
+        className="opacity-0 group-hover:opacity-100 p-1.5 rounded transition-all flex-shrink-0 mr-1 hover-color-red"
         style={{ color: "var(--text-muted)" }}
         title="Close session"
       >
-        <X size={12} />
+        <X size={14} />
       </button>
     </div>
   );
@@ -250,8 +250,8 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
         )}
 
         <Plus
-          size={11}
-          className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer"
+          size={14}
+          className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer p-0.5"
           style={{ color: "var(--accent)" }}
           onClick={(e) => { e.stopPropagation(); onNewAt(node.path); }}
         />
@@ -333,11 +333,11 @@ export default function Sidebar({
       {/* New button */}
       <button
         onClick={onNew}
-        className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-4 transition-colors hover-bg-surface"
+        className="flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-md mb-4 transition-colors hover-bg-surface"
         style={{ color: "var(--text-secondary)" }}
         title="New session (Ctrl+Shift+N)"
       >
-        <Plus size={15} />
+        <Plus size={17} />
         <span>New</span>
       </button>
 
