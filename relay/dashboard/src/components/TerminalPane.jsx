@@ -6,8 +6,15 @@ import "@xterm/xterm/css/xterm.css";
 const isMobile = () =>
   navigator.maxTouchPoints > 0 || window.innerWidth < 768;
 
+// Scale the xterm canvas so it renders at ~100 cols on a 360px phone,
+// matching typical desktop PTY widths. The outer wrapper clips to the
+// natural layout size; the inner (containerRef) div is enlarged then
+// scaled back, giving fitAddon more pixels to work with.
+const MOBILE_SCALE = 0.6; // inner div is 1/0.6 = 167% of wrapper
+
 export default function TerminalPane({ instanceId, terminalId }) {
-  const containerRef = useRef(null);
+  const wrapperRef = useRef(null);  // outer clip div (mobile only)
+  const containerRef = useRef(null); // xterm mount point
   const terminalRef = useRef(null);
   const wsRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -34,7 +41,9 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: mobile ? 8 : 13,
+      // On mobile: use 10px font — after MOBILE_SCALE the visual size is
+      // 6px, but fitAddon sees the full 167%-wide container → ~100 cols.
+      fontSize: mobile ? 10 : 13,
       fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace",
       disableStdin: mobile,  // on mobile, input bar handles it
       scrollback: 5000,
@@ -78,7 +87,6 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
     ws.onmessage = (event) => {
       term.write(typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data));
-      // Scroll to bottom on new output
       term.scrollToBottom();
     };
 
@@ -92,11 +100,14 @@ export default function TerminalPane({ instanceId, terminalId }) {
       });
     }
 
-    // Resize observer (desktop only — don't send resize to server)
+    // Watch the outer wrapper (mobile) or container (desktop) for size changes.
+    // When the wrapper resizes, the inner containerRef scales with it (167%),
+    // so fitAddon will remeasure and update col count correctly.
+    const observeTarget = (mobile && wrapperRef.current) ? wrapperRef.current : containerRef.current;
     const observer = new ResizeObserver(() => {
       try { fitAddon.fit(); } catch {}
     });
-    observer.observe(containerRef.current);
+    if (observeTarget) observer.observe(observeTarget);
 
     return () => {
       observer.disconnect();
@@ -118,13 +129,38 @@ export default function TerminalPane({ instanceId, terminalId }) {
     WebkitTapHighlightColor: "transparent",
   };
 
+  const pct = `${(1 / MOBILE_SCALE) * 100}%`; // "167%"
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       {/* Terminal */}
-      <div
-        ref={containerRef}
-        style={{ flex: 1, minHeight: 0, backgroundColor: "#0f1117", overflow: "hidden" }}
-      />
+      {mobile ? (
+        // Outer: participates in flex layout at normal size, clips overflow
+        <div
+          ref={wrapperRef}
+          style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden", backgroundColor: "#0f1117" }}
+        >
+          {/* Inner: enlarged then scaled back — gives fitAddon ~100 cols */}
+          <div
+            ref={containerRef}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: pct,
+              height: pct,
+              transform: `scale(${MOBILE_SCALE})`,
+              transformOrigin: "top left",
+              backgroundColor: "#0f1117",
+            }}
+          />
+        </div>
+      ) : (
+        <div
+          ref={containerRef}
+          style={{ flex: 1, minHeight: 0, backgroundColor: "#0f1117", overflow: "hidden" }}
+        />
+      )}
 
       {/* Mobile input bar */}
       {mobile && (
