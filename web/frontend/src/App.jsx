@@ -6,11 +6,7 @@ import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
-import CloudSettingsDialog from "./components/CloudSettingsDialog";
-import ApiKeysPanel from "./components/ApiKeysPanel";
-import AdminPanel from "./components/AdminPanel";
 import { useToast, ToastContainer } from "./components/Toast";
-import { ModeProvider } from "./hooks/useMode";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -75,7 +71,6 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [backendError, setBackendError] = useState(false);
-  const [appMode, setAppMode] = useState("local"); // "local" or "relay"
 
   // Sessions: { id (local), name, terminalId (backend), model, status, workdir }
   const [sessions, setSessions] = useState([]);
@@ -86,14 +81,8 @@ export default function App() {
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
-  const [cloudStatus, setCloudStatus] = useState({ connected: false, relay_url: "", instance_id: "" });
-  const [showCloudDialog, setShowCloudDialog] = useState(false);
-  const [showApiKeys, setShowApiKeys] = useState(false);
-  const [showAdmin, setShowAdmin] = useState(false);
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
-
-  const isRelay = appMode === "relay";
 
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
@@ -146,12 +135,6 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Mode context value
-  const modeCtx = useMemo(() => ({
-    mode: appMode,
-    isRelay,
-    isAdmin: user?.is_admin || false,
-  }), [appMode, isRelay, user]);
 
   // Health-check polling: wait for backend to be ready (re-runs on crash recovery)
   useEffect(() => {
@@ -175,7 +158,6 @@ export default function App() {
               setBackendReady(true);
               setBackendError(false);
               if (data.authenticated) setUser(data);
-              if (data.mode) setAppMode(data.mode);
             }
             return;
           }
@@ -234,15 +216,13 @@ export default function App() {
     const dir = workdir || "C:\\Code";
     const useModel = sessionModel || model;
 
-    if (!isRelay) addLocations([dir]);
+    addLocations([dir]);
 
-    if (!isRelay) {
-      setRecentLocations((prev) => {
-        const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
-        lsSave(RECENTS_KEY, next);
-        return next;
-      });
-    }
+    setRecentLocations((prev) => {
+      const next = [dir, ...prev.filter((l) => l !== dir)].slice(0, 5);
+      lsSave(RECENTS_KEY, next);
+      return next;
+    });
 
     const newSession = {
       id: localId,
@@ -274,10 +254,6 @@ export default function App() {
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
       };
-      // In relay mode, include instance_id so relay knows which desktop to target
-      if (isRelay && options.instance_id) {
-        body.instance_id = options.instance_id;
-      }
 
       const res = await fetch("/api/terminals", {
         method: "POST",
@@ -305,9 +281,9 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, layout, addLocations, isRelay, toast]);
+  }, [model, layout, addLocations, toast]);
 
-  // Remove a session (kills terminal on both local and relay)
+  // Remove a session (kills terminal on server)
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
     if (session?.terminalId) {
@@ -327,22 +303,21 @@ export default function App() {
     });
   }, []);
 
-  // Persist sessions to localStorage (local mode only)
+  // Persist sessions to localStorage
   const sessionCountRef = useRef(0);
   useEffect(() => {
-    if (isRelay) return;
     if (sessions.length !== sessionCountRef.current) {
       sessionCountRef.current = sessions.length;
       if (sessions.length > 0) saveSessions(sessions);
       else { try { localStorage.removeItem(SESSIONS_KEY); } catch {} }
     }
-  }, [sessions, isRelay]);
+  }, [sessions]);
 
-  // Restore saved sessions once backend is ready (local mode only)
+  // Restore saved sessions once backend is ready
   // Reconciles with backend: if backend has no terminals, saved sessions are stale (crash recovery)
   const restoredRef = useRef(false);
   useEffect(() => {
-    if (!backendReady || restoredRef.current || isRelay) return;
+    if (!backendReady || restoredRef.current) return;
     restoredRef.current = true;
 
     (async () => {
@@ -371,7 +346,7 @@ export default function App() {
         createSession(s.name, s.workdir, s.model);
       }
     })();
-  }, [backendReady, createSession, isRelay]);
+  }, [backendReady, createSession]);
 
   // Request notification permission
   const notifRequested = useRef(false);
@@ -400,52 +375,8 @@ export default function App() {
           termMap[t.id] = t;
         }
 
-        if (isRelay) {
-          // Relay mode: terminals from API ARE the sessions
-          setSessions((prev) => {
-            const newSessions = data.terminals.map((t) => ({
-              id: t.id,
-              name: t.name || "Session",
-              terminalId: t.id,
-              model: t.model || "",
-              status: "running",
-              workdir: t.workdir || "",
-              activityState: t.activity_state || "idle",
-              tokens: t.tokens || 0,
-              cost: t.cost || 0,
-              hostname: t.hostname || "",
-              instance_id: t.instance_id || "",
-            }));
-
-            for (const s of newSessions) {
-              notifyActivityChange(s.name, s.terminalId, prevStatesRef.current[s.terminalId], s.activityState);
-              prevStatesRef.current[s.terminalId] = s.activityState;
-            }
-
-            // Auto-select first session if none active
-            if (newSessions.length > 0 && prev.length === 0) {
-              setActiveIds([newSessions[0].id]);
-            }
-
-            // Skip re-render if nothing changed
-            if (newSessions.length === prev.length) {
-              let same = true;
-              for (let i = 0; i < newSessions.length; i++) {
-                const n = newSessions[i];
-                const p = prev[i];
-                if (!p || n.id !== p.id || n.activityState !== p.activityState ||
-                    n.tokens !== p.tokens || n.cost !== p.cost || n.name !== p.name) {
-                  same = false;
-                  break;
-                }
-              }
-              if (same) return prev;
-            }
-
-            return newSessions;
-          });
-        } else {
-          // Local mode: update existing sessions with poll data
+        {
+          // Update existing sessions with poll data
           setSessions((prev) => {
             let changed = false;
             const updated = prev.map((s) => {
@@ -469,7 +400,6 @@ export default function App() {
 
             return changed ? updated : prev;
           });
-        }
       } catch {
         pollFailCount.current++;
         // After 3 consecutive failures (~9s), backend is dead — trigger recovery
@@ -483,7 +413,7 @@ export default function App() {
     const id = setInterval(poll, 3000);
     poll();
     return () => clearInterval(id);
-  }, [backendReady, isRelay]);
+  }, [backendReady]);
 
   // Poll git status (local mode only)
   const sessionsRef = useRef(sessions);
@@ -496,19 +426,14 @@ export default function App() {
     const fetchGit = async () => {
       const dirs = new Set([
         ...sessionsRef.current.map((s) => s.workdir).filter(Boolean),
-        ...(isRelay ? [] : savedLocationsRef.current.map((l) => l.path)),
+        ...savedLocationsRef.current.map((l) => l.path),
       ]);
       if (dirs.size === 0) return;
       const results = {};
       const entries = [...dirs];
-      // In relay mode, derive instance_id from first session
-      const instanceId = isRelay
-        ? sessionsRef.current.find((s) => s.instance_id)?.instance_id || ""
-        : "";
       const fetches = entries.map(async (dir) => {
         try {
-          let url = `/api/git/status?path=${encodeURIComponent(dir)}`;
-          if (instanceId) url += `&instance_id=${encodeURIComponent(instanceId)}`;
+          const url = `/api/git/status?path=${encodeURIComponent(dir)}`;
           const res = await fetch(url);
           if (res.ok) {
             const data = await res.json();
@@ -523,24 +448,7 @@ export default function App() {
     fetchGit();
     const id = setInterval(fetchGit, 30000);
     return () => clearInterval(id);
-  }, [backendReady, isRelay]);
-
-  // Poll cloud tunnel status (local mode only)
-  useEffect(() => {
-    if (!backendReady || isRelay) return;
-    const pollCloud = async () => {
-      try {
-        const res = await fetch("/api/tunnel/status");
-        if (res.ok) {
-          const data = await res.json();
-          setCloudStatus(data);
-        }
-      } catch { /* skip */ }
-    };
-    pollCloud();
-    const id = setInterval(pollCloud, 5000);
-    return () => clearInterval(id);
-  }, [backendReady, isRelay]);
+  }, [backendReady]);
 
   const totalTokens = useMemo(
     () => sessions.reduce((sum, s) => sum + (s.tokens || 0), 0),
@@ -646,7 +554,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, visibleSessions, isRelay, zoomIn, zoomOut, zoomReset]);
+  }, [createSession, visibleSessions, zoomIn, zoomOut, zoomReset]);
 
   // Ctrl+MouseWheel zoom
   useEffect(() => {
@@ -744,8 +652,7 @@ export default function App() {
   }
 
   return (
-    <ModeProvider value={modeCtx}>
-      <div className="flex flex-col h-screen w-screen overflow-hidden relative">
+    <div className="flex flex-col h-screen w-screen overflow-hidden relative">
         <HexGrid />
 
         <div className="relative z-10 flex flex-col h-full">
@@ -756,9 +663,6 @@ export default function App() {
             setSidebarOpen={setSidebarOpen}
             user={user}
             onLogout={() => (window.location.href = "/logout")}
-            cloudConnected={cloudStatus.connected}
-            onCloudToggle={() => setShowCloudDialog(true)}
-            isRelay={isRelay}
           />
 
           <div className="flex flex-1 min-h-0">
@@ -784,10 +688,6 @@ export default function App() {
                   onAddLocations={addLocations}
                   onRemoveLocation={removeLocation}
                   gitStatuses={gitStatuses}
-                  isRelay={isRelay}
-                  onShowApiKeys={() => setShowApiKeys(true)}
-                  onShowAdmin={() => setShowAdmin(true)}
-                  isAdmin={user?.is_admin || false}
                 />
                 {/* Resize handle */}
                 <div
@@ -884,7 +784,6 @@ export default function App() {
                     onClose={() => removeSession(session.id)}
                     paneIndex={idx}
                     onSwap={layout > 1 ? swapPanes : undefined}
-                    isRelay={isRelay}
                     terminalZoom={terminalZoom}
                     toast={toast}
                   />
@@ -920,8 +819,6 @@ export default function App() {
             totalCost={totalCost}
             broadcastMode={broadcastMode}
             setBroadcastMode={setBroadcastMode}
-            cloudConnected={cloudStatus.connected}
-            isRelay={isRelay}
             terminalZoom={terminalZoom}
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}
@@ -958,56 +855,15 @@ export default function App() {
           <NewSessionDialog
             recentLocations={recentLocations}
             savedLocations={savedLocations}
-            isRelay={isRelay}
-            instances={isRelay ? [...new Map(sessions.map(s => [s.instance_id, { instance_id: s.instance_id, hostname: s.hostname }])).values()] : []}
-            onConfirm={(name, workdir, bypassPermissions, instanceId) => {
+            onConfirm={(name, workdir, bypassPermissions) => {
               setShowNewDialog(false);
-              createSession(name, workdir, undefined, { bypassPermissions, instance_id: instanceId });
+              createSession(name, workdir, undefined, { bypassPermissions });
             }}
             onCancel={() => setShowNewDialog(false)}
           />
         )}
 
-        {showCloudDialog && !isRelay && (
-          <CloudSettingsDialog
-            cloudStatus={cloudStatus}
-            onConnect={async (relayUrl, apiKey) => {
-              const res = await fetch("/api/tunnel/connect", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ relay_url: relayUrl, api_key: apiKey }),
-              });
-              if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data.error || "Connection failed");
-              }
-              setTimeout(async () => {
-                try {
-                  const statusRes = await fetch("/api/tunnel/status");
-                  if (statusRes.ok) setCloudStatus(await statusRes.json());
-                } catch {}
-              }, 2000);
-              setShowCloudDialog(false);
-            }}
-            onDisconnect={async () => {
-              await fetch("/api/tunnel/disconnect", { method: "POST" });
-              setCloudStatus({ connected: false, relay_url: "", instance_id: "" });
-              setShowCloudDialog(false);
-            }}
-            onCancel={() => setShowCloudDialog(false)}
-          />
-        )}
-
-        {showApiKeys && isRelay && (
-          <ApiKeysPanel onClose={() => setShowApiKeys(false)} />
-        )}
-
-        {showAdmin && isRelay && user?.is_admin && (
-          <AdminPanel onClose={() => setShowAdmin(false)} />
-        )}
-
         <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </div>
-    </ModeProvider>
   );
 }

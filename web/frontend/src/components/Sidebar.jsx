@@ -1,4 +1,4 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Monitor, Key, Shield, Puzzle } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import StateIcon from "./StateIcon";
 
@@ -275,35 +275,6 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
   );
 }
 
-function InstanceGroup({ group, activeIds, onSelect, onDelete }) {
-  const [expanded, setExpanded] = useState(true);
-  return (
-    <div>
-      <div
-        className="group flex items-center gap-1.5 py-1 px-2 cursor-pointer rounded-md transition-colors hover-bg-surface"
-        style={{ color: "var(--text-secondary)" }}
-        onClick={() => setExpanded(!expanded)}
-      >
-        <button className="p-0.5 flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-        </button>
-        <Monitor size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
-        <span className="text-xs font-medium truncate">{group.hostname}</span>
-        <span className="text-[10px] flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-          {group.sessions.length}
-        </span>
-      </div>
-      {expanded && (
-        <div style={{ paddingLeft: "12px" }}>
-          {group.sessions.map((s) => (
-            <SessionItem key={s.id} session={s} isActive={activeIds.includes(s.id)} onSelect={onSelect} onDelete={onDelete} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Sidebar({
   sessions,
   activeIds,
@@ -317,10 +288,6 @@ export default function Sidebar({
   onRemoveLocation,
   onToggleLocationBypass,
   gitStatuses = {},
-  isRelay = false,
-  onShowApiKeys,
-  onShowAdmin,
-  isAdmin = false,
 }) {
   if (!open) return null;
 
@@ -339,18 +306,6 @@ export default function Sidebar({
     }
     return map;
   }, [sessions]);
-
-  // Group sessions by hostname for relay mode
-  const instanceGroups = useMemo(() => {
-    if (!isRelay) return [];
-    const groups = {};
-    for (const s of sessions) {
-      const key = s.hostname || "Unknown";
-      if (!groups[key]) groups[key] = { hostname: key, sessions: [] };
-      groups[key].sessions.push(s);
-    }
-    return Object.values(groups);
-  }, [sessions, isRelay]);
 
   // Expand 1 layer: fetch subdirs from backend and add them
   const handleExpand = useCallback(async (path) => {
@@ -386,31 +341,8 @@ export default function Sidebar({
         <span>New</span>
       </button>
 
-      {/* Relay mode: instance groups */}
-      {isRelay && (
-        <>
-          <p
-            className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
-            style={{ color: "var(--text-muted)" }}
-          >
-            Instances
-          </p>
-          {instanceGroups.length > 0 ? (
-            <div className="flex flex-col mb-4">
-              {instanceGroups.map((group) => (
-                <InstanceGroup key={group.hostname} group={group} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} />
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs px-3 mb-4" style={{ color: "var(--text-muted)" }}>
-              No instances connected
-            </p>
-          )}
-        </>
-      )}
-
       {/* Empty state */}
-      {!isRelay && tree.length === 0 && sessions.length === 0 && (
+      {tree.length === 0 && sessions.length === 0 && (
         <p
           className="text-xs text-center py-8 px-3"
           style={{ color: "var(--text-muted)" }}
@@ -420,7 +352,7 @@ export default function Sidebar({
       )}
 
       {/* Location tree */}
-      {!isRelay && tree.length > 0 && (
+      {tree.length > 0 && (
         <>
           <p
             className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
@@ -436,79 +368,28 @@ export default function Sidebar({
         </>
       )}
 
-      {/* Local mode: resources footer */}
-      {!isRelay && (
-        <>
-          <div style={{ flex: 1 }} />
-          <div
-            className="border-t pt-3 mt-3"
-            style={{ borderColor: "var(--border-color)" }}
+      {/* Resources footer */}
+      <>
+        <div style={{ flex: 1 }} />
+        <div
+          className="border-t pt-3 mt-3"
+          style={{ borderColor: "var(--border-color)" }}
+        >
+          <button
+            onClick={() => {
+              const url = "https://registry.modelcontextprotocol.io/";
+              fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
+                .catch(() => window.open(url, "_blank"));
+            }}
+            className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
+            style={{ color: "var(--text-secondary)" }}
+            title="Browse MCP server registry"
           >
-            <button
-              onClick={() => {
-                const url = "https://registry.modelcontextprotocol.io/";
-                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
-                  .catch(() => window.open(url, "_blank"));
-              }}
-              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-              style={{ color: "var(--text-secondary)" }}
-              title="Browse MCP server registry"
-            >
-              <Puzzle size={12} />
-              MCP Servers
-            </button>
-          </div>
-        </>
-      )}
-
-      {/* Relay mode: settings section */}
-      {isRelay && (
-        <>
-          <div style={{ flex: 1 }} />
-          <div
-            className="border-t pt-3 mt-3"
-            style={{ borderColor: "var(--border-color)" }}
-          >
-            <p
-              className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
-              style={{ color: "var(--text-muted)" }}
-            >
-              Settings
-            </p>
-            <button
-              onClick={onShowApiKeys}
-              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              <Key size={12} />
-              API Keys
-            </button>
-            {isAdmin && (
-              <button
-                onClick={onShowAdmin}
-                className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <Shield size={12} />
-                Admin
-              </button>
-            )}
-            <button
-              onClick={() => {
-                const url = "https://registry.modelcontextprotocol.io/";
-                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
-                  .catch(() => window.open(url, "_blank"));
-              }}
-              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-              style={{ color: "var(--text-secondary)" }}
-              title="Browse MCP server registry"
-            >
-              <Puzzle size={12} />
-              MCP Servers
-            </button>
-          </div>
-        </>
-      )}
+            <Puzzle size={12} />
+            MCP Servers
+          </button>
+        </div>
+      </>
 
       {/* Context menu */}
       {ctxMenu && (

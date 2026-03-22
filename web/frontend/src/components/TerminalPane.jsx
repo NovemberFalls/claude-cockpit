@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { X, GripVertical, Send } from "lucide-react";
+import { X, GripVertical } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
@@ -37,107 +37,12 @@ function buildXtermTheme(theme) {
   };
 }
 
-/**
- * Chat-style input bar for relay mode (phone sessions).
- * Bypasses xterm.js's hidden textarea to avoid IME/composition duplication
- * on mobile keyboards. Sends raw text + special key sequences over WebSocket.
- */
-function RelayInputBar({ wsRef, theme }) {
-  const [inputValue, setInputValue] = useState("");
-  const inputRef = useRef(null);
-
-  const sendText = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(inputValue + "\n");
-    }
-    setInputValue("");
-    inputRef.current?.focus();
-  }, [inputValue, wsRef]);
-
-  const sendSpecial = useCallback((seq) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(seq);
-    }
-    inputRef.current?.focus();
-  }, [wsRef]);
-
-  const pillStyle = {
-    padding: "4px 10px",
-    fontSize: "12px",
-    fontFamily: "monospace",
-    borderRadius: "9999px",
-    border: "1px solid var(--border-color)",
-    backgroundColor: "var(--bg-surface)",
-    color: "var(--text-secondary)",
-    cursor: "pointer",
-    flexShrink: 0,
-    WebkitTapHighlightColor: "transparent",
-  };
-
-  return (
-    <div
-      className="flex items-center gap-2 px-3 py-2 flex-shrink-0"
-      style={{
-        borderTop: "1px solid var(--border-color)",
-        backgroundColor: theme.bgSurface || "var(--bg-surface)",
-      }}
-    >
-      <div className="flex items-center gap-1 flex-shrink-0">
-        <button style={pillStyle} onClick={() => sendSpecial("\x1b")}>Esc</button>
-        <button style={pillStyle} onClick={() => sendSpecial("\x03")}>Ctrl+C</button>
-        <button style={pillStyle} onClick={() => sendSpecial("\x1b[A")}>&uarr;</button>
-        <button style={pillStyle} onClick={() => sendSpecial("\x1b[B")}>&darr;</button>
-        <button style={pillStyle} onClick={() => sendSpecial("\t")}>Tab</button>
-      </div>
-      <input
-        ref={inputRef}
-        type="text"
-        className="relay-input flex-1 text-sm px-3 py-1.5 rounded-lg min-w-0"
-        style={{
-          backgroundColor: "var(--bg)",
-          color: "var(--text-primary)",
-          border: "1px solid var(--border-color)",
-          outline: "none",
-          fontFamily: "inherit",
-        }}
-        placeholder="Type here..."
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            sendText();
-          }
-        }}
-        autoComplete="off"
-        autoCorrect="off"
-        spellCheck={false}
-      />
-      <button
-        onClick={sendText}
-        className="flex-shrink-0 p-1.5 rounded-lg"
-        style={{
-          backgroundColor: "var(--accent)",
-          color: "var(--bg)",
-          border: "none",
-          cursor: "pointer",
-          WebkitTapHighlightColor: "transparent",
-        }}
-        title="Send"
-      >
-        <Send size={16} />
-      </button>
-    </div>
-  );
-}
-
 const TerminalPane = forwardRef(function TerminalPane({
   session,       // { id, name, terminalId, model, status, activityState }
   onClose,       // () => void
   onNameChange,  // (name) => void
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
-  isRelay = false, // true when running in relay mode (disables file drop)
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
 }, ref) {
@@ -267,7 +172,6 @@ const TerminalPane = forwardRef(function TerminalPane({
       allowTransparency: false,
       scrollback: 10000,
       convertEol: true,
-      disableStdin: isRelay,
     });
 
     const fitAddon = new FitAddon();
@@ -283,14 +187,12 @@ const TerminalPane = forwardRef(function TerminalPane({
     // Fit once mounted (double-rAF to ensure layout is settled)
     requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
-    // Terminal input -> WebSocket (disabled in relay mode — RelayInputBar handles input)
-    if (!isRelay) {
-      term.onData((data) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(data);
-        }
-      });
-    }
+    // Terminal input -> WebSocket
+    term.onData((data) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(data);
+      }
+    });
 
     // Resize observer with debounce
     resizeObserver.current = new ResizeObserver(() => {
@@ -473,12 +375,9 @@ const TerminalPane = forwardRef(function TerminalPane({
           padding: "4px 8px",
           backgroundColor: theme.bg,
         }}
-        onDrop={isRelay ? undefined : handleDrop}
-        onDragOver={isRelay ? undefined : handleDragOver}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
       />
-
-      {/* Relay input bar (phone sessions) */}
-      {isRelay && <RelayInputBar wsRef={wsRef} theme={theme} />}
     </div>
   );
 });

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { PanelLeft, LogOut, ChevronDown, Cloud, CloudOff } from "lucide-react";
+import { PanelLeft, LogOut, ChevronDown } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const MODELS = [
@@ -15,9 +15,6 @@ export default function TopBar({
   setSidebarOpen,
   user,
   onLogout,
-  cloudConnected,
-  onCloudToggle,
-  isRelay = false,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const { themeId, switchTheme, themes } = useTheme();
@@ -43,18 +40,6 @@ export default function TopBar({
           Cockpit
         </span>
         <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "var(--accent)" }} />
-        {isRelay && (
-          <span
-            className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full"
-            style={{
-              color: "var(--green)",
-              backgroundColor: "var(--bg-surface)",
-              border: "1px solid var(--border-color)",
-            }}
-          >
-            Cloud
-          </span>
-        )}
       </div>
 
       {/* Right */}
@@ -155,20 +140,6 @@ export default function TopBar({
           >
             Plan
           </span>
-
-        {/* Cloud toggle (local mode only) */}
-        {!isRelay && (
-          <button
-            onClick={onCloudToggle}
-            className={`p-1.5 rounded-md transition-colors ${!cloudConnected ? "hover-color-secondary" : ""}`}
-            style={{
-              color: cloudConnected ? "var(--green)" : "var(--text-muted)",
-            }}
-            title={cloudConnected ? "Cloud relay connected" : "Connect to cloud relay"}
-          >
-            {cloudConnected ? <Cloud size={15} /> : <CloudOff size={15} />}
-          </button>
-        )}
 
         {/* Avatar */}
         {user?.picture ? (

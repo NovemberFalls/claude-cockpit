@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X, FolderOpen, Folder, ShieldOff, Monitor } from "lucide-react";
+import { X, FolderOpen, Folder, ShieldOff } from "lucide-react";
 
 function normPath(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
@@ -10,8 +10,6 @@ export default function NewSessionDialog({
   savedLocations = [],
   onConfirm,
   onCancel,
-  isRelay = false,
-  instances = [],
 }) {
   const initialDir = recentLocations[0] || "C:\\Code";
   const [workdir, setWorkdir] = useState(initialDir);
@@ -22,7 +20,6 @@ export default function NewSessionDialog({
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
-  const [selectedInstance, setSelectedInstance] = useState(instances[0]?.instance_id || "");
   const inputRef = useRef(null);
   const dirRef = useRef(null);
   const suggestionsRef = useRef(null);
@@ -61,10 +58,7 @@ export default function NewSessionDialog({
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       try {
-        let url = `/api/browse?path=${encodeURIComponent(path)}`;
-        if (isRelay && selectedInstance) {
-          url += `&instance_id=${encodeURIComponent(selectedInstance)}`;
-        }
+        const url = `/api/browse?path=${encodeURIComponent(path)}`;
         const res = await fetch(url);
         const data = await res.json();
         setSuggestions(data.dirs || []);
@@ -74,7 +68,7 @@ export default function NewSessionDialog({
         setSuggestions([]);
       }
     }, 150);
-  }, [isRelay, selectedInstance]);
+  }, []);
 
   const handleDirChange = (e) => {
     const val = e.target.value;
@@ -140,7 +134,7 @@ export default function NewSessionDialog({
       setShowSuggestions(false);
       return;
     }
-    onConfirm(name.trim(), workdir.trim(), bypassPermissions, isRelay ? selectedInstance : undefined);
+    onConfirm(name.trim(), workdir.trim(), bypassPermissions);
   };
 
   const handleKeyDown = (e) => {
@@ -185,35 +179,6 @@ export default function NewSessionDialog({
         </div>
 
         <form onSubmit={handleSubmit}>
-          {/* Instance picker (relay mode with multiple instances) */}
-          {isRelay && instances.length > 1 && (
-            <>
-              <label
-                className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-medium mb-1"
-                style={{ color: "var(--text-muted)" }}
-              >
-                <Monitor size={11} />
-                Target Instance
-              </label>
-              <select
-                value={selectedInstance}
-                onChange={(e) => setSelectedInstance(e.target.value)}
-                className="w-full px-3 py-1.5 rounded text-sm mb-3 outline-none"
-                style={{
-                  backgroundColor: "var(--bg-surface)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-color)",
-                }}
-              >
-                {instances.map((inst) => (
-                  <option key={inst.instance_id} value={inst.instance_id}>
-                    {inst.hostname || inst.instance_id}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
-
           {/* Session name (optional) */}
           <label
             className="block text-[11px] uppercase tracking-wider font-medium mb-1"

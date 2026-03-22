@@ -11,23 +11,12 @@ claude-cockpit/
     pty_manager.py     # ConPTY process manager (Windows-specific, winpty)
     logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty)
     auth.py            # Google OAuth with localhost bypass
-    tunnel.py          # Cloud relay WebSocket tunnel (optional)
     tests/             # Python test suite (pytest + pytest-asyncio, 24 tests)
     frontend/
       src/
         App.jsx        # Root component, all session state, session reconciliation
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog,
                        # ErrorBoundary, Toast, ConfirmDialog, HexGrid, ApiKeysPanel
-  relay/
-    relay/             # FastAPI relay server (runs on .221 Linux box)
-      main.py          # App entry point (port 8430)
-      tunnel_manager.py# Routes PTY frames between desktop and browser clients
-      routes/          # terminal.py, tunnel.py, api.py, admin.py
-      auth.py, config.py, models.py
-    dashboard/         # React admin dashboard (Vite)
-    deploy/
-      cockpit-relay.service  # systemd unit (points to ~/projects/claude-cockpit/relay)
-      setup.sh               # First-time setup on .221
         __tests__/     # Frontend tests (vitest, 70 tests)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)
@@ -88,7 +77,7 @@ cd web/frontend && npm run lint
 - **WebSocket bridge:** `/ws/terminal/{id}` proxies between the browser and ConPTY, with ping/pong heartbeat every 30 seconds.
 - **Session model:** `{ id, name, terminalId, model, status, workdir }` -- workdir supported end-to-end from frontend through REST API to ConPTY cwd.
 - **Startup cleanup:** Orphaned claude.exe processes killed via psutil, PID file for crash detection, session reconciliation with frontend.
-- **Graceful shutdown:** Disconnect tunnel → terminate sessions → cleanup uploads → delete PID → log.
+- **Graceful shutdown:** Terminate sessions → cleanup uploads → delete PID → log.
 
 ## Key Constraints
 

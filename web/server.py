@@ -30,7 +30,6 @@ logger = logging.getLogger("cockpit.server")
 
 from auth import SECRET_KEY, oauth, user_store
 from pty_manager import pty_manager
-from tunnel import TunnelClient
 
 START_TIME = _time.time()
 
@@ -54,9 +53,6 @@ app.add_middleware(
 )
 
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
-
-# ── Tunnel Client (Cloud Relay) ──────────────────────────
-tunnel_client = TunnelClient(pty_manager)
 
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
@@ -401,7 +397,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                             data[max(0, data.index("\ufffd") - 20) : data.index("\ufffd") + 20],
                         )
                     await websocket.send_text(data)
-                    tunnel_client.forward_pty_output(terminal_id, data)
                     await asyncio.sleep(0)
                 else:
                     await asyncio.sleep(0.01)
@@ -484,37 +479,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             pass
 
 
-# ── Cloud Tunnel ─────────────────────────────────────────
-
-
-@app.post("/api/tunnel/connect")
-async def tunnel_connect(request: Request):
-    """Connect to cloud relay server."""
-    body = await request.json()
-    relay_url = body.get("relay_url", "")
-    api_key = body.get("api_key", "")
-
-    if not relay_url or not api_key:
-        return JSONResponse({"error": "relay_url and api_key required"}, status_code=400)
-
-    await tunnel_client.connect(relay_url, api_key)
-    return JSONResponse({"status": "connecting", "relay_url": relay_url})
-
-
-@app.post("/api/tunnel/disconnect")
-async def tunnel_disconnect():
-    """Disconnect from cloud relay server."""
-    await tunnel_client.disconnect()
-    TunnelClient.clear_settings()
-    return JSONResponse({"status": "disconnected"})
-
-
-@app.get("/api/tunnel/status")
-async def tunnel_status():
-    """Get cloud tunnel connection status."""
-    return JSONResponse(tunnel_client.status())
-
-
 @app.post("/api/open-url")
 async def open_url(request: Request):
     """Open a URL in the system's default browser."""
@@ -565,7 +529,7 @@ async def static_files(path: str):
 
 @app.on_event("startup")
 async def startup_event():
-    """Clean up orphans, write PID file, auto-connect tunnel, start idle cleanup."""
+    """Clean up orphans, write PID file, start idle cleanup."""
     # 1. Clean up orphaned processes from previous crashes
     pty_manager.cleanup_orphans()
 
@@ -582,15 +546,7 @@ async def startup_event():
         pass
     PID_FILE.write_text(str(os.getpid()))
 
-    # 3. Auto-connect to cloud relay if previously configured
-    settings = TunnelClient.load_settings()
-    if settings and settings.get("auto_connect"):
-        relay_url = settings.get("relay_url", "")
-        api_key = settings.get("api_key", "")
-        if relay_url and api_key:
-            await tunnel_client.connect(relay_url, api_key)
-
-    # 4. Start idle session cleanup loop (tracked for graceful shutdown)
+    # 3. Start idle session cleanup loop (tracked for graceful shutdown)
     async def idle_cleanup_loop():
         try:
             while True:
@@ -605,7 +561,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Graceful shutdown: disconnect tunnel, kill sessions, clean up."""
+    """Graceful shutdown: kill sessions, clean up."""
     # Cancel idle cleanup loop
     cleanup_task = getattr(app.state, "idle_cleanup_task", None)
     if cleanup_task:
@@ -614,8 +570,6 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             pass
-    logger.info("Shutdown: disconnecting tunnel...")
-    await tunnel_client.disconnect()
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")

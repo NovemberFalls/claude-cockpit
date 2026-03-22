@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Cloud, Plus, Minus } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus } from "lucide-react";
 import { version } from "../../package.json";
 
 const layoutOptions = [
@@ -25,8 +25,6 @@ export default function StatusBar({
   totalCost,
   broadcastMode,
   setBroadcastMode,
-  cloudConnected,
-  isRelay = false,
   terminalZoom = 13,
   onZoomIn,
   onZoomOut,
@@ -45,22 +43,15 @@ export default function StatusBar({
       }}
     >
       <div className="flex items-center gap-4">
-        {/* Connection / Mode indicator */}
-        {isRelay ? (
-          <span className="flex items-center gap-1" style={{ color: "var(--green)" }}>
-            <Cloud size={10} />
-            Cloud
-          </span>
-        ) : (
-          <span className="flex items-center gap-1">
-            {connected ? (
-              <Wifi size={10} style={{ color: "var(--green)" }} />
-            ) : (
-              <WifiOff size={10} style={{ color: "var(--red)" }} />
-            )}
-            {connected ? "Connected" : "Disconnected"}
-          </span>
-        )}
+        {/* Connection indicator */}
+        <span className="flex items-center gap-1">
+          {connected ? (
+            <Wifi size={10} style={{ color: "var(--green)" }} />
+          ) : (
+            <WifiOff size={10} style={{ color: "var(--red)" }} />
+          )}
+          {connected ? "Connected" : "Disconnected"}
+        </span>
 
         <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
         {runningCount > 0 && (
@@ -68,14 +59,6 @@ export default function StatusBar({
         )}
         <span>Tokens: {totalTokens.toLocaleString()}</span>
         <span>Cost: ${totalCost.toFixed(2)}</span>
-
-        {/* Cloud indicator (local mode only, when connected) */}
-        {!isRelay && cloudConnected && (
-          <span className="flex items-center gap-1" style={{ color: "var(--green)" }}>
-            <Cloud size={10} />
-            Cloud
-          </span>
-        )}
 
         <span style={{ opacity: 0.5 }}>v{version}</span>
       </div>
