@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 
 const isMobile = () =>
-  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 768;
+  navigator.maxTouchPoints > 0 || window.innerWidth < 768;
 import TerminalPane from "./components/TerminalPane";
 
 function LoginPage() {

@@ -4,8 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
 const isMobile = () =>
-  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-  window.innerWidth < 768;
+  navigator.maxTouchPoints > 0 || window.innerWidth < 768;
 
 export default function TerminalPane({ instanceId, terminalId }) {
   const containerRef = useRef(null);
