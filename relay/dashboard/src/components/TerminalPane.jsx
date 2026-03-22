@@ -35,7 +35,7 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: mobile ? 9 : 13,
+      fontSize: mobile ? 8 : 13,
       fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace",
       disableStdin: mobile,  // on mobile, input bar handles it
       scrollback: 5000,
@@ -121,17 +121,11 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      {/* Terminal — on mobile, wider than viewport so more cols fit; scrollable */}
-      <div style={{ flex: 1, minHeight: 0, overflow: mobile ? "auto" : "hidden" }}>
-        <div
-          ref={containerRef}
-          style={{
-            height: "100%",
-            width: mobile ? "200vw" : "100%",
-            backgroundColor: "#0f1117",
-          }}
-        />
-      </div>
+      {/* Terminal */}
+      <div
+        ref={containerRef}
+        style={{ flex: 1, minHeight: 0, backgroundColor: "#0f1117", overflow: "hidden" }}
+      />
 
       {/* Mobile input bar */}
       {mobile && (
