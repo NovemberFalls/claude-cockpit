@@ -121,11 +121,17 @@ export default function TerminalPane({ instanceId, terminalId }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      {/* Terminal */}
-      <div
-        ref={containerRef}
-        style={{ flex: 1, minHeight: 0, backgroundColor: "#0f1117", overflow: "hidden" }}
-      />
+      {/* Terminal — on mobile, wider than viewport so more cols fit; scrollable */}
+      <div style={{ flex: 1, minHeight: 0, overflow: mobile ? "auto" : "hidden" }}>
+        <div
+          ref={containerRef}
+          style={{
+            height: "100%",
+            width: mobile ? "200vw" : "100%",
+            backgroundColor: "#0f1117",
+          }}
+        />
+      </div>
 
       {/* Mobile input bar */}
       {mobile && (

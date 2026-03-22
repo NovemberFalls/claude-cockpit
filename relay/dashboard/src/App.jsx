@@ -454,7 +454,7 @@ export default function App() {
   const showTerminal = !mobile || !!selectedTerminal;
 
   return (
-    <div className="flex h-screen">
+    <div style={{ display: "flex", height: "100dvh" }}>
       {/* Left panel */}
       <div
         className="flex flex-col flex-shrink-0"
@@ -557,7 +557,7 @@ export default function App() {
                 on {selectedTerminal.instance_id}
               </span>
             </div>
-            <div className="flex-1 min-h-0">
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               <TerminalPane
                 key={`${selectedTerminal.instance_id}-${selectedTerminal.terminal_id}`}
                 instanceId={selectedTerminal.instance_id}
