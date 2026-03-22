@@ -393,6 +393,13 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 data = await pty_manager.read_pty(terminal_id)
                 if data:
                     session.tracker.feed(data)
+                    # Diagnostic: log any replacement characters (garbled output investigation)
+                    if "\ufffd" in data:
+                        logger.debug(
+                            "PTY replacement chars in terminal %s: %r",
+                            terminal_id,
+                            data[max(0, data.index("\ufffd") - 20) : data.index("\ufffd") + 20],
+                        )
                     await websocket.send_text(data)
                     tunnel_client.forward_pty_output(terminal_id, data)
                     await asyncio.sleep(0)

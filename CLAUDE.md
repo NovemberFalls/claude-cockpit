@@ -18,6 +18,16 @@ claude-cockpit/
         App.jsx        # Root component, all session state, session reconciliation
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog,
                        # ErrorBoundary, Toast, ConfirmDialog, HexGrid, ApiKeysPanel
+  relay/
+    relay/             # FastAPI relay server (runs on .221 Linux box)
+      main.py          # App entry point (port 8430)
+      tunnel_manager.py# Routes PTY frames between desktop and browser clients
+      routes/          # terminal.py, tunnel.py, api.py, admin.py
+      auth.py, config.py, models.py
+    dashboard/         # React admin dashboard (Vite)
+    deploy/
+      cockpit-relay.service  # systemd unit (points to ~/projects/claude-cockpit/relay)
+      setup.sh               # First-time setup on .221
         __tests__/     # Frontend tests (vitest, 70 tests)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)

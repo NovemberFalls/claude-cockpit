@@ -18,6 +18,15 @@ credentials*.json
 
 # Node
 web/frontend/node_modules/
+relay/dashboard/node_modules/
+relay/dashboard/dist/
+
+# Relay runtime
+relay/.env
+relay/venv/
+relay/__pycache__/
+relay/relay/__pycache__/
+relay/relay/routes/__pycache__/
 
 # Tauri build artifacts
 web/frontend/src-tauri/target/

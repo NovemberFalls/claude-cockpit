@@ -73,6 +73,7 @@ class TunnelClient:
         self._max_reconnect_delay = 60.0
         self._send_queue: asyncio.Queue | None = None
         self._last_metadata_hash: str = ""
+        self._viewer_counts: dict[str, int] = {}  # terminal_id -> active browser count
 
     @property
     def connected(self) -> bool:
@@ -141,6 +142,8 @@ class TunnelClient:
         """Queue terminal output to be sent to relay. Called from WS bridge."""
         if not self._connected or not self._send_queue:
             return
+        if self._viewer_counts.get(terminal_id, 0) == 0:
+            return  # No remote viewers — skip tunnel forwarding to save bandwidth
         frame = make_terminal_frame(terminal_id, data.encode("utf-8"))
         try:
             self._send_queue.put_nowait(frame)
@@ -192,6 +195,7 @@ class TunnelClient:
 
                     self._instance_id = welcome.get("instance_id", "")
                     self._connected = True
+                    self._viewer_counts.clear()  # Fresh connection — no viewers yet
                     logger.info("Tunnel connected, instance_id=%s", self._instance_id)
 
                     # Send hello
@@ -274,6 +278,13 @@ class TunnelClient:
             method = data.get("method", "")
             params = data.get("params", {})
             asyncio.create_task(self._handle_rpc(request_id, method, params))
+
+        elif msg_type == "viewer_update":
+            terminal_id = data.get("terminal_id", "")
+            count = int(data.get("count", 0))
+            if terminal_id:
+                self._viewer_counts[terminal_id] = count
+                logger.debug("Viewer count for %s: %d", terminal_id, count)
 
         elif msg_type == "admin_kill":
             reason = data.get("reason", "Disconnected by admin")

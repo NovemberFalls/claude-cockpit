@@ -1,0 +1,15 @@
+[Unit]
+Description=Cockpit Relay Server
+After=network.target
+
+[Service]
+Type=simple
+User=lennart
+WorkingDirectory=/home/lennart/projects/claude-cockpit/relay
+EnvironmentFile=/home/lennart/projects/claude-cockpit/relay/.env
+ExecStart=/home/lennart/projects/claude-cockpit/relay/venv/bin/python -m relay.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
