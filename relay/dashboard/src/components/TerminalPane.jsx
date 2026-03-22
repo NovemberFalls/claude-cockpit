@@ -12,14 +12,23 @@ export default function TerminalPane({ instanceId, terminalId }) {
   const wsRef = useRef(null);
   const fitAddonRef = useRef(null);
   const [mobile] = useState(isMobile);
+  const [inputValue, setInputValue] = useState("");
+  const inputRef = useRef(null);
 
   const sendSpecial = useCallback((seq) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(seq);
     }
-    // Refocus xterm so keyboard stays open on mobile
-    terminalRef.current?.focus();
+    inputRef.current?.focus();
   }, []);
+
+  const sendText = useCallback((text) => {
+    const val = text ?? inputValue;
+    if (!val || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(val + "\r");
+    setInputValue("");
+    inputRef.current?.focus();
+  }, [inputValue]);
 
   useEffect(() => {
     if (!containerRef.current || !instanceId || !terminalId) return;
@@ -28,7 +37,7 @@ export default function TerminalPane({ instanceId, terminalId }) {
       cursorBlink: true,
       fontSize: mobile ? 7 : 13,
       fontFamily: "'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace",
-      disableStdin: false,  // allow direct typing on mobile too
+      disableStdin: mobile,  // mobile uses the input bar below
       scrollback: 1000,
       convertEol: true,
       theme: {
@@ -132,10 +141,45 @@ export default function TerminalPane({ instanceId, terminalId }) {
               }}>{label}</button>
             ))}
           </div>
-          {/* Tap hint */}
-          <p style={{ margin: "2px 8px 6px", fontSize: "11px", color: "#475569" }}>
-            Tap the terminal above to type directly
-          </p>
+          {/* Input row */}
+          <div style={{ display: "flex", alignItems: "center", padding: "4px 8px 8px", gap: "6px" }}>
+            <span style={{ color: "#6366f1", fontFamily: "monospace", fontSize: "14px", flexShrink: 0 }}>›</span>
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendText(); } }}
+              placeholder="type command…"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              style={{
+                flex: 1,
+                padding: "7px 10px",
+                borderRadius: "6px",
+                border: "1px solid #334155",
+                backgroundColor: "#0f1117",
+                color: "#e2e8f0",
+                fontFamily: "monospace",
+                fontSize: "13px",
+                outline: "none",
+              }}
+            />
+            <button onClick={() => sendText()} style={{
+              padding: "7px 16px",
+              borderRadius: "6px",
+              border: "none",
+              backgroundColor: "#6366f1",
+              color: "#fff",
+              fontWeight: "600",
+              fontSize: "13px",
+              cursor: "pointer",
+              flexShrink: 0,
+              WebkitTapHighlightColor: "transparent",
+            }}>↵</button>
+          </div>
         </div>
       )}
     </div>
