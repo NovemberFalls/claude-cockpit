@@ -275,11 +275,14 @@ class TunnelManager:
         await self._send_viewer_update(instance, terminal_id, count)
         logger.info("Browser client added for %s/%s (viewers=%d)", instance_id, terminal_id, count)
 
-        # Replay scrollback buffer so new viewers see existing terminal content
+        # Replay recent scrollback so new viewers see current terminal state.
+        # Send only the last 5 KB — enough for the current visible screen but
+        # avoids replaying the entire history of tool-call permission bars.
         buf = instance.output_buffers.get(terminal_id)
         if buf:
             try:
-                await ws.send_text(buf.decode("utf-8", errors="replace"))
+                recent = bytes(buf[-5120:]) if len(buf) > 5120 else bytes(buf)
+                await ws.send_text(recent.decode("utf-8", errors="replace"))
             except Exception:
                 pass
 
