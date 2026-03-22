@@ -61,17 +61,13 @@ async def browser_terminal(websocket: WebSocket, instance_id: str, terminal_id: 
             # Handle text input from browser
             text = msg.get("text")
             if text:
-                # Check for JSON control messages (resize)
+                # Check for JSON control messages
                 if text.startswith("{"):
                     try:
                         ctrl = json.loads(text)
                         if ctrl.get("type") == "resize":
-                            await tunnel_manager.send_to_tunnel(instance_id, {
-                                "type": "terminal_resize",
-                                "terminal_id": terminal_id,
-                                "cols": ctrl.get("cols", 120),
-                                "rows": ctrl.get("rows", 30),
-                            })
+                            # Do NOT forward browser resize to the PTY — the PTY keeps
+                            # the desktop user's dimensions. Remote viewers adapt to it.
                             continue
                     except json.JSONDecodeError:
                         pass
