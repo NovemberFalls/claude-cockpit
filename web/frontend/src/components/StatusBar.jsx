@@ -80,7 +80,7 @@ export default function StatusBar({
               borderRadius: "8px",
               padding: "12px 16px",
               boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-              minWidth: "240px",
+              minWidth: "300px",
               zIndex: 100,
             }}
           >
@@ -101,6 +101,30 @@ export default function StatusBar({
             <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "8px 0" }} />
             <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
               Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
+            </p>
+
+            <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "10px 0 8px" }} />
+            <div className="flex items-center gap-1.5 mb-2">
+              <Network size={11} style={{ color: "var(--accent)", flexShrink: 0 }} />
+              <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+                Orchestrator Mode
+              </p>
+            </div>
+            <ol style={{ paddingLeft: "14px", margin: 0 }}>
+              {[
+                ["Enable", <>Click the <Network size={10} style={{ display: "inline", verticalAlign: "middle" }} /> icon in the status bar to turn on Orchestrator Mode.</>],
+                ["Create the Orchestrator", "Open a New Session and check \"Start as Orchestrator\". This session gets MCP tools to control all others. Look for the ORCH badge."],
+                ["Open worker sessions", "Create more sessions normally. Each shows a #id badge — that's its address."],
+                ["Give it a task", "In the orchestrator pane, tell Claude what to delegate. It can list sessions, read their output, and send them input autonomously."],
+              ].map(([step, desc], i) => (
+                <li key={i} className="text-[11px] mb-1.5" style={{ color: "var(--text-muted)", lineHeight: 1.4 }}>
+                  <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{step}: </span>
+                  {desc}
+                </li>
+              ))}
+            </ol>
+            <p className="text-[10px] mt-1" style={{ color: "var(--text-muted)", opacity: 0.7 }}>
+              Tip: use Quad layout so you can watch orchestrator + 3 workers at once.
             </p>
           </div>
         )}
