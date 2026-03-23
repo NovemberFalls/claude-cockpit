@@ -257,8 +257,8 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
         )}
 
         <Plus
-          size={40}
-          className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer p-1"
+          size={14}
+          className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer"
           style={{ color: "var(--accent)" }}
           onClick={(e) => { e.stopPropagation(); onNewAt(node.path); }}
         />
@@ -344,7 +344,7 @@ export default function Sidebar({
         style={{ color: "var(--text-secondary)" }}
         title="New session (Ctrl+Shift+N)"
       >
-        <Plus size={40} />
+        <Plus size={16} />
         <span>New</span>
       </button>
 
