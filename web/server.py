@@ -117,7 +117,14 @@ async def health():
 async def index(request: Request):
     # Serve React frontend dist if available (production build)
     if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").exists():
-        return FileResponse(FRONTEND_DIST / "index.html")
+        # Never cache index.html — it references versioned asset hashes that change
+        # on every build.  If WebView2 (or a browser) caches this, users see stale
+        # JS/CSS after an update because the old index.html still points to the old
+        # hashed asset filenames.
+        return FileResponse(
+            FRONTEND_DIST / "index.html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
     # Fallback to legacy static frontend
     user = request.session.get("user")
     if not user:
@@ -620,7 +627,12 @@ async def frontend_assets(path: str):
     if FRONTEND_DIST.is_dir():
         file_path = FRONTEND_DIST / "assets" / path
         if file_path.is_file():
-            return FileResponse(file_path)
+            # Vite content-hashes all asset filenames (e.g. index-Cy6SfuEk.js),
+            # so these are safe to cache forever.
+            return FileResponse(
+                file_path,
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
     return HTMLResponse("Not found", 404)
 
 
