@@ -405,10 +405,13 @@ class PtyManager:
         if bypass_permissions:
             cmd += " --dangerously-skip-permissions"
         if mcp_config_path:
-            # Validate: absolute path ending in .json, no shell metacharacters
-            if not re.match(r'^[A-Za-z]:\\[\w\\ \.\-\~\(\)\+]+\.json$', mcp_config_path):
+            # Validate: absolute path ending in .json, no spaces or shell metacharacters.
+            # Path is passed WITHOUT quotes — winpty's shlex→list2cmdline round-trip
+            # corrupts quoted arguments (turns "path" into \"path\"), so we rely on
+            # the regex below to guarantee the path is safe to use unquoted.
+            if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+\.json$', mcp_config_path):
                 raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
-            cmd += f' --mcp-config "{mcp_config_path}"'
+            cmd += f' --mcp-config {mcp_config_path}'
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)

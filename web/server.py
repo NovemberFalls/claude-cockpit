@@ -69,6 +69,10 @@ _MCP_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="cockpit_mcp_"))
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
+# Lock serialises the quota-check-then-write sequence in upload_files().
+# Without this, concurrent async requests can both read a stale _upload_dir_size,
+# both pass the quota check, and together exceed MAX_UPLOAD_DIR_SIZE.
+_upload_lock = asyncio.Lock()
 
 # PID file for crash detection
 PID_FILE = Path(__file__).parent / ".cockpit.pid"
@@ -189,14 +193,29 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
             errors.append(f"Rejected '{upload.filename}': exceeds 50MB limit")
             continue
 
-        if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
-            errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
-            continue
+        # Security: strip directory components from the user-supplied filename.
+        # upload.filename comes from the multipart Content-Disposition header and
+        # is fully attacker-controlled.  A value like "../../etc/cron.d/evil"
+        # would cause pathlib to resolve the destination outside UPLOAD_DIR.
+        # Path.name returns only the final component ("evil"), neutralising the
+        # traversal.  The `or "upload"` fallback handles the edge case where the
+        # filename is *only* directory separators (e.g. "../../"), which yields
+        # an empty string after .name.
+        stripped_name = Path(upload.filename or "").name or "upload"
 
-        safe_name = f"{uuid.uuid4().hex[:8]}_{upload.filename}"
-        dest = UPLOAD_DIR / safe_name
-        dest.write_bytes(content)
-        _upload_dir_size += file_size
+        # Lock the quota-check-and-write as an atomic unit.  Without this,
+        # two concurrent requests could both read the same _upload_dir_size,
+        # both pass the check, and together exceed the 200MB limit.
+        async with _upload_lock:
+            if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
+                errors.append(f"Rejected '{upload.filename}': upload directory full (200MB limit)")
+                continue
+
+            safe_name = f"{uuid.uuid4().hex[:8]}_{stripped_name}"
+            dest = UPLOAD_DIR / safe_name
+            dest.write_bytes(content)
+            _upload_dir_size += file_size
+
         saved_paths.append(str(dest))
 
     result: dict = {"paths": saved_paths}

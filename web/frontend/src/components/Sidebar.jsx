@@ -171,7 +171,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
         style={{ color: "var(--text-muted)" }}
         title="Close session"
       >
-        <X size={14} />
+        <X size={28} />
       </button>
     </div>
   );
@@ -257,7 +257,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
         )}
 
         <Plus
-          size={20}
+          size={40}
           className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer p-1"
           style={{ color: "var(--accent)" }}
           onClick={(e) => { e.stopPropagation(); onNewAt(node.path); }}
@@ -344,7 +344,7 @@ export default function Sidebar({
         style={{ color: "var(--text-secondary)" }}
         title="New session (Ctrl+Shift+N)"
       >
-        <Plus size={20} />
+        <Plus size={40} />
         <span>New</span>
       </button>
 

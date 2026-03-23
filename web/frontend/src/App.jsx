@@ -7,10 +7,12 @@ import TerminalPane from "./components/TerminalPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
+import OnboardingModal from "./components/OnboardingModal";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
 const SESSIONS_KEY = "cockpit-sessions";
+const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -83,6 +85,9 @@ export default function App() {
   const [broadcastText, setBroadcastText] = useState("");
   const [orchestratorMode, setOrchestratorMode] = useState(false);
   const [orchestratorId, setOrchestratorId] = useState(null); // local session id
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try { return localStorage.getItem(ONBOARDING_KEY) !== "true"; } catch (_) { return true; }
+  });
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
 
@@ -956,6 +961,7 @@ export default function App() {
           />
         )}
 
+        {showOnboarding && <OnboardingModal onDismiss={() => setShowOnboarding(false)} />}
         <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </div>
   );
