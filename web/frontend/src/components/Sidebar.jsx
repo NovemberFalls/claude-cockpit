@@ -348,14 +348,38 @@ export default function Sidebar({
         <span>New</span>
       </button>
 
-      {/* Empty state */}
+      {/* Empty state / first-run card */}
       {tree.length === 0 && sessions.length === 0 && (
-        <p
-          className="text-xs text-center py-8 px-3"
-          style={{ color: "var(--text-muted)" }}
-        >
-          No active sessions
-        </p>
+        <div className="px-2 py-4">
+          <div
+            className="rounded-lg p-4"
+            style={{
+              backgroundColor: "var(--bg-elevated)",
+              border: "1px solid var(--border-color)",
+            }}
+          >
+            <p className="text-xs font-semibold mb-3" style={{ color: "var(--text-primary)" }}>
+              Welcome to Claude Cockpit
+            </p>
+            <ul className="space-y-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+              <li>• Run multiple Claude Code sessions side-by-side</li>
+              <li>• Organize by project folder with git status</li>
+              <li style={{ color: "var(--accent)" }}>
+                • <strong>Orchestrator Mode</strong> — one Claude coordinates others via MCP
+              </li>
+            </ul>
+            <button
+              onClick={onNew}
+              className="mt-4 w-full py-1.5 rounded-md text-xs font-medium transition-colors hover-bg-surface"
+              style={{
+                border: "1px solid var(--border-color)",
+                color: "var(--accent)",
+              }}
+            >
+              Create your first session →
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Location tree */}

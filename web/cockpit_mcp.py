@@ -15,6 +15,13 @@ import sys
 import urllib.error
 import urllib.request
 
+
+def _log(msg: str) -> None:
+    """Write a diagnostic line to stderr (visible in process logs, not stdout MCP pipe)."""
+    sys.stderr.write(f"[cockpit-mcp] {msg}\n")
+    sys.stderr.flush()
+
+
 API_URL = os.environ.get("COCKPIT_API_URL", "http://localhost:8420")
 ORCHESTRATOR_ID = os.environ.get("COCKPIT_ORCHESTRATOR_ID", "")
 
@@ -107,8 +114,11 @@ def api(method: str, path: str, body=None):
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return {"error": f"HTTP {e.code}: {e.read().decode()}"}
+        err = f"HTTP {e.code}: {e.read().decode()}"
+        _log(f"API error {method} {path}: {err}")
+        return {"error": err}
     except Exception as e:
+        _log(f"API exception {method} {path}: {e}")
         return {"error": str(e)}
 
 
@@ -177,6 +187,7 @@ def send(msg: dict):
 
 
 def main():
+    _log(f"Starting — API={API_URL}  orchestrator={ORCHESTRATOR_ID}")
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -206,8 +217,10 @@ def main():
             params = msg.get("params", {})
             tool_name = params.get("name", "")
             tool_args = params.get("arguments", {})
+            _log(f"Tool call: {tool_name}({tool_args})")
             try:
                 result = call_tool(tool_name, tool_args)
+                _log(f"Tool result: {tool_name} → ok")
                 send({
                     "jsonrpc": "2.0", "id": msg_id,
                     "result": {
@@ -215,6 +228,7 @@ def main():
                     },
                 })
             except Exception as e:
+                _log(f"Tool error: {tool_name} → {e}")
                 send({
                     "jsonrpc": "2.0", "id": msg_id,
                     "error": {"code": -32603, "message": str(e)},

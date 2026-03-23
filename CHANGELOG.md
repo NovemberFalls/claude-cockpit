@@ -14,16 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Keyboard-driven session switching (Ctrl+Tab)
 - [ ] Zoom controls (Ctrl+/-, Ctrl+mousewheel)
 
-### v0.4.0 — Public Relay & Abuse Prevention
-- [ ] cockpit.boord-its.com as public relay bridge (users run Cockpit locally, relay provides remote access URL)
-- [ ] Rate limiting per connection (bandwidth caps, WebSocket message rate)
-- [ ] Usage quotas & tiered access (free tier connection limits, approved tiers for heavier use)
-- [ ] Relay key approval workflow (request access → admin review → grant)
-- [ ] Abuse detection (connection flooding, idle tunnel hoarding, bandwidth abuse)
-- [ ] IP-based throttling & connection limits per IP
-- [ ] Idle tunnel timeout (reclaim relay slots from inactive connections)
-- [ ] Admin dashboard: active tunnels, bandwidth metrics, ban/suspend controls
-- [ ] Export session transcripts
+### v0.4.0 — Cross-Platform
+- [ ] Linux PTY backend (pty module, `PtyProcess` implementation in `pty_backend.py`)
+- [ ] macOS PTY backend
+- [ ] CI matrix: Linux + macOS runners
+- [ ] Homebrew formula / apt package
 
 ### Future
 - [ ] Plugin system for custom session types
@@ -51,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Signing keypair generated, builds produce signed update bundles
 
 ### UI
-- MCP Servers button in sidebar (both local and relay mode) links to official registry
+- MCP Servers button in sidebar links to official registry
 - Disabled Tauri drag-drop interception so web file drop works in desktop app
 
 ### Added (Stability Sprint — 2026-03-14)

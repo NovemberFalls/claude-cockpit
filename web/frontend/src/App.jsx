@@ -239,7 +239,6 @@ export default function App() {
       status: "starting",
       workdir: dir,
       bypassPermissions: !!options.bypassPermissions,
-      isOrchestrator: !!options.isOrchestrator,
     };
     setSessions((prev) => [...prev, newSession]);
     setActiveIds((prev) => {
@@ -301,7 +300,10 @@ export default function App() {
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.filter((id) => id !== localId));
-    if (localId === orchestratorId) setOrchestratorId(null);
+    if (localId === orchestratorId) {
+      setOrchestratorId(null);
+      setOrchestratorMode(false);
+    }
   }, [sessions, orchestratorId]);
 
   // Select a session: fill an empty pane slot if available, otherwise bump to front
@@ -418,9 +420,12 @@ export default function App() {
           termMap[t.id] = t;
         }
 
-        // Update existing sessions with poll data
+        // Update existing sessions and discover new backend-only sessions
+        // (e.g. created by the orchestrator MCP create_session tool).
         setSessions((prev) => {
             let changed = false;
+            const knownTermIds = new Set(prev.map((s) => s.terminalId).filter(Boolean));
+
             const updated = prev.map((s) => {
               if (!s.terminalId || !termMap[s.terminalId]) return s;
               const t = termMap[s.terminalId];
@@ -434,13 +439,38 @@ export default function App() {
               return { ...s, activityState: newState, tokens: newTokens, cost: newCost };
             });
 
-            for (const s of updated) {
+            // Discover sessions that exist on the backend but not in the frontend.
+            // These are created externally (e.g. by the MCP create_session tool).
+            const newSessions = [];
+            for (const t of data.terminals) {
+              if (!t.alive) continue;
+              if (knownTermIds.has(t.id)) continue;
+              // Also skip sessions still in "starting" state (no terminalId yet)
+              if (prev.some((s) => !s.terminalId && s.status === "starting")) continue;
+              newSessions.push({
+                id: nextLocalId++,
+                name: t.name || `Worker ${t.id}`,
+                terminalId: t.id,
+                model: t.model || "sonnet",
+                status: "running",
+                workdir: t.working_dir || "",
+                bypassPermissions: t.bypass_permissions || false,
+                activityState: t.activity_state,
+                tokens: t.tokens || 0,
+                cost: t.cost || 0,
+              });
+            }
+
+            if (newSessions.length > 0) changed = true;
+            const result = changed ? [...updated, ...newSessions] : prev;
+
+            for (const s of result) {
               if (!s.terminalId) continue;
               notifyActivityChange(s.name, s.terminalId, prevStatesRef.current[s.terminalId], s.activityState);
               prevStatesRef.current[s.terminalId] = s.activityState;
             }
 
-            return changed ? updated : prev;
+            return result;
           });
       } catch (_) {
         pollFailCount.current++;
@@ -830,7 +860,7 @@ export default function App() {
                     terminalZoom={terminalZoom}
                     toast={toast}
                     isOrchestrator={orchestratorMode && session.id === orchestratorId}
-                    isWorker={orchestratorMode && session.id !== orchestratorId}
+                    isWorker={orchestratorMode && orchestratorId !== null && session.id !== orchestratorId}
                   />
                 </div>
               ))}

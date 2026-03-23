@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ class SessionStateTracker:
         self.total_cost: float = 0.0
         self._last_token_val: int = 0
         self._last_cost_val: float = 0.0
-        self.output_lines: list = []   # ring buffer: last 200 ANSI-stripped lines
+        self.output_lines: deque = deque(maxlen=200)  # ring buffer: last 200 ANSI-stripped lines
         self._line_fragment: str = ""  # incomplete line accumulator
 
     def feed(self, raw_data: str) -> None:
@@ -62,8 +63,6 @@ class SessionStateTracker:
         complete = [l for l in lines[:-1] if l.strip()]
         if complete:
             self.output_lines.extend(complete)
-            if len(self.output_lines) > 200:
-                self.output_lines = self.output_lines[-200:]
 
         # Parse tokens/cost from the clean data
         for m in _TOKEN_RE.finditer(clean):
@@ -229,6 +228,9 @@ class PtyManager:
     def cleanup_idle_sessions(self):
         """Kill sessions that have been idle longer than IDLE_TIMEOUT.
 
+        Also purges sessions whose process has already exited (dead for >30s)
+        so they don't accumulate indefinitely in the sessions dict.
+
         Only kills sessions whose underlying process is still alive but has
         produced no output. Sessions whose process is actively consuming CPU
         (e.g. long-running Claude tasks) are spared even if they haven't
@@ -239,9 +241,21 @@ class PtyManager:
         after a single short sleep gets the actual reading — avoiding the
         blocking cpu_percent(interval=0.1) per session.
         """
+        # First pass: purge sessions whose process is already dead.
+        # Grace period of 30s avoids racing with post-spawn health checks.
+        now = time.time()
+        dead_ids = []
+        for tid, session in self.sessions.items():
+            if not session.alive and not session.pty.isalive():
+                elapsed = now - session.tracker.last_output_time
+                if elapsed > 30:
+                    dead_ids.append(tid)
+        for tid in dead_ids:
+            logger.info("Purging dead session %s", tid)
+            self.kill_terminal(tid)
+
         if IDLE_TIMEOUT <= 0:
             return
-        now = time.time()
         candidates = []
         for tid, session in self.sessions.items():
             elapsed = now - session.tracker.last_output_time
@@ -392,7 +406,7 @@ class PtyManager:
             cmd += " --dangerously-skip-permissions"
         if mcp_config_path:
             # Validate: absolute path ending in .json, no shell metacharacters
-            if not re.match(r'^[A-Za-z]:\\[\w\\ \.\-]+\.json$', mcp_config_path):
+            if not re.match(r'^[A-Za-z]:\\[\w\\ \.\-\~\(\)\+]+\.json$', mcp_config_path):
                 raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
             cmd += f' --mcp-config "{mcp_config_path}"'
 
@@ -404,37 +418,20 @@ class PtyManager:
         if bypass_permissions:
             logger.warning("Permissions: BYPASSED")
 
-        # Inside PyInstaller bundles, pywinpty's C extension causes child
-        # processes to fail with 0xC0000142. Use our pure-ctypes ConPTY
-        # wrapper instead, which calls the Windows API directly.
-        if meipass:
-            from conpty import PtyProcess as ConPtyProcess
-            logger.info("Using ctypes ConPTY (PyInstaller mode)")
-            pty_process = ConPtyProcess.spawn(
-                cmd,
-                dimensions=(rows, cols),
-                cwd=workdir,
-                env=env,
-            )
-        else:
-            import winpty
-            pty_process = winpty.PtyProcess.spawn(
-                cmd,
-                dimensions=(rows, cols),
-                cwd=workdir,
-                env=env,
-            )
-
-        # Post-spawn health check (Claude CLI needs time to initialize Node.js)
-        time.sleep(1.5)
-        logger.info("Post-spawn alive: %s", pty_process.isalive())
-        if not pty_process.isalive():
-            try:
-                out = pty_process.read(4096)
-                logger.error("Dying output: %s", repr(out[:500]))
-            except Exception as e:
-                logger.error("Read error on dying process: %s", e)
-            logger.error("Exit status: %s", pty_process.exitstatus)
+        # Select the appropriate PTY backend for this environment.
+        # The backend abstraction (pty_backend.py) makes cross-platform support
+        # a matter of adding a new class — no changes needed here.
+        from pty_backend import get_backend
+        backend = get_backend()
+        logger.info("PTY backend: %s", backend.__name__)
+        pty_process = backend.spawn(
+            cmd,
+            dimensions=(rows, cols),
+            cwd=workdir,
+            env=env,
+        )
+        # Post-spawn health check is deferred to the async caller (server.py)
+        # so it can use asyncio.sleep() without blocking the event loop.
 
         session = TerminalSession(
             id=terminal_id,
@@ -520,15 +517,19 @@ class PtyManager:
             return False
 
     def list_terminals(self) -> list[dict]:
-        """List all active terminals, removing dead ones in a single pass."""
+        """List all terminals, marking dead ones but NOT removing them.
+
+        Dead sessions are left in the dict so that concurrent code paths
+        (e.g. the post-spawn health check) can still find them.  They are
+        cleaned up by explicit ``kill_terminal`` or ``cleanup_idle_sessions``.
+        """
         result = []
-        dead_ids = []
         for tid, session in self.sessions.items():
-            if not session.pty.isalive():
+            alive = session.pty.isalive()
+            if not alive:
                 session.alive = False
-                dead_ids.append(tid)
-                continue
-            session.tracker.tick()
+            else:
+                session.tracker.tick()
             result.append({
                 "id": session.id,
                 "name": session.name,
@@ -539,13 +540,11 @@ class PtyManager:
                 "bypass_permissions": session.bypass_permissions,
                 "cols": session.cols,
                 "rows": session.rows,
-                "alive": True,
+                "alive": alive,
                 "activity_state": session.tracker.state,
                 "tokens": session.tracker.total_tokens,
                 "cost": session.tracker.total_cost,
             })
-        for tid in dead_ids:
-            self.sessions.pop(tid, None)
         return result
 
     def get_terminal(self, terminal_id: str) -> Optional[TerminalSession]:

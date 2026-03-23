@@ -438,6 +438,7 @@ class PtyProcess:
         self._hpc = ctypes.c_void_p()
         self._pi = PROCESS_INFORMATION()
         self._server_pipe = None  # Bidirectional pipe for read/write
+        self._pipe_lock = threading.RLock()  # Guards _server_pipe against concurrent close/read
         self._job = None  # Job Object handle for process tree management
         self._alive = False
         self.exitstatus = None
@@ -462,6 +463,10 @@ class PtyProcess:
         if isinstance(argv, str):
             import shlex
             argv = shlex.split(argv, posix=False)
+            # shlex(posix=False) preserves surrounding quotes as literal chars;
+            # strip them so subprocess.list2cmdline can re-add them correctly
+            # when the argument contains spaces.
+            argv = [a.strip('"') for a in argv]
         if isinstance(argv, (list, tuple)):
             argv = list(argv)
         else:
@@ -616,18 +621,22 @@ class PtyProcess:
         Returns empty string on timeout (no data within timeout_ms).
         Reads ALL available data (up to *size* bytes) in one call to avoid
         delivering partial output across multiple read cycles.
-        """
-        if self._server_pipe is None:
-            raise EOFError("Pty is closed")
 
+        The pipe lock prevents the read from racing with _cleanup() which
+        closes the handle from another thread.
+        """
         avail = wt.DWORD(0)
         deadline = time.monotonic() + timeout_ms / 1000.0
 
         while time.monotonic() < deadline:
-            ok = kernel32.PeekNamedPipe(
-                wt.HANDLE(self._server_pipe), None, wt.DWORD(0),
-                None, ctypes.byref(avail), None,
-            )
+            with self._pipe_lock:
+                pipe = self._server_pipe
+                if pipe is None:
+                    raise EOFError("Pty is closed")
+                ok = kernel32.PeekNamedPipe(
+                    wt.HANDLE(pipe), None, wt.DWORD(0),
+                    None, ctypes.byref(avail), None,
+                )
             if not ok:
                 if not self.isalive():
                     raise EOFError("Process exited")
@@ -644,10 +653,14 @@ class PtyProcess:
         read_size = min(size, avail.value)
         buf = ctypes.create_string_buffer(read_size)
         n = wt.DWORD()
-        ok = kernel32.ReadFile(
-            wt.HANDLE(self._server_pipe), buf, wt.DWORD(read_size),
-            ctypes.byref(n), None,
-        )
+        with self._pipe_lock:
+            pipe = self._server_pipe
+            if pipe is None:
+                raise EOFError("Pty is closed")
+            ok = kernel32.ReadFile(
+                wt.HANDLE(pipe), buf, wt.DWORD(read_size),
+                ctypes.byref(n), None,
+            )
         if not ok or n.value == 0:
             if not self.isalive():
                 raise EOFError("Process exited")
@@ -660,8 +673,6 @@ class PtyProcess:
         Handles partial writes by looping until all bytes are sent.
         Large pastes are written in chunks to avoid overwhelming the pipe.
         """
-        if self._server_pipe is None:
-            return
         raw = data.encode("utf-8") if isinstance(data, str) else data
         total = len(raw)
         offset = 0
@@ -670,10 +681,14 @@ class PtyProcess:
         while offset < total:
             chunk = raw[offset:offset + chunk_size]
             n = wt.DWORD()
-            ok = kernel32.WriteFile(
-                wt.HANDLE(self._server_pipe), chunk, wt.DWORD(len(chunk)),
-                ctypes.byref(n), None,
-            )
+            with self._pipe_lock:
+                pipe = self._server_pipe
+                if pipe is None:
+                    return
+                ok = kernel32.WriteFile(
+                    wt.HANDLE(pipe), chunk, wt.DWORD(len(chunk)),
+                    ctypes.byref(n), None,
+                )
             if not ok:
                 import logging
                 logging.getLogger("cockpit.pty").warning(
@@ -716,7 +731,11 @@ class PtyProcess:
         self._cleanup()
 
     def _cleanup(self):
-        """Close all handles including the Job Object."""
+        """Close all handles including the Job Object.
+
+        The pipe lock ensures that reader/writer threads see _server_pipe
+        become None *before* the handle is closed, preventing use-after-close.
+        """
         self._alive = False
         if self._hpc:
             kernel32.ClosePseudoConsole(self._hpc)
@@ -727,9 +746,13 @@ class PtyProcess:
         if self._pi.hThread:
             kernel32.CloseHandle(self._pi.hThread)
             self._pi.hThread = None
-        if self._server_pipe:
-            kernel32.CloseHandle(wt.HANDLE(self._server_pipe))
+        # Atomically grab and clear _server_pipe so concurrent readers
+        # see None and bail out before we close the underlying handle.
+        with self._pipe_lock:
+            pipe = self._server_pipe
             self._server_pipe = None
+        if pipe:
+            kernel32.CloseHandle(wt.HANDLE(pipe))
         # Close Job Object last — JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         # ensures any remaining processes in the job are killed
         if self._job:

@@ -1,8 +1,23 @@
 # Claude Cockpit
 
-A multi-session terminal manager for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run multiple Claude CLI sessions side-by-side in a tabbed, themed interface — either in your browser or as a native desktop app.
+The only multi-session [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manager with built-in **agent orchestration**. Run one Claude session as a coordinator that delegates tasks to other Claude sessions — no other tool does this. Also works as a standalone multi-session terminal with tabs, themes, and a native desktop app.
 
 ![Claude Cockpit](screenshot.svg)
+
+---
+
+## Orchestrator Mode
+
+Claude Cockpit's defining feature: run one Claude Code session as an **orchestrator** that coordinates other Claude sessions as workers via MCP (Model Context Protocol).
+
+- The orchestrator session acts as a planner and dispatcher
+- Worker sessions receive delegated subtasks and report results back
+- Multiple agents collaborate in parallel within a single Cockpit window
+- No competing product (Wave Terminal, Warp, VS Code) has this capability
+
+**How to use it:** Open the info legend (ⓘ icon in the top bar) and select **Orchestrator Mode** for step-by-step setup instructions.
+
+This is the feature that makes Claude Cockpit unique. If you're running complex multi-agent Claude workflows, this is why you're here.
 
 ---
 
@@ -10,6 +25,7 @@ A multi-session terminal manager for [Claude Code](https://docs.anthropic.com/en
 
 Claude Cockpit lets you:
 
+- **Orchestrate multiple Claude agents** — one session coordinates others via MCP (unique capability)
 - Run **multiple Claude Code sessions** at once in tabs/split panes
 - Organize sessions by **project folder** (workspace)
 - Choose from **20 themes** (dark and light variants)
@@ -235,6 +251,8 @@ When running on `localhost`, authentication is automatically bypassed — no OAu
 
 Claude sessions running inside Cockpit automatically use any [MCP servers](https://modelcontextprotocol.io/) configured in your Claude Code setup. MCP servers extend what Claude can do — browser automation, database access, file management, and more.
 
+> **Cockpit uses MCP for its Orchestrator Mode.** The orchestrator session connects to worker sessions via MCP, enabling true agent-to-agent coordination. See the [Orchestrator Mode](#orchestrator-mode) section above for details.
+
 ### Finding MCP Servers
 
 - **[Official MCP Registry](https://registry.modelcontextprotocol.io/)** — The canonical directory of MCP servers
@@ -269,10 +287,11 @@ Once configured, MCP tools are available in every Claude session — including t
 claude-cockpit/
 ├── web/
 │   ├── server.py           # FastAPI backend (REST + WebSocket)
-│   ├── pty_manager.py      # PTY process manager (Windows ConPTY)
+│   ├── pty_manager.py      # PTY session manager
+│   ├── pty_backend.py      # PTY backend abstraction (add Linux/macOS backends here)
+│   ├── conpty.py           # Windows ConPTY ctypes wrapper (PyInstaller mode)
 │   ├── logging_config.py   # Structured logging setup
 │   ├── auth.py             # Google OAuth (optional)
-│   ├── tunnel.py           # Cloud relay WebSocket tunnel
 │   ├── tests/              # Python test suite (24 tests)
 │   ├── requirements.txt    # Python dependencies
 │   ├── cockpit-server.spec # PyInstaller build config

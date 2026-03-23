@@ -36,7 +36,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.9-alpha",
+    version="0.2.14-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -82,6 +82,15 @@ ALLOWED_EXTENSIONS = {
     ".ini", ".cfg", ".env", ".lua", ".kt", ".swift", ".r",
     ".pdf",
 }
+
+
+# ── Auth helpers ──────────────────────────────────────────
+
+
+def _is_local_host(request_or_ws) -> bool:
+    """Return True if the request originates from localhost."""
+    hostname = getattr(request_or_ws.url, "hostname", "") or ""
+    return hostname in ("localhost", "127.0.0.1")
 
 
 # ── Health Check ──────────────────────────────────────────
@@ -151,7 +160,7 @@ async def logout(request: Request):
 async def me(request: Request):
     user = request.session.get("user")
     if not user:
-        if request.url.hostname in ("localhost", "127.0.0.1"):
+        if _is_local_host(request):
             return {"authenticated": True, "mode": "local", "email": "local@localhost", "name": "Local User"}
         return {"authenticated": False}
     return {"authenticated": True, "mode": "local", **user}
@@ -297,19 +306,37 @@ async def get_terminal_output(terminal_id: str):
     return JSONResponse({"terminal_id": terminal_id, "lines": lines})
 
 
+def _resolve_python() -> str:
+    """Return a path to the Python interpreter for launching MCP subprocesses.
+
+    Inside a PyInstaller bundle sys.executable is the frozen exe, which cannot
+    run .py scripts.  Fall back to the first 'python' on PATH.
+    """
+    if not getattr(sys, "_MEIPASS", None):
+        return sys.executable  # Dev mode — interpreter is correct
+    found = shutil.which("python")
+    if found:
+        return found
+    raise FileNotFoundError(
+        "Cannot find a Python interpreter on PATH.  "
+        "Orchestrator mode requires Python installed alongside the desktop app."
+    )
+
+
 def _write_mcp_config(terminal_id: str) -> str:
     """Write a temp MCP config JSON for an orchestrator session.
 
     Returns the absolute path to the written config file.
     """
     mcp_script = Path(__file__).parent / "cockpit_mcp.py"
+    port = int(os.getenv("PORT", "8420"))
     config = {
         "mcpServers": {
             "cockpit": {
-                "command": sys.executable,
+                "command": _resolve_python(),
                 "args": [str(mcp_script)],
                 "env": {
-                    "COCKPIT_API_URL": "http://localhost:8420",
+                    "COCKPIT_API_URL": f"http://localhost:{port}",
                     "COCKPIT_ORCHESTRATOR_ID": terminal_id,
                 },
             }
@@ -327,6 +354,8 @@ def _write_mcp_config(terminal_id: str) -> str:
 @app.post("/api/terminals/{terminal_id}/input")
 async def send_terminal_input(terminal_id: str, request: Request):
     """Send text input to a terminal's PTY."""
+    if not _is_local_host(request) and not request.session.get("user"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     body = await request.json()
     text = body.get("text", "")
     if not text:
@@ -355,11 +384,10 @@ async def create_terminal(request: Request):
 
     # For orchestrator sessions, pre-generate the terminal ID so the MCP config
     # can reference it before the process spawns.
-    import uuid as _uuid
-    terminal_id_override = _uuid.uuid4().hex[:8] if is_orchestrator else ""
-    mcp_config_path = _write_mcp_config(terminal_id_override) if is_orchestrator else ""
+    terminal_id_override = uuid.uuid4().hex[:8] if is_orchestrator else ""
 
     try:
+        mcp_config_path = _write_mcp_config(terminal_id_override) if is_orchestrator else ""
         session = pty_manager.create_terminal(
             name=name,
             workdir=workdir,
@@ -372,6 +400,20 @@ async def create_terminal(request: Request):
             mcp_config_path=mcp_config_path,
             terminal_id_override=terminal_id_override,
         )
+        # Post-spawn health check: give Claude CLI time to initialize Node.js.
+        # asyncio.sleep keeps the event loop responsive (replaces the blocking
+        # time.sleep(1.5) that was previously inside pty_manager.create_terminal).
+        await asyncio.sleep(1.5)
+        if not session.pty.isalive():
+            exit_code = getattr(session.pty, "exitstatus", "?")
+            logger.error("Session %s died on spawn (exit: %s)", session.id, exit_code)
+            pty_manager.kill_terminal(session.id)
+            return JSONResponse(
+                {"error": "Claude process exited immediately after spawn. "
+                          "Ensure 'claude' CLI is installed and authenticated."},
+                status_code=500,
+            )
+        logger.info("Session %s alive after spawn", session.id)
         return JSONResponse({
             "id": session.id,
             "name": session.name,
@@ -424,6 +466,13 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     """Bridge xterm.js <-> PTY via WebSocket."""
     session = pty_manager.get_terminal(terminal_id)
     await websocket.accept()
+
+    # Auth guard: localhost is always allowed; remote access requires a valid session.
+    # This prevents IDOR attacks where a caller guesses a terminal_id and hijacks the session.
+    if not _is_local_host(websocket) and not websocket.session.get("user"):
+        await websocket.send_text('{"type":"error","message":"Unauthorized"}')
+        await websocket.close(code=4403, reason="Unauthorized")
+        return
 
     if not session:
         await websocket.close(code=4004, reason="Terminal not found")
@@ -597,10 +646,13 @@ async def startup_event():
 
     # 3. Start idle session cleanup loop (tracked for graceful shutdown)
     async def idle_cleanup_loop():
+        loop = asyncio.get_event_loop()
         try:
             while True:
                 await asyncio.sleep(60)
-                pty_manager.cleanup_idle_sessions()
+                # Run in executor: cleanup_idle_sessions uses time.sleep(0.1)
+                # for the two-pass CPU check — keeps the event loop unblocked.
+                await loop.run_in_executor(None, pty_manager.cleanup_idle_sessions)
         except asyncio.CancelledError:
             pass
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
