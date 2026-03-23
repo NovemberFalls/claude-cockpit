@@ -36,7 +36,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.6-alpha",
+    version="0.2.9-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -557,6 +557,14 @@ async def startup_event():
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
     logger.info("Startup complete (PID %d)", os.getpid())
+
+
+@app.post("/api/shutdown")
+async def api_shutdown():
+    """Initiate graceful shutdown — called by the auto-updater before replacing the sidecar exe."""
+    loop = asyncio.get_event_loop()
+    loop.call_later(0.3, lambda: os.kill(os.getpid(), 15))  # SIGTERM after response is sent
+    return {"status": "shutting down"}
 
 
 @app.on_event("shutdown")

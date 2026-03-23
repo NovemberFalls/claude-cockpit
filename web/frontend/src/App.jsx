@@ -119,6 +119,11 @@ export default function App() {
             onClick: async () => {
               try {
                 toast("Downloading update...", "info", 0);
+                // Shut down the backend sidecar before the NSIS installer runs.
+                // Without this, Windows locks the sidecar exe and the installer
+                // cannot replace it, leaving the old version running after restart.
+                try { await fetch("/api/shutdown", { method: "POST" }); } catch (_) {}
+                await new Promise((r) => setTimeout(r, 800)); // wait for process exit
                 await update.downloadAndInstall();
                 const { relaunch } = await import("@tauri-apps/plugin-process");
                 await relaunch();
