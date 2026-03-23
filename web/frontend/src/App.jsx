@@ -81,6 +81,8 @@ export default function App() {
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
+  const [orchestratorMode, setOrchestratorMode] = useState(false);
+  const [orchestratorId, setOrchestratorId] = useState(null); // local session id
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
 
@@ -237,6 +239,7 @@ export default function App() {
       status: "starting",
       workdir: dir,
       bypassPermissions: !!options.bypassPermissions,
+      isOrchestrator: !!options.isOrchestrator,
     };
     setSessions((prev) => [...prev, newSession]);
     setActiveIds((prev) => {
@@ -258,6 +261,7 @@ export default function App() {
         rows: 30,
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
+        ...(options.isOrchestrator ? { isOrchestrator: true } : {}),
       };
 
       const res = await fetch("/api/terminals", {
@@ -280,6 +284,7 @@ export default function App() {
           s.id === localId ? { ...s, terminalId: data.id, status: "running" } : s
         )
       );
+      if (options.isOrchestrator) setOrchestratorId(localId);
     } catch (err) {
       toast("Failed to create session", "error");
       setSessions((prev) =>
@@ -296,7 +301,8 @@ export default function App() {
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.filter((id) => id !== localId));
-  }, [sessions]);
+    if (localId === orchestratorId) setOrchestratorId(null);
+  }, [sessions, orchestratorId]);
 
   // Select a session: fill an empty pane slot if available, otherwise bump to front
   const selectSession = useCallback((id) => {
@@ -823,6 +829,8 @@ export default function App() {
                     onPlace={placeSession}
                     terminalZoom={terminalZoom}
                     toast={toast}
+                    isOrchestrator={orchestratorMode && session.id === orchestratorId}
+                    isWorker={orchestratorMode && session.id !== orchestratorId}
                   />
                 </div>
               ))}
@@ -869,6 +877,9 @@ export default function App() {
             totalCost={totalCost}
             broadcastMode={broadcastMode}
             setBroadcastMode={setBroadcastMode}
+            orchestratorMode={orchestratorMode}
+            setOrchestratorMode={setOrchestratorMode}
+            hasOrchestrator={orchestratorId !== null}
             terminalZoom={terminalZoom}
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}
@@ -905,9 +916,11 @@ export default function App() {
           <NewSessionDialog
             recentLocations={recentLocations}
             savedLocations={savedLocations}
-            onConfirm={(name, workdir, bypassPermissions) => {
+            orchestratorMode={orchestratorMode}
+            hasOrchestrator={orchestratorId !== null}
+            onConfirm={(name, workdir, bypassPermissions, sessionOptions = {}) => {
               setShowNewDialog(false);
-              createSession(name, workdir, undefined, { bypassPermissions });
+              createSession(name, workdir, undefined, { bypassPermissions, ...sessionOptions });
             }}
             onCancel={() => setShowNewDialog(false)}
           />

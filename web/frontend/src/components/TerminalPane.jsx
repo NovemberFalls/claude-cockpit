@@ -46,6 +46,8 @@ const TerminalPane = forwardRef(function TerminalPane({
   onPlace,       // (sessionId, slotIndex) => void — drag from sidebar
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
+  isOrchestrator = false, // this pane is the orchestrator session
+  isWorker = false,       // orchestrator mode is on and this is a worker
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -361,6 +363,29 @@ const TerminalPane = forwardRef(function TerminalPane({
           >
             {session.model}
           </span>
+          {isOrchestrator && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0"
+              style={{ color: "var(--bg)", backgroundColor: "var(--accent)" }}
+              title="Orchestrator — has MCP tools to control worker sessions"
+            >
+              ORCH
+            </span>
+          )}
+          {isWorker && session.terminalId && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0"
+              style={{
+                color: "var(--accent)",
+                backgroundColor: "var(--bg-surface)",
+                border: "1px solid var(--accent)",
+                opacity: 0.75,
+              }}
+              title="Terminal ID — the orchestrator uses this to send tasks here"
+            >
+              #{session.terminalId}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <button

@@ -64,6 +64,8 @@ else:
 
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
+# Temp directory for MCP config files (one per orchestrator session)
+_MCP_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="cockpit_mcp_"))
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
@@ -282,6 +284,43 @@ async def git_status(path: str):
         return JSONResponse({"git": False})
 
 
+# ── Terminal Output Buffer (for MCP orchestrator) ─────────
+
+
+@app.get("/api/terminals/{terminal_id}/output")
+async def get_terminal_output(terminal_id: str):
+    """Return the last 200 ANSI-stripped lines of terminal output (used by MCP)."""
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    lines = pty_manager.get_output_buffer(terminal_id)
+    return JSONResponse({"terminal_id": terminal_id, "lines": lines})
+
+
+def _write_mcp_config(terminal_id: str) -> str:
+    """Write a temp MCP config JSON for an orchestrator session.
+
+    Returns the absolute path to the written config file.
+    """
+    mcp_script = Path(__file__).parent / "cockpit_mcp.py"
+    config = {
+        "mcpServers": {
+            "cockpit": {
+                "command": sys.executable,
+                "args": [str(mcp_script)],
+                "env": {
+                    "COCKPIT_API_URL": "http://localhost:8420",
+                    "COCKPIT_ORCHESTRATOR_ID": terminal_id,
+                },
+            }
+        }
+    }
+    config_path = _MCP_CONFIG_DIR / f"mcp_{terminal_id}.json"
+    config_path.write_text(json.dumps(config, indent=2))
+    logger.info("Wrote MCP config for orchestrator %s → %s", terminal_id, config_path)
+    return str(config_path)
+
+
 # ── Terminal Input ────────────────────────────────────────
 
 
@@ -310,8 +349,15 @@ async def create_terminal(request: Request):
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
+    is_orchestrator = body.get("isOrchestrator", False)
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
+
+    # For orchestrator sessions, pre-generate the terminal ID so the MCP config
+    # can reference it before the process spawns.
+    import uuid as _uuid
+    terminal_id_override = _uuid.uuid4().hex[:8] if is_orchestrator else ""
+    mcp_config_path = _write_mcp_config(terminal_id_override) if is_orchestrator else ""
 
     try:
         session = pty_manager.create_terminal(
@@ -323,12 +369,15 @@ async def create_terminal(request: Request):
             bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
+            mcp_config_path=mcp_config_path,
+            terminal_id_override=terminal_id_override,
         )
         return JSONResponse({
             "id": session.id,
             "name": session.name,
             "model": session.model,
             "created_at": session.created_at,
+            "is_orchestrator": is_orchestrator,
         })
     except FileNotFoundError:
         return JSONResponse(
@@ -582,6 +631,7 @@ async def shutdown_event():
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    shutil.rmtree(_MCP_CONFIG_DIR, ignore_errors=True)
     PID_FILE.unlink(missing_ok=True)
     logger.info("Shutdown complete")
 

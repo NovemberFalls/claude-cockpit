@@ -41,6 +41,8 @@ class SessionStateTracker:
         self.total_cost: float = 0.0
         self._last_token_val: int = 0
         self._last_cost_val: float = 0.0
+        self.output_lines: list = []   # ring buffer: last 200 ANSI-stripped lines
+        self._line_fragment: str = ""  # incomplete line accumulator
 
     def feed(self, raw_data: str) -> None:
         """Process new PTY output data."""
@@ -52,6 +54,16 @@ class SessionStateTracker:
         self.buffer += clean
         if len(self.buffer) > 2000:
             self.buffer = self.buffer[-2000:]
+
+        # Accumulate into per-line ring buffer for MCP get_output
+        combined = self._line_fragment + clean
+        lines = combined.split("\n")
+        self._line_fragment = lines[-1]
+        complete = [l for l in lines[:-1] if l.strip()]
+        if complete:
+            self.output_lines.extend(complete)
+            if len(self.output_lines) > 200:
+                self.output_lines = self.output_lines[-200:]
 
         # Parse tokens/cost from the clean data
         for m in _TOKEN_RE.finditer(clean):
@@ -283,6 +295,13 @@ class PtyManager:
                 logger.info("Killing idle session %s (idle %.0fs)", tid, now - session.tracker.last_output_time)
                 self.kill_terminal(tid)
 
+    def get_output_buffer(self, terminal_id: str) -> list:
+        """Return last 200 ANSI-stripped lines of output for a session (for MCP)."""
+        session = self.sessions.get(terminal_id)
+        if not session:
+            return []
+        return list(session.tracker.output_lines)
+
     def create_terminal(
         self,
         name: str = "",
@@ -293,6 +312,8 @@ class PtyManager:
         bypass_permissions: bool = False,
         cols: int = 120,
         rows: int = 30,
+        mcp_config_path: str = "",
+        terminal_id_override: str = "",
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY."""
         if len(self.sessions) >= MAX_SESSIONS:
@@ -306,7 +327,7 @@ class PtyManager:
         if resume_session_id and not _SESSION_ID_RE.match(resume_session_id):
             raise ValueError(f"Invalid session ID format: {resume_session_id!r}")
 
-        terminal_id = uuid.uuid4().hex[:8]
+        terminal_id = terminal_id_override or uuid.uuid4().hex[:8]
         if not name:
             name = f"Session {len(self.sessions) + 1}"
         if not workdir:
@@ -369,6 +390,11 @@ class PtyManager:
             cmd += " --continue"
         if bypass_permissions:
             cmd += " --dangerously-skip-permissions"
+        if mcp_config_path:
+            # Validate: absolute path ending in .json, no shell metacharacters
+            if not re.match(r'^[A-Za-z]:\\[\w\\ \.\-]+\.json$', mcp_config_path):
+                raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
+            cmd += f' --mcp-config "{mcp_config_path}"'
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)

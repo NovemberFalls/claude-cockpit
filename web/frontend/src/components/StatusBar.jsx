@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus, Network } from "lucide-react";
 import { version } from "../../package.json";
 
 const layoutOptions = [
@@ -25,6 +25,9 @@ export default function StatusBar({
   totalCost,
   broadcastMode,
   setBroadcastMode,
+  orchestratorMode,
+  setOrchestratorMode,
+  hasOrchestrator,
   terminalZoom = 13,
   onZoomIn,
   onZoomOut,
@@ -123,6 +126,23 @@ export default function StatusBar({
           }}
         >
           <Radio size={14} />
+        </button>
+
+        {/* Orchestrator mode toggle */}
+        <button
+          onClick={() => setOrchestratorMode?.(!orchestratorMode)}
+          title={orchestratorMode ? "Orchestrator mode active — click to disable" : "Enable Orchestrator mode"}
+          className={`p-1 rounded transition-colors ${!orchestratorMode ? "hover-color-secondary" : ""}`}
+          style={{ color: orchestratorMode ? "var(--accent)" : "var(--text-muted)", position: "relative" }}
+        >
+          <Network size={14} />
+          {hasOrchestrator && (
+            <span style={{
+              position: "absolute", top: 1, right: 1,
+              width: 5, height: 5, borderRadius: "50%",
+              backgroundColor: "var(--green)",
+            }} />
+          )}
         </button>
 
         {/* Zoom controls */}
