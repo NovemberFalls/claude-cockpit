@@ -10,7 +10,7 @@ claude-cockpit/
     server.py          # FastAPI app (port 8420), auth, terminal CRUD, WS bridge
     pty_manager.py     # ConPTY process manager (Windows-specific, winpty)
     logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty)
-    auth.py            # Google OAuth with localhost bypass
+    auth.py            # (removed — local-only, no auth needed)
     tests/             # Python test suite (pytest + pytest-asyncio, 24 tests)
     frontend/
       src/

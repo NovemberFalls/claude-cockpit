@@ -162,14 +162,9 @@ export default function App() {
           if (res.ok) {
             const data = await res.json();
             if (!cancelled) {
-              // On remote hosts, redirect unauthenticated users to login
-              if (!data.authenticated && !["localhost", "127.0.0.1"].includes(location.hostname)) {
-                window.location.href = "/login";
-                return;
-              }
               setBackendReady(true);
               setBackendError(false);
-              if (data.authenticated) setUser(data);
+              setUser(data);
             }
             return;
           }
@@ -363,8 +358,9 @@ export default function App() {
     }
   }, [sessions]);
 
-  // Restore saved sessions once backend is ready
-  // Reconciles with backend: if backend has no terminals, saved sessions are stale (crash recovery)
+  // Restore saved sessions once backend is ready.
+  // Reattaches to surviving backend terminals by name match instead of spawning
+  // new processes (which caused duplicate "ghost" sessions).
   const restoredRef = useRef(false);
   useEffect(() => {
     if (!backendReady || restoredRef.current) return;
@@ -374,7 +370,6 @@ export default function App() {
       const saved = loadSavedSessions();
       if (!saved.length) return;
 
-      // Check what the backend actually has
       try {
         const res = await fetch("/api/terminals");
         const data = await res.json();
@@ -386,17 +381,49 @@ export default function App() {
           localStorage.removeItem(SESSIONS_KEY);
           return;
         }
+
+        // Match saved sessions to surviving backend terminals by name.
+        // Reattach instead of creating new processes to avoid duplicates.
+        // Unmatched backend terminals will be picked up by the polling loop.
+        const claimed = new Set();
+        const reattached = [];
+        for (const s of saved) {
+          const match = backendTerminals.find(
+            (t) => t.alive && !claimed.has(t.id) && t.name === s.name
+          );
+          if (match) {
+            claimed.add(match.id);
+            reattached.push({
+              id: nextLocalId++,
+              name: s.name,
+              terminalId: match.id,
+              model: s.model || match.model || "sonnet",
+              status: "running",
+              workdir: s.workdir || match.working_dir || "",
+              bypassPermissions: match.bypass_permissions || false,
+              activityState: match.activity_state,
+              tokens: match.tokens || 0,
+              cost: match.cost || 0,
+            });
+          }
+        }
+
+        if (reattached.length > 0) {
+          console.log(`[cockpit] Reattached ${reattached.length} session(s) to surviving backend terminals`);
+          setSessions(reattached);
+          setActiveIds(reattached.map((s) => s.id).slice(0, layout));
+          addLocations(reattached.map((s) => s.workdir).filter(Boolean));
+        } else {
+          // No saved sessions matched surviving terminals — stale data
+          console.log("[cockpit] No saved sessions matched surviving terminals — clearing");
+          localStorage.removeItem(SESSIONS_KEY);
+        }
       } catch (_) {
         // Backend unreachable — don't restore, don't clear
         return;
       }
-
-      // Backend has terminals — restore saved sessions
-      for (const s of saved) {
-        createSession(s.name, s.workdir, s.model);
-      }
     })();
-  }, [backendReady, createSession]);
+  }, [backendReady, layout, addLocations]);
 
   // Request notification permission
   const notifRequested = useRef(false);
@@ -739,7 +766,6 @@ export default function App() {
             sidebarOpen={sidebarOpen}
             setSidebarOpen={setSidebarOpen}
             user={user}
-            onLogout={() => (window.location.href = "/logout")}
           />
 
           <div className="flex flex-1 min-h-0">

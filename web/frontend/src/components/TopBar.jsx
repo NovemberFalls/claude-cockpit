@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { PanelLeft, LogOut, ChevronDown } from "lucide-react";
+import { PanelLeft, ChevronDown } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const MODELS = [
@@ -14,7 +14,6 @@ export default function TopBar({
   sidebarOpen,
   setSidebarOpen,
   user,
-  onLogout,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const { themeId, switchTheme, themes } = useTheme();
@@ -162,15 +161,6 @@ export default function TopBar({
           </div>
         )}
 
-        {/* Logout */}
-        <button
-          onClick={onLogout}
-          className="p-1.5 rounded-md transition-colors hover-color-red"
-          style={{ color: "var(--text-muted)" }}
-          title="Logout"
-        >
-          <LogOut size={15} />
-        </button>
       </div>
     </header>
   );

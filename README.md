@@ -228,22 +228,16 @@ Drag and drop files directly onto a terminal pane. Supported file types include 
 Copy `web/.env.example` to `web/.env` and edit as needed:
 
 ```env
-# Server port (default 8420)
+# Server config
+HOST=0.0.0.0
 PORT=8420
 
-# Bind address (default 0.0.0.0 = all interfaces)
-HOST=0.0.0.0
+# Maximum concurrent sessions (default: 8)
+MAX_SESSIONS=8
 
-# Google OAuth (optional — not needed for localhost)
-GOOGLE_CLIENT_ID=your-client-id
-GOOGLE_CLIENT_SECRET=your-client-secret
-SECRET_KEY=some-random-string
-
-# Restrict access to specific emails (optional)
-ALLOWED_EMAILS=you@gmail.com,coworker@company.com
+# Idle session timeout in seconds (default: 7200 = 2 hours)
+IDLE_TIMEOUT=7200
 ```
-
-When running on `localhost`, authentication is automatically bypassed — no OAuth setup needed for personal use.
 
 ---
 
@@ -291,7 +285,7 @@ claude-cockpit/
 │   ├── pty_backend.py      # PTY backend abstraction (add Linux/macOS backends here)
 │   ├── conpty.py           # Windows ConPTY ctypes wrapper (PyInstaller mode)
 │   ├── logging_config.py   # Structured logging setup
-│   ├── auth.py             # Google OAuth (optional)
+│   ├── cockpit_mcp.py      # MCP orchestrator tools
 │   ├── tests/              # Python test suite (24 tests)
 │   ├── requirements.txt    # Python dependencies
 │   ├── cockpit-server.spec # PyInstaller build config
@@ -313,37 +307,15 @@ claude-cockpit/
 
 ---
 
-## Deployment
-
-### Environment Variables
+## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECRET_KEY` | `change-me-in-production` | Session cookie encryption key. **Must change for production.** |
-| `GOOGLE_CLIENT_ID` | _(empty)_ | Google OAuth client ID (required for auth) |
-| `GOOGLE_CLIENT_SECRET` | _(empty)_ | Google OAuth client secret |
-| `ALLOWED_EMAILS` | _(empty)_ | Comma-separated emails/domains (empty = allow all) |
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8420` | Server port |
 | `MAX_SESSIONS` | `8` | Maximum concurrent terminal sessions |
 | `IDLE_TIMEOUT` | `7200` | Kill idle sessions after N seconds (0 = disabled) |
 | `NO_BROWSER` | `0` | Set to `1` to suppress auto-opening browser |
-
-### Running with Watchdog
-
-For production, use the watchdog which auto-restarts on crash:
-
-```bash
-cd web
-python watchdog.py
-```
-
-### Security Checklist
-
-- [ ] Set a strong `SECRET_KEY` (e.g., `openssl rand -hex 32`)
-- [ ] Configure `ALLOWED_EMAILS` to restrict access
-- [ ] Use HTTPS via reverse proxy (nginx/Caddy)
-- [ ] Set `NO_BROWSER=1` on headless servers
 
 ---
 
@@ -433,6 +405,12 @@ PyInstaller executables are sometimes flagged by antivirus software. You may nee
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+---
+
+## Privacy
+
+Claude Cockpit runs entirely on your machine. No data is collected, transmitted, or stored on external servers. Your sessions, code, and conversations never leave your computer.
 
 ---
 

@@ -45,13 +45,13 @@ async def test_browse_invalid_path(client):
 
 
 @pytest.mark.asyncio
-async def test_me_unauthenticated(client):
-    """Without session cookie on non-localhost, /api/me returns unauthenticated."""
+async def test_me_local(client):
+    """Local mode: /api/me always returns authenticated."""
     res = await client.get("/api/me")
     assert res.status_code == 200
     data = res.json()
-    # Test client hostname is "test", not localhost, so auth bypass doesn't apply
-    assert data["authenticated"] is False
+    assert data["authenticated"] is True
+    assert data["mode"] == "local"
 
 
 @pytest.mark.asyncio

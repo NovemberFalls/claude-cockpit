@@ -18,8 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from starlette.middleware.sessions import SessionMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
 load_dotenv()
@@ -28,7 +27,6 @@ import logging_config
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
-from auth import SECRET_KEY, oauth, user_store
 from pty_manager import pty_manager
 
 START_TIME = _time.time()
@@ -36,7 +34,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.16-alpha",
+    version="0.2.17-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -51,8 +49,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
-
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
@@ -88,15 +84,6 @@ ALLOWED_EXTENSIONS = {
 }
 
 
-# ── Auth helpers ──────────────────────────────────────────
-
-
-def _is_local_host(request_or_ws) -> bool:
-    """Return True if the request originates from localhost."""
-    hostname = getattr(request_or_ws.url, "hostname", "") or ""
-    return hostname in ("localhost", "127.0.0.1")
-
-
 # ── Health Check ──────────────────────────────────────────
 
 
@@ -110,11 +97,11 @@ async def health():
     })
 
 
-# ── Auth Routes ──────────────────────────────────────────
+# ── Routes ───────────────────────────────────────────────
 
 
 @app.get("/")
-async def index(request: Request):
+async def index():
     # Serve React frontend dist if available (production build)
     if FRONTEND_DIST.is_dir() and (FRONTEND_DIST / "index.html").exists():
         # Never cache index.html — it references versioned asset hashes that change
@@ -126,55 +113,13 @@ async def index(request: Request):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     # Fallback to legacy static frontend
-    user = request.session.get("user")
-    if not user:
-        if request.url.hostname in ("localhost", "127.0.0.1"):
-            return FileResponse(STATIC_DIR / "index.html")
-        return FileResponse(STATIC_DIR / "login.html")
     return FileResponse(STATIC_DIR / "index.html")
 
 
-@app.get("/login")
-async def login(request: Request):
-    redirect_uri = request.url_for("auth_callback")
-    return await oauth.google.authorize_redirect(request, redirect_uri)
-
-
-@app.get("/auth/callback")
-async def auth_callback(request: Request):
-    token = await oauth.google.authorize_access_token(request)
-    userinfo = token.get("userinfo", {})
-    email = userinfo.get("email", "")
-    name = userinfo.get("name", email)
-    picture = userinfo.get("picture", "")
-
-    if not user_store.is_allowed(email):
-        return HTMLResponse("<h1>Access Denied</h1><p>Your email is not authorized.</p>", 403)
-
-    user = user_store.get_or_create(email, name, picture)
-    request.session["user"] = {
-        "email": user.email,
-        "name": user.name,
-        "picture": user.picture,
-        "host": user.assigned_host,
-    }
-    return RedirectResponse("/")
-
-
-@app.get("/logout")
-async def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse("/")
-
-
 @app.get("/api/me")
-async def me(request: Request):
-    user = request.session.get("user")
-    if not user:
-        if _is_local_host(request):
-            return {"authenticated": True, "mode": "local", "email": "local@localhost", "name": "Local User"}
-        return {"authenticated": False}
-    return {"authenticated": True, "mode": "local", **user}
+async def me():
+    """Always authenticated in local mode."""
+    return {"authenticated": True, "mode": "local", "email": "local@localhost", "name": "Local User"}
 
 
 # ── File Upload ──────────────────────────────────────────
@@ -380,8 +325,6 @@ def _write_mcp_config(terminal_id: str) -> str:
 @app.post("/api/terminals/{terminal_id}/input")
 async def send_terminal_input(terminal_id: str, request: Request):
     """Send text input to a terminal's PTY."""
-    if not _is_local_host(request) and not request.session.get("user"):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     body = await request.json()
     text = body.get("text", "")
     if not text:
@@ -492,13 +435,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     """Bridge xterm.js <-> PTY via WebSocket."""
     session = pty_manager.get_terminal(terminal_id)
     await websocket.accept()
-
-    # Auth guard: localhost is always allowed; remote access requires a valid session.
-    # This prevents IDOR attacks where a caller guesses a terminal_id and hijacks the session.
-    if not _is_local_host(websocket) and not websocket.session.get("user"):
-        await websocket.send_text('{"type":"error","message":"Unauthorized"}')
-        await websocket.close(code=4403, reason="Unauthorized")
-        return
 
     if not session:
         await websocket.close(code=4004, reason="Terminal not found")
