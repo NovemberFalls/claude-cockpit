@@ -340,7 +340,7 @@ export default function Sidebar({
       {/* New button */}
       <button
         onClick={onNew}
-        className="flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-md mb-4 transition-colors hover-bg-surface"
+        className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-2 transition-colors hover-bg-surface"
         style={{ color: "var(--text-secondary)" }}
         title="New session (Ctrl+Shift+N)"
       >
