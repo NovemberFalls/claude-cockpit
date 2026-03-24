@@ -39,7 +39,7 @@ It works by wrapping the `claude` CLI in a web-based terminal emulator (xterm.js
 
 ## Prerequisites
 
-> **Platform:** Claude Cockpit currently supports **Windows 10/11** only. Linux and macOS support is not yet available — contributions welcome!
+> **Platform:** The pre-built desktop app and browser exe target **Windows 10/11**. Running from source works on **Linux and macOS** — install dependencies and start `python server.py` as normal.
 
 Before you start, make sure you have these installed:
 
@@ -68,10 +68,7 @@ cd claude-cockpit
 pip install -r web/requirements.txt
 ```
 
-> **Note:** You also need `pywinpty` on Windows:
-> ```bash
-> pip install pywinpty
-> ```
+> Dependencies are platform-aware: `pywinpty` installs on Windows, `ptyprocess` on Linux/macOS.
 
 ### 3. Install frontend dependencies
 
@@ -282,11 +279,12 @@ claude-cockpit/
 ├── web/
 │   ├── server.py           # FastAPI backend (REST + WebSocket)
 │   ├── pty_manager.py      # PTY session manager
-│   ├── pty_backend.py      # PTY backend abstraction (add Linux/macOS backends here)
+│   ├── pty_backend.py      # PTY backend abstraction + factory
 │   ├── conpty.py           # Windows ConPTY ctypes wrapper (PyInstaller mode)
+│   ├── unix_pty.py         # Linux/macOS PTY backend (ptyprocess)
 │   ├── logging_config.py   # Structured logging setup
 │   ├── cockpit_mcp.py      # MCP orchestrator tools
-│   ├── tests/              # Python test suite (24 tests)
+│   ├── tests/              # Python test suite (62 tests)
 │   ├── requirements.txt    # Python dependencies
 │   ├── cockpit-server.spec # PyInstaller build config
 │   └── frontend/
@@ -328,13 +326,14 @@ cd web
 python -m pytest tests/ -v
 ```
 
-Runs **24 tests** covering:
+Runs **62 tests** covering:
 
 | Test File | What It Tests |
 |-----------|--------------|
 | `test_server.py` | Health endpoint, browse API, auth, git status |
 | `test_pty_manager.py` | Session lifecycle, max limits, kill/shutdown |
 | `test_session_state_tracker.py` | State transitions, token/cost parsing, idle detection |
+| `test_pty_backend.py` | Backend factory routing, ABC compliance, non-blocking read contract |
 
 ### Frontend Tests (Vitest)
 
@@ -395,7 +394,7 @@ PyInstaller executables are sometimes flagged by antivirus software. You may nee
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python, FastAPI, Uvicorn, pywinpty |
+| Backend | Python, FastAPI, Uvicorn, pywinpty (Windows) / ptyprocess (Linux/macOS) |
 | Frontend | React 19, Vite 8, xterm.js, Tailwind CSS |
 | Desktop | Tauri 2 (Rust + WebView2) |
 | Packaging | PyInstaller (server exe), NSIS (installer) |
