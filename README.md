@@ -26,7 +26,7 @@ This is the feature that makes Claude Cockpit unique. If you're running complex 
 Claude Cockpit lets you:
 
 - **Orchestrate multiple Claude agents** — one session coordinates others via MCP (unique capability)
-- Run **multiple Claude Code sessions** at once in tabs/split panes
+- Run **up to 8 Claude Code sessions** simultaneously, view 1, 2, or 4 at a time in split panes
 - Organize sessions by **project folder** (workspace)
 - Choose from **20 themes** (dark and light variants)
 - **Drag and drop files** into sessions

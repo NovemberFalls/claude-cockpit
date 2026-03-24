@@ -8,15 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Roadmap
 
 ### v0.3.0 — Linux & UX
-- [ ] Linux PTY support (pty module + spawn)
+- [x] Linux/macOS PTY support (`unix_pty.py` via ptyprocess, registered in `get_backend()`)
 - [ ] Code splitting / lazy loading (bundle >500KB warning)
 - [ ] Session search / filter
 - [ ] Keyboard-driven session switching (Ctrl+Tab)
 - [ ] Zoom controls (Ctrl+/-, Ctrl+mousewheel)
 
 ### v0.4.0 — Cross-Platform
-- [ ] Linux PTY backend (pty module, `PtyProcess` implementation in `pty_backend.py`)
-- [ ] macOS PTY backend
+- [x] Linux PTY backend (`UnixPtyProcess` in `unix_pty.py`, implements `PtyProcess` ABC)
+- [x] macOS PTY backend (same `UnixPtyProcess` — ptyprocess works on both)
 - [ ] CI matrix: Linux + macOS runners
 - [ ] Homebrew formula / apt package
 
@@ -25,7 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 - [ ] Session sharing / spectator mode
-- [ ] macOS PTY support (community contribution welcome)
+
+## [0.2.18-alpha] - 2026-03-24
+
+### Added
+- Linux and macOS PTY support via `unix_pty.py` (`UnixPtyProcess` implementing the `PtyProcess` ABC using `ptyprocess`)
+- `get_backend()` now routes to `UnixPtyProcess` for `linux` and `darwin` platforms
+- Platform-aware working directory picker (`/api/browse` returns `["/"]` root on Linux/macOS)
+- 38 new tests for backend factory routing, ABC compliance, and non-blocking read contract
+
+### Changed
+- PATH construction in `create_terminal()` is now platform-aware (`os.pathsep` throughout; Linux/macOS prepends `~/.local/bin` and `/usr/local/bin`)
+- MCP config path validation accepts POSIX absolute paths on Linux/macOS (with `shlex.quote` for injection safety)
+- `pywinpty` dependency is now Windows-only; `ptyprocess` added for Linux/macOS
 
 ## [0.2.0-alpha] - 2026-03-15
 

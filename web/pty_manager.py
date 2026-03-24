@@ -368,7 +368,7 @@ class PtyManager:
         if meipass:
             meipass_lower = meipass.lower().rstrip(os.sep)
             cleaned_parts = []
-            for p in current_path.split(";"):
+            for p in current_path.split(os.pathsep):
                 p_stripped = p.strip()
                 if not p_stripped:
                     continue
@@ -376,24 +376,32 @@ class PtyManager:
                 if p_lower == meipass_lower or p_lower.startswith(meipass_lower + os.sep):
                     continue
                 cleaned_parts.append(p_stripped)
-            current_path = ";".join(cleaned_parts)
+            current_path = os.pathsep.join(cleaned_parts)
 
-        # Ensure critical system directories and npm globals are in PATH
-        sys_root = os.environ.get("SystemRoot", r"C:\Windows")
-        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
-        npm_dir = os.path.join(user_profile, "AppData", "Roaming", "npm")
-        essential_dirs = [
-            os.path.join(sys_root, "System32"),
-            sys_root,
-            os.path.join(sys_root, "System32", "Wbem"),
-            npm_dir,
-        ]
-        path_lower = current_path.lower()
-        for d in essential_dirs:
-            if os.path.isdir(d) and d.lower() not in path_lower:
-                current_path = d + ";" + current_path
+        # Ensure critical system directories and tool globals are in PATH
+        if _sys.platform == "win32":
+            sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+            user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+            npm_dir = os.path.join(user_profile, "AppData", "Roaming", "npm")
+            essential_dirs = [
+                os.path.join(sys_root, "System32"),
+                sys_root,
+                os.path.join(sys_root, "System32", "Wbem"),
+                npm_dir,
+            ]
+            path_lower = current_path.lower()
+            for d in essential_dirs:
+                if os.path.isdir(d) and d.lower() not in path_lower:
+                    current_path = d + os.pathsep + current_path
+            env.setdefault("SystemRoot", sys_root)
+        else:
+            home = os.path.expanduser("~")
+            extra_dirs = [f"{home}/.local/bin", "/usr/local/bin"]
+            path_set = set(current_path.split(os.pathsep))
+            prepend = [d for d in extra_dirs if os.path.isdir(d) and d not in path_set]
+            if prepend:
+                current_path = os.pathsep.join(prepend) + os.pathsep + current_path
         env["PATH"] = current_path
-        env.setdefault("SystemRoot", sys_root)
 
         # Build the command
         import shutil
@@ -405,13 +413,19 @@ class PtyManager:
         if bypass_permissions:
             cmd += " --dangerously-skip-permissions"
         if mcp_config_path:
-            # Validate: absolute path ending in .json, no spaces or shell metacharacters.
-            # Path is passed WITHOUT quotes — winpty's shlex→list2cmdline round-trip
-            # corrupts quoted arguments (turns "path" into \"path\"), so we rely on
-            # the regex below to guarantee the path is safe to use unquoted.
-            if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+\.json$', mcp_config_path):
-                raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
-            cmd += f' --mcp-config {mcp_config_path}'
+            if _sys.platform == "win32":
+                # Path is passed WITHOUT quotes — winpty's shlex→list2cmdline round-trip
+                # corrupts quoted arguments (turns "path" into \"path\"), so the regex
+                # guarantees the path is safe to use unquoted.
+                if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+\.json$', mcp_config_path):
+                    raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
+                cmd += f' --mcp-config {mcp_config_path}'
+            else:
+                # Unix: absolute path, safe characters only.
+                if not re.match(r'^/[\w/\.\-\~\(\)\+]+\.json$', mcp_config_path):
+                    raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
+                import shlex as _shlex
+                cmd += f' --mcp-config {_shlex.quote(mcp_config_path)}'
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)

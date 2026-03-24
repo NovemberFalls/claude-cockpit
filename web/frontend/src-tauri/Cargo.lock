@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "claude-cockpit"
-version = "0.2.17-alpha"
+version = "0.2.18-alpha"
 dependencies = [
  "serde",
  "serde_json",

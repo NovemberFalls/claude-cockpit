@@ -34,7 +34,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.17-alpha",
+    version="0.2.18-alpha",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -183,14 +183,17 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
 async def browse_directories(path: str = ""):
     """List subdirectories of the given path for folder autocomplete."""
     if not path:
-        # Return drive roots on Windows
-        import string
-        drives = []
-        for letter in string.ascii_uppercase:
-            drive = f"{letter}:\\"
-            if os.path.isdir(drive):
-                drives.append(drive)
-        return JSONResponse({"dirs": drives, "parent": ""})
+        if sys.platform == "win32":
+            # Return drive roots on Windows
+            import string
+            drives = []
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if os.path.isdir(drive):
+                    drives.append(drive)
+            return JSONResponse({"dirs": drives, "parent": ""})
+        else:
+            return JSONResponse({"dirs": ["/"], "parent": ""})
 
     target = Path(path)
     if not target.is_dir():

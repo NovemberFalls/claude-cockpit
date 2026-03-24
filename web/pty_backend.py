@@ -65,17 +65,22 @@ def get_backend() -> type:
 
     Raises RuntimeError on unsupported platforms.
     """
-    if sys.platform != "win32":
-        raise RuntimeError(
-            f"No PTY backend available for platform '{sys.platform}'. "
-            "Linux/macOS support is not yet implemented — contributions welcome! "
-            "Implement PtyProcess in pty_backend.py to add a new platform."
-        )
+    # Linux / macOS — use ptyprocess-based backend
+    if sys.platform in ("linux", "darwin"):
+        from unix_pty import UnixPtyProcess
+        return UnixPtyProcess
 
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        from conpty import PtyProcess as ConPtyProcess  # type: ignore[import]
-        return ConPtyProcess
+    # Windows — ConPTY for bundled (PyInstaller), winpty for development
+    if sys.platform == "win32":
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            from conpty import PtyProcess as ConPtyProcess  # type: ignore[import]
+            return ConPtyProcess
 
-    import winpty  # type: ignore[import]
-    return winpty.PtyProcess
+        import winpty  # type: ignore[import]
+        return winpty.PtyProcess
+
+    raise RuntimeError(
+        f"No PTY backend available for platform '{sys.platform}'. "
+        "Supported platforms: Windows, Linux, macOS."
+    )
