@@ -298,6 +298,17 @@ def call_tool(name: str, args: dict, msg_id=None):
         text = args["text"]
         wait = args.get("wait_for_response", False)
 
+        # MCP frameworks pass escape sequences as literal two-char strings (e.g. backslash-n
+        # instead of 0x0A). Translate the common ones so \n actually submits the message.
+        text = (
+            text
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
+            .replace("\\u0003", "\x03")
+            .replace("\\x03", "\x03")
+        )
+
         # Get the current output cursor before sending
         pre_result = api("GET", f"/api/terminals/{tid}/output")
         since = pre_result.get("total_lines", 0) if "error" not in pre_result else 0
