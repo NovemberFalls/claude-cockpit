@@ -52,7 +52,7 @@
       "endpoints": [
         "https://github.com/NovemberFalls/claude-cockpit/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCNjVGMDQwOURGMTYxNDYKUldSR1lmR2RRUEJsTzVOTTkrWnQya245YVc3RE1HVVQ4eDc3WlF4a2FGV0ZJVFovN0V1SS94S1QK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFGOTI0NDRBOUIxRTJBNDYKUldSR0toNmJTa1NTcnpaUUFwOGZTZHNNamhGSkNyQXluT014dHJObGZmcml5L2xDSGZCeExXdXkK"
     }
   }
 }
