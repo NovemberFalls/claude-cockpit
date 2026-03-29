@@ -125,7 +125,7 @@ class TerminalSession:
 
 
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
-IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", str(2 * 3600)))  # 2 hours default
+IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-close)
 
 # Allowed model names — prevents command injection via the model parameter.
 _ALLOWED_MODELS = {
@@ -572,14 +572,21 @@ class PtyManager:
         return session
 
     async def read_pty(self, terminal_id: str, size: int = 65536) -> str:
-        """Read from PTY (runs in dedicated executor to avoid blocking)."""
+        """Read from PTY (runs in dedicated executor with timeout to avoid blocking)."""
         session = self.sessions.get(terminal_id)
-        if not session or not session.pty.isalive():
+        if not session or not session.alive:
             return ""
         loop = asyncio.get_event_loop()
         try:
-            data = await loop.run_in_executor(self._pty_executor, session.pty.read, size)
+            data = await asyncio.wait_for(
+                loop.run_in_executor(self._pty_executor, session.pty.read, size),
+                timeout=10.0,
+            )
             return data
+        except asyncio.TimeoutError:
+            # Read hung — process may be in a zombie state
+            logger.warning("PTY read timed out for %s", terminal_id)
+            return ""
         except EOFError:
             session.alive = False
             return ""
@@ -600,15 +607,22 @@ class PtyManager:
             return False
 
     async def write_pty_async(self, terminal_id: str, data: str) -> bool:
-        """Write to PTY stdin (non-blocking, runs in executor)."""
+        """Write to PTY stdin (non-blocking, runs in executor with timeout)."""
         session = self.sessions.get(terminal_id)
         if not session or not session.alive:
             return False
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(
-                self._pty_executor, self._write_pty_sync, terminal_id, data
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._pty_executor, self._write_pty_sync, terminal_id, data
+                ),
+                timeout=5.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
+            session.alive = False
+            return False
         except Exception:
             logger.debug("PTY async write error for %s", terminal_id)
             return False
@@ -616,13 +630,17 @@ class PtyManager:
     def _write_pty_sync(self, terminal_id: str, data: str) -> bool:
         """Executor-safe PTY write (avoids isalive() kernel call on event loop)."""
         session = self.sessions.get(terminal_id)
-        if not session or not session.pty.isalive():
+        if not session:
             return False
         try:
+            if not session.pty.isalive():
+                session.alive = False
+                return False
             session.pty.write(data)
             return True
         except Exception:
             logger.debug("PTY write error for %s", terminal_id)
+            session.alive = False
             return False
 
     def shutdown(self):

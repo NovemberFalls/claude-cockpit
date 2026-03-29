@@ -232,8 +232,8 @@ PORT=8420
 # Maximum concurrent sessions (default: 8)
 MAX_SESSIONS=8
 
-# Idle session timeout in seconds (default: 7200 = 2 hours)
-IDLE_TIMEOUT=7200
+# Idle session timeout in seconds (default: 0 = disabled)
+IDLE_TIMEOUT=0
 ```
 
 ---
@@ -312,7 +312,7 @@ claude-cockpit/
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8420` | Server port |
 | `MAX_SESSIONS` | `8` | Maximum concurrent terminal sessions |
-| `IDLE_TIMEOUT` | `7200` | Kill idle sessions after N seconds (0 = disabled) |
+| `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |
 | `NO_BROWSER` | `0` | Set to `1` to suppress auto-opening browser |
 
 ---
@@ -332,7 +332,7 @@ Runs **62 tests** covering:
 |-----------|--------------|
 | `test_server.py` | Health endpoint, browse API, auth, git status |
 | `test_pty_manager.py` | Session lifecycle, max limits, kill/shutdown |
-| `test_session_state_tracker.py` | State transitions, token/cost parsing, idle detection |
+| `test_session_state_tracker.py` | State transitions, idle detection |
 | `test_pty_backend.py` | Backend factory routing, ABC compliance, non-blocking read contract |
 
 ### Frontend Tests (Vitest)

@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Code splitting / lazy loading (bundle >500KB warning)
 - [ ] Session search / filter
 - [ ] Keyboard-driven session switching (Ctrl+Tab)
-- [ ] Zoom controls (Ctrl+/-, Ctrl+mousewheel)
+- [x] Zoom controls (Ctrl+/-, Ctrl+mousewheel, Ctrl+0 reset)
 
 ### v0.4.0 — Cross-Platform
 - [x] Linux PTY backend (`UnixPtyProcess` in `unix_pty.py`, implements `PtyProcess` ABC)
@@ -25,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 - [ ] Session sharing / spectator mode
+
+## [Unreleased]
+
+### Changed
+- New app branding: neon eye/code-bracket logo replaces hexagon icon across all locations (Tauri icons, favicon, TopBar)
+- Ctrl+C now copies selected text to clipboard instead of sending interrupt; Ctrl+C without selection still sends `\x03`
+- Ctrl+V / Ctrl+Shift+V paste from clipboard into terminal
+- Idle session timeout disabled by default (`IDLE_TIMEOUT=0`) — sessions no longer self-close after 2 hours
+
+### Removed
+- Token/cost display removed from status bar (regex-based parsing was unreliable — matched arbitrary numbers/dollar amounts in terminal output)
+
+### Fixed
+- PTY write/read operations now have timeout protection (5s write, 10s read) to prevent session lockups from zombie processes
+- Failed PTY writes mark session as dead immediately instead of silently failing
 
 ## [0.2.18-alpha] - 2026-03-24
 

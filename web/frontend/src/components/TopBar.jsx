@@ -35,10 +35,10 @@ export default function TopBar({
         >
           <PanelLeft size={18} />
         </button>
+        <img src="/app-icon.png" alt="Claude Cockpit" width={22} height={22} style={{ borderRadius: 4 }} />
         <span className="text-sm font-semibold tracking-tight" style={{ color: "var(--text-primary)" }}>
           Cockpit
         </span>
-        <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: "var(--accent)" }} />
       </div>
 
       {/* Right */}

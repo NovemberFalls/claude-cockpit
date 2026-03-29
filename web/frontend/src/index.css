@@ -114,3 +114,9 @@ body {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* Drag-and-drop overlay pulse */
+@keyframes drop-target-pulse {
+  0%, 100% { box-shadow: 0 0 15px rgba(122, 162, 247, 0.2), inset 0 0 15px rgba(122, 162, 247, 0.03); }
+  50% { box-shadow: 0 0 25px rgba(122, 162, 247, 0.35), inset 0 0 25px rgba(122, 162, 247, 0.08); }
+}

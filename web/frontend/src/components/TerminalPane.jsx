@@ -44,6 +44,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
   onPlace,       // (sessionId, slotIndex) => void — drag from sidebar
+  onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
   isOrchestrator = false, // this pane is the orchestrator session
@@ -190,6 +191,42 @@ const TerminalPane = forwardRef(function TerminalPane({
     // Fit once mounted (double-rAF to ensure layout is settled)
     requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
+    // Ctrl+C / Ctrl+V handling: copy when text is selected, interrupt only when not.
+    // Prevents accidental SIGINT when the user just wants to copy, and avoids
+    // session lockups caused by sending \x03 to an unresponsive process.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== "keydown") return true;
+
+      // Ctrl+C: copy if selection exists, otherwise let terminal send \x03
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === "c" && !ev.shiftKey) {
+        if (term.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+          return false; // Don't send \x03
+        }
+        return true; // No selection — send interrupt
+      }
+
+      // Ctrl+Shift+C: always copy (terminal convention)
+      if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && ev.key === "C") {
+        if (term.hasSelection()) {
+          navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+        }
+        return false;
+      }
+
+      // Ctrl+V / Ctrl+Shift+V: paste from clipboard
+      if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
+        navigator.clipboard.readText().then((text) => {
+          if (text && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(text);
+          }
+        }).catch(() => {});
+        return false;
+      }
+
+      return true; // All other keys handled normally
+    });
+
     // Terminal input -> WebSocket
     term.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -314,29 +351,31 @@ const TerminalPane = forwardRef(function TerminalPane({
       {/* Pane header */}
       <div
         className="flex items-center justify-between px-3 h-9 flex-shrink-0"
-        style={{ borderBottom: "1px solid var(--border-color)" }}
+        style={{
+          borderBottom: "1px solid var(--border-color)",
+          cursor: onSwap ? "grab" : "default",
+        }}
         draggable={onSwap != null}
         onDragStart={(e) => {
           if (paneIndex == null) return;
           e.dataTransfer.effectAllowed = "move";
           e.dataTransfer.setData("text/plain", `pane:${paneIndex}`);
+          // Use a minimal drag image so the browser ghost doesn't obscure the drop overlay
+          const ghost = document.createElement("div");
+          ghost.textContent = session.name;
+          ghost.style.cssText = `
+            position: fixed; top: -100px;
+            padding: 4px 12px; border-radius: 6px; font-size: 11px; font-weight: 600;
+            background: var(--bg-elevated); color: var(--accent);
+            border: 1px solid var(--accent); white-space: nowrap;
+          `;
+          document.body.appendChild(ghost);
+          e.dataTransfer.setDragImage(ghost, ghost.offsetWidth / 2, ghost.offsetHeight / 2);
+          requestAnimationFrame(() => document.body.removeChild(ghost));
+          onDragSourceChange?.(paneIndex);
         }}
-        onDragOver={(e) => {
-          if (!onSwap && !onPlace) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "move";
-        }}
-        onDrop={(e) => {
-          if (paneIndex == null) return;
-          e.preventDefault();
-          const data = e.dataTransfer.getData("text/plain");
-          if (data.startsWith("session:")) {
-            const sessionId = data.slice(8);
-            onPlace?.(sessionId, paneIndex);
-          } else if (data.startsWith("pane:") && onSwap) {
-            const from = parseInt(data.slice(5), 10);
-            if (!isNaN(from) && from !== paneIndex) onSwap(from, paneIndex);
-          }
+        onDragEnd={() => {
+          onDragSourceChange?.(null);
         }}
       >
         <div className="flex items-center gap-2 min-w-0">

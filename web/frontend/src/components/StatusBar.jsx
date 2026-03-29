@@ -21,8 +21,6 @@ export default function StatusBar({
   setLayout,
   sessions,
   connected,
-  totalTokens,
-  totalCost,
   broadcastMode,
   setBroadcastMode,
   orchestratorMode,
@@ -60,9 +58,6 @@ export default function StatusBar({
         {runningCount > 0 && (
           <span style={{ color: "var(--green)" }}>{runningCount} running</span>
         )}
-        <span>Tokens: {totalTokens.toLocaleString()}</span>
-        <span>Cost: ${totalCost.toFixed(2)}</span>
-
         <span style={{ opacity: 0.5 }}>v{version}</span>
       </div>
 

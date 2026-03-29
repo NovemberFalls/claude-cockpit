@@ -73,7 +73,7 @@ cd web/frontend && npm run lint
 ## Architecture
 
 - **ConPTY ctypes wrapper:** `pty_manager.py` uses `winpty.PtyProcess` to spawn `claude --model {model}` processes. For bundled (Tauri) mode, a ctypes wrapper around Windows ConPTY APIs handles pseudo-terminal creation.
-- **SessionStateTracker:** Parses ANSI escape sequences from terminal output to track session state (model, status, token usage).
+- **SessionStateTracker:** Parses ANSI escape sequences from terminal output to track session activity state (idle, busy, waiting, starting).
 - **WebSocket bridge:** `/ws/terminal/{id}` proxies between the browser and ConPTY, with ping/pong heartbeat every 30 seconds.
 - **Session model:** `{ id, name, terminalId, model, status, workdir }` -- workdir supported end-to-end from frontend through REST API to ConPTY cwd.
 - **Startup cleanup:** Orphaned claude.exe processes killed via psutil, PID file for crash detection, session reconciliation with frontend.
@@ -81,9 +81,11 @@ cd web/frontend && npm run lint
 
 ## Key Constraints
 
-- **Windows-only PTY:** The ConPTY/winpty backend only works on Windows. No Linux/macOS PTY support.
+- **Windows primary PTY:** ConPTY/winpty backend for Windows; `unix_pty.py` via ptyprocess for Linux/macOS.
 - **Max 8 sessions:** Default concurrent session limit is 8, configurable via `MAX_SESSIONS` env var.
-- **Idle timeout:** Sessions idle for 2 hours (configurable via `IDLE_TIMEOUT`) are automatically cleaned up.
+- **No idle timeout:** Idle timeout is disabled by default (`IDLE_TIMEOUT=0`). Dead sessions (process exited) are still purged after 30s.
+- **PTY timeout protection:** Writes timeout after 5s, reads after 10s — prevents session lockups from zombie processes.
+- **Ctrl+C handling:** `TerminalPane.jsx` has a `customKeyEventHandler` — Ctrl+C copies when text is selected, sends `\x03` only when no selection. Ctrl+V pastes from clipboard.
 
 ## Build & Release
 

@@ -85,6 +85,9 @@ export default function App() {
   const [broadcastText, setBroadcastText] = useState("");
   const [orchestratorMode, setOrchestratorMode] = useState(false);
   const [orchestratorId, setOrchestratorId] = useState(null); // local session id
+  // Drag-and-drop state for pane reordering
+  const [dragSource, setDragSource] = useState(null);   // pane index being dragged
+  const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try { return localStorage.getItem(ONBOARDING_KEY) !== "true"; } catch (_) { return true; }
   });
@@ -554,15 +557,6 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
-  const totalTokens = useMemo(
-    () => sessions.reduce((sum, s) => sum + (s.tokens || 0), 0),
-    [sessions]
-  );
-  const totalCost = useMemo(
-    () => sessions.reduce((sum, s) => sum + (s.cost || 0), 0),
-    [sessions]
-  );
-
   const visibleSessions = useMemo(() => {
     const visible = activeIds
       .slice(0, layout)
@@ -862,6 +856,7 @@ export default function App() {
                 gridTemplateRows: gridRows,
                 gap: 0,
               }}
+              onDragEnd={() => { setDragSource(null); setDragOverSlot(null); }}
             >
               {visibleSessions.map((session, idx) => (
                 <div
@@ -870,6 +865,7 @@ export default function App() {
                     overflow: "hidden",
                     minHeight: 0,
                     minWidth: 0,
+                    position: "relative",
                     borderRight:
                       idx < visibleSessions.length - 1 &&
                       (layout === 2 || (layout === 4 && idx % 2 === 0))
@@ -879,8 +875,62 @@ export default function App() {
                       layout === 4 && idx < 2
                         ? "1px solid var(--border-color)"
                         : "none",
+                    opacity: dragSource === idx ? 0.4 : 1,
+                    transition: "opacity 0.2s ease",
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    if (dragOverSlot !== idx) setDragOverSlot(idx);
+                  }}
+                  onDragLeave={(e) => {
+                    if (!e.currentTarget.contains(e.relatedTarget)) {
+                      setDragOverSlot(null);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverSlot(null);
+                    setDragSource(null);
+                    const data = e.dataTransfer.getData("text/plain");
+                    if (data.startsWith("session:")) {
+                      placeSession(data.slice(8), idx);
+                    } else if (data.startsWith("pane:")) {
+                      const from = parseInt(data.slice(5), 10);
+                      if (!isNaN(from) && from !== idx) swapPanes(from, idx);
+                    }
                   }}
                 >
+                  {/* Drop target overlay */}
+                  {dragOverSlot === idx && dragSource !== idx && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        inset: 4,
+                        border: "2px dashed var(--accent)",
+                        borderRadius: 8,
+                        backgroundColor: "rgba(122, 162, 247, 0.08)",
+                        animation: "drop-target-pulse 1.5s ease-in-out infinite",
+                        zIndex: 10,
+                        pointerEvents: "none",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <span
+                        className="text-xs font-semibold px-3 py-1.5 rounded-full"
+                        style={{
+                          backgroundColor: "var(--bg-elevated)",
+                          color: "var(--accent)",
+                          border: "1px solid var(--accent)",
+                          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                        }}
+                      >
+                        {dragSource != null ? "Drop to swap" : "Drop here"}
+                      </span>
+                    </div>
+                  )}
                   <TerminalPane
                     ref={(el) => { paneRefs.current[idx] = el; }}
                     session={session}
@@ -888,6 +938,7 @@ export default function App() {
                     paneIndex={idx}
                     onSwap={layout > 1 ? swapPanes : undefined}
                     onPlace={placeSession}
+                    onDragSourceChange={layout > 1 ? setDragSource : undefined}
                     terminalZoom={terminalZoom}
                     toast={toast}
                     isOrchestrator={orchestratorMode && session.id === orchestratorId}
@@ -904,10 +955,24 @@ export default function App() {
                     <div
                       key={`empty-${i}`}
                       className="flex items-center justify-center"
-                      style={{ color: "var(--text-muted)" }}
-                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+                      style={{
+                        color: "var(--text-muted)",
+                        position: "relative",
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (dragOverSlot !== slotIndex) setDragOverSlot(slotIndex);
+                      }}
+                      onDragLeave={(e) => {
+                        if (!e.currentTarget.contains(e.relatedTarget)) {
+                          setDragOverSlot(null);
+                        }
+                      }}
                       onDrop={(e) => {
                         e.preventDefault();
+                        setDragOverSlot(null);
+                        setDragSource(null);
                         const data = e.dataTransfer.getData("text/plain");
                         if (data.startsWith("session:")) placeSession(data.slice(8), slotIndex);
                         else if (data.startsWith("pane:")) {
@@ -916,6 +981,36 @@ export default function App() {
                         }
                       }}
                     >
+                      {/* Drop target overlay for empty slots */}
+                      {dragOverSlot === slotIndex && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            inset: 4,
+                            border: "2px dashed var(--accent)",
+                            borderRadius: 8,
+                            backgroundColor: "rgba(122, 162, 247, 0.08)",
+                            animation: "drop-target-pulse 1.5s ease-in-out infinite",
+                            zIndex: 10,
+                            pointerEvents: "none",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <span
+                            className="text-xs font-semibold px-3 py-1.5 rounded-full"
+                            style={{
+                              backgroundColor: "var(--bg-elevated)",
+                              color: "var(--accent)",
+                              border: "1px solid var(--accent)",
+                              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                            }}
+                          >
+                            Drop here
+                          </span>
+                        </div>
+                      )}
                       <button
                         onClick={() => setShowNewDialog(true)}
                         className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
@@ -934,8 +1029,6 @@ export default function App() {
             setLayout={setLayout}
             sessions={sessions}
             connected={sessions.some((s) => s.status === "running")}
-            totalTokens={totalTokens}
-            totalCost={totalCost}
             broadcastMode={broadcastMode}
             setBroadcastMode={setBroadcastMode}
             orchestratorMode={orchestratorMode}
