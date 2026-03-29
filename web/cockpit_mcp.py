@@ -299,10 +299,12 @@ def call_tool(name: str, args: dict, msg_id=None):
         wait = args.get("wait_for_response", False)
 
         # MCP frameworks pass escape sequences as literal two-char strings (e.g. backslash-n
-        # instead of 0x0A). Translate the common ones so \n actually submits the message.
+        # instead of 0x0A). Translate the common ones so a trailing \n submits the message.
+        # Claude Code's PTY uses CR (0x0D) to submit — map \n → \r so callers can use \n
+        # as the conventional "press Enter" signal without needing a separate \r send.
         text = (
             text
-            .replace("\\n", "\n")
+            .replace("\\n", "\r")
             .replace("\\r", "\r")
             .replace("\\t", "\t")
             .replace("\\u0003", "\x03")
