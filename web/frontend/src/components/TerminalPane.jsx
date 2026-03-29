@@ -214,11 +214,14 @@ const TerminalPane = forwardRef(function TerminalPane({
         return false;
       }
 
-      // Ctrl+V / Ctrl+Shift+V: paste from clipboard
+      // Ctrl+V / Ctrl+Shift+V: paste from clipboard.
+      // Wrap in bracketed paste sequences so Claude Code receives the full
+      // block as a single paste event rather than processing each line
+      // independently as it arrives through the PTY.
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
         navigator.clipboard.readText().then((text) => {
           if (text && wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(text);
+            wsRef.current.send(`\x1b[200~${text}\x1b[201~`);
           }
         }).catch(() => {});
         return false;
