@@ -363,7 +363,7 @@ def main():
                 "result": {
                     "protocolVersion": client_version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "cockpit-mcp", "version": "1.1.0"},
+                    "serverInfo": {"name": "cockpit-mcp", "version": "1.0.0"},
                 },
             })
 

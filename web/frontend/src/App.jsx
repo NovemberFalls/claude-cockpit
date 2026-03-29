@@ -58,6 +58,14 @@ const MAX_ZOOM = 28;
 
 let nextLocalId = 1;
 
+// Find the first empty (null/undefined) slot within the visible layout range
+function findEmptySlot(ids, maxSlots) {
+  for (let i = 0; i < maxSlots; i++) {
+    if (i >= ids.length || ids[i] == null) return i;
+  }
+  return -1;
+}
+
 export default function App() {
   const { toasts, toast, dismiss: dismissToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -245,12 +253,11 @@ export default function App() {
     };
     setSessions((prev) => [...prev, newSession]);
     setActiveIds((prev) => {
+      const slot = findEmptySlot(prev, layout);
+      if (slot === -1) return prev; // all panes full — user drags from sidebar to place
       const next = [...prev];
-      if (next.length >= layout) {
-        next[next.length - 1] = localId;
-      } else {
-        next.push(localId);
-      }
+      while (next.length <= slot) next.push(null);
+      next[slot] = localId;
       return next;
     });
 
@@ -302,32 +309,25 @@ export default function App() {
       fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" }).catch(() => toast("Failed to kill session on server", "error"));
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
-    setActiveIds((prev) => prev.filter((id) => id !== localId));
+    setActiveIds((prev) => prev.map((id) => id === localId ? null : id));
     if (localId === orchestratorId) {
       setOrchestratorId(null);
       setOrchestratorMode(false);
     }
   }, [sessions, orchestratorId]);
 
-  // Select a session: fill an empty pane slot if available, otherwise bump to front
+  // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
     setActiveIds((prev) => {
-      if (prev.slice(0, layout).includes(id)) return prev; // already visible
-      const from = prev.indexOf(id);
-      if (from !== -1) {
-        // In activeIds but not visible: swap with slot 0
-        const next = [...prev];
-        next[from] = next[0];
-        next[0] = id;
-        return next;
+      // Check if already in a visible slot
+      for (let i = 0; i < layout && i < prev.length; i++) {
+        if (prev[i] === id) return prev;
       }
-      // Not in activeIds: fill next empty slot or push to front
+      const slot = findEmptySlot(prev, layout);
+      if (slot === -1) return prev; // all panes full — user drags to place
       const next = [...prev];
-      if (next.length < layout) {
-        next.push(id); // fills the next empty pane slot
-      } else {
-        next.unshift(id); // all panes full: bump to front, rest shift back
-      }
+      while (next.length <= slot) next.push(null);
+      next[slot] = id;
       return next;
     });
   }, [layout]);
@@ -338,21 +338,15 @@ export default function App() {
       const from = prev.indexOf(sessionId);
       if (from === slotIndex) return prev;
       const next = [...prev];
+      while (next.length <= slotIndex) next.push(null);
       if (from !== -1) {
-        // Already in activeIds: swap positions
+        // Already in activeIds: swap positions (target may be null = empty slot)
         const tmp = next[slotIndex];
         next[slotIndex] = sessionId;
         next[from] = tmp;
-        return next;
-      }
-      // Not in activeIds: add to end, then swap into target slot
-      // This way only the target slot changes — nothing else shifts
-      next.push(sessionId);
-      const newFrom = next.length - 1;
-      if (newFrom !== slotIndex && slotIndex < next.length - 1) {
-        const tmp = next[slotIndex];
+      } else {
+        // Not in activeIds: place directly into target slot
         next[slotIndex] = sessionId;
-        next[newFrom] = tmp;
       }
       return next;
     });
@@ -522,12 +516,22 @@ export default function App() {
             return result;
           });
 
-        // Auto-add MCP-spawned sessions to the visible grid
+        // Add MCP-spawned sessions to empty visible slots only
         if (discoveredIds.length > 0) {
           setActiveIds((prev) => {
-            const existingSet = new Set(prev);
+            const existingSet = new Set(prev.filter((id) => id != null));
             const toAdd = discoveredIds.filter((id) => !existingSet.has(id));
-            return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+            if (toAdd.length === 0) return prev;
+            const next = [...prev];
+            let addIdx = 0;
+            for (let i = 0; i < layout && addIdx < toAdd.length; i++) {
+              if (i >= next.length) {
+                next.push(toAdd[addIdx++]);
+              } else if (next[i] == null) {
+                next[i] = toAdd[addIdx++];
+              }
+            }
+            return addIdx > 0 ? next : prev;
           });
         }
       } catch (_) {
@@ -580,12 +584,13 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
+  // Sessions currently occupying visible slots (used for broadcast, etc.)
   const visibleSessions = useMemo(() => {
-    const visible = activeIds
+    return activeIds
       .slice(0, layout)
+      .filter((id) => id != null)
       .map((id) => sessions.find((s) => s.id === id))
       .filter(Boolean);
-    return visible;
   }, [activeIds, layout, sessions]);
 
   const sendBroadcast = useCallback(async (text) => {
@@ -644,7 +649,7 @@ export default function App() {
       }
       if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "4") {
         const i = parseInt(e.key) - 1;
-        if (i < visibleSessions.length) {
+        if (i < layout && activeIds[i] != null) {
           e.preventDefault();
           paneRefs.current[i]?.focus();
         }
@@ -669,7 +674,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [createSession, visibleSessions, zoomIn, zoomOut, zoomReset]);
+  }, [createSession, activeIds, layout, zoomIn, zoomOut, zoomReset]);
 
   // Ctrl+MouseWheel zoom
   useEffect(() => {
@@ -686,6 +691,7 @@ export default function App() {
   const swapPanes = useCallback((fromIdx, toIdx) => {
     setActiveIds((prev) => {
       const next = [...prev];
+      while (next.length <= Math.max(fromIdx, toIdx)) next.push(null);
       const tmp = next[fromIdx];
       next[fromIdx] = next[toIdx];
       next[toIdx] = tmp;
@@ -791,7 +797,7 @@ export default function App() {
               >
                 <Sidebar
                   sessions={sessions}
-                  activeIds={visibleSessions.map((s) => s.id)}
+                  activeIds={activeIds.slice(0, layout).filter((id) => id != null)}
                   onSelect={selectSession}
                   onNew={() => setShowNewDialog(true)}
                   onNewAt={(dir) => createSession("", dir, undefined, { bypassPermissions: getLocationBypass(dir) })}
@@ -875,37 +881,34 @@ export default function App() {
               }}
               onDragEnd={() => { setDragSource(null); setDragOverSlot(null); }}
             >
-              {visibleSessions.map((session, idx) => (
-                <div
-                  key={session.id}
-                  style={{
-                    overflow: "hidden",
-                    minHeight: 0,
-                    minWidth: 0,
-                    position: "relative",
-                    borderRight:
-                      idx < visibleSessions.length - 1 &&
-                      (layout === 2 || (layout === 4 && idx % 2 === 0))
-                        ? "1px solid var(--border-color)"
-                        : "none",
-                    borderBottom:
-                      layout === 4 && idx < 2
-                        ? "1px solid var(--border-color)"
-                        : "none",
-                    opacity: dragSource === idx ? 0.4 : 1,
-                    transition: "opacity 0.2s ease",
-                  }}
-                  onDragOver={(e) => {
+              {/* Slot-based rendering: each slot is either a session pane or an empty placeholder */}
+              {Array.from({ length: layout }).map((_, idx) => {
+                const sessionId = idx < activeIds.length ? activeIds[idx] : null;
+                const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
+                const slotBorders = {
+                  borderRight:
+                    layout >= 2 && idx % 2 === 0
+                      ? "1px solid var(--border-color)"
+                      : "none",
+                  borderBottom:
+                    layout === 4 && idx < 2
+                      ? "1px solid var(--border-color)"
+                      : "none",
+                };
+
+                // Shared drop handlers for all slots
+                const dndHandlers = {
+                  onDragOver: (e) => {
                     e.preventDefault();
                     e.dataTransfer.dropEffect = "move";
                     if (dragOverSlot !== idx) setDragOverSlot(idx);
-                  }}
-                  onDragLeave={(e) => {
+                  },
+                  onDragLeave: (e) => {
                     if (!e.currentTarget.contains(e.relatedTarget)) {
                       setDragOverSlot(null);
                     }
-                  }}
-                  onDrop={(e) => {
+                  },
+                  onDrop: (e) => {
                     e.preventDefault();
                     setDragOverSlot(null);
                     setDragSource(null);
@@ -916,128 +919,95 @@ export default function App() {
                       const from = parseInt(data.slice(5), 10);
                       if (!isNaN(from) && from !== idx) swapPanes(from, idx);
                     }
-                  }}
-                >
-                  {/* Drop target overlay */}
-                  {dragOverSlot === idx && dragSource !== idx && (
-                    <div
+                  },
+                };
+
+                // Drop target overlay (shared between filled and empty slots)
+                const dropOverlay = dragOverSlot === idx && dragSource !== idx && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 4,
+                      border: "2px dashed var(--accent)",
+                      borderRadius: 8,
+                      backgroundColor: "rgba(122, 162, 247, 0.08)",
+                      animation: "drop-target-pulse 1.5s ease-in-out infinite",
+                      zIndex: 10,
+                      pointerEvents: "none",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <span
+                      className="text-xs font-semibold px-3 py-1.5 rounded-full"
                       style={{
-                        position: "absolute",
-                        inset: 4,
-                        border: "2px dashed var(--accent)",
-                        borderRadius: 8,
-                        backgroundColor: "rgba(122, 162, 247, 0.08)",
-                        animation: "drop-target-pulse 1.5s ease-in-out infinite",
-                        zIndex: 10,
-                        pointerEvents: "none",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
+                        backgroundColor: "var(--bg-elevated)",
+                        color: "var(--accent)",
+                        border: "1px solid var(--accent)",
+                        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
                       }}
                     >
-                      <span
-                        className="text-xs font-semibold px-3 py-1.5 rounded-full"
-                        style={{
-                          backgroundColor: "var(--bg-elevated)",
-                          color: "var(--accent)",
-                          border: "1px solid var(--accent)",
-                          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                        }}
-                      >
-                        {dragSource != null ? "Drop to swap" : "Drop here"}
-                      </span>
-                    </div>
-                  )}
-                  <TerminalPane
-                    ref={(el) => { paneRefs.current[idx] = el; }}
-                    session={session}
-                    onClose={() => removeSession(session.id)}
-                    paneIndex={idx}
-                    onSwap={layout > 1 ? swapPanes : undefined}
-                    onPlace={placeSession}
-                    onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                    terminalZoom={terminalZoom}
-                    toast={toast}
-                    isOrchestrator={orchestratorMode && session.id === orchestratorId}
-                    isWorker={orchestratorMode && orchestratorId !== null && session.id !== orchestratorId}
-                  />
-                </div>
-              ))}
+                      {dragSource != null ? "Drop to swap" : "Drop here"}
+                    </span>
+                  </div>
+                );
 
-              {/* Empty pane placeholders */}
-              {visibleSessions.length < layout &&
-                Array.from({ length: layout - visibleSessions.length }).map((_, i) => {
-                  const slotIndex = visibleSessions.length + i;
+                if (session) {
                   return (
                     <div
-                      key={`empty-${i}`}
-                      className="flex items-center justify-center"
+                      key={session.id}
                       style={{
-                        color: "var(--text-muted)",
+                        overflow: "hidden",
+                        minHeight: 0,
+                        minWidth: 0,
                         position: "relative",
+                        ...slotBorders,
+                        opacity: dragSource === idx ? 0.4 : 1,
+                        transition: "opacity 0.2s ease",
                       }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                        if (dragOverSlot !== slotIndex) setDragOverSlot(slotIndex);
-                      }}
-                      onDragLeave={(e) => {
-                        if (!e.currentTarget.contains(e.relatedTarget)) {
-                          setDragOverSlot(null);
-                        }
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragOverSlot(null);
-                        setDragSource(null);
-                        const data = e.dataTransfer.getData("text/plain");
-                        if (data.startsWith("session:")) placeSession(data.slice(8), slotIndex);
-                        else if (data.startsWith("pane:")) {
-                          const from = parseInt(data.slice(5), 10);
-                          if (!isNaN(from)) swapPanes(from, slotIndex);
-                        }
-                      }}
+                      {...dndHandlers}
                     >
-                      {/* Drop target overlay for empty slots */}
-                      {dragOverSlot === slotIndex && (
-                        <div
-                          style={{
-                            position: "absolute",
-                            inset: 4,
-                            border: "2px dashed var(--accent)",
-                            borderRadius: 8,
-                            backgroundColor: "rgba(122, 162, 247, 0.08)",
-                            animation: "drop-target-pulse 1.5s ease-in-out infinite",
-                            zIndex: 10,
-                            pointerEvents: "none",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <span
-                            className="text-xs font-semibold px-3 py-1.5 rounded-full"
-                            style={{
-                              backgroundColor: "var(--bg-elevated)",
-                              color: "var(--accent)",
-                              border: "1px solid var(--accent)",
-                              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                            }}
-                          >
-                            Drop here
-                          </span>
-                        </div>
-                      )}
-                      <button
-                        onClick={() => setShowNewDialog(true)}
-                        className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
-                        style={{ border: "1px solid var(--border-color)" }}
-                      >
-                        + New Session
-                      </button>
+                      {dropOverlay}
+                      <TerminalPane
+                        ref={(el) => { paneRefs.current[idx] = el; }}
+                        session={session}
+                        onClose={() => removeSession(session.id)}
+                        paneIndex={idx}
+                        onSwap={layout > 1 ? swapPanes : undefined}
+                        onPlace={placeSession}
+                        onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                        terminalZoom={terminalZoom}
+                        toast={toast}
+                        isOrchestrator={orchestratorMode && session.id === orchestratorId}
+                        isWorker={orchestratorMode && orchestratorId !== null && session.id !== orchestratorId}
+                      />
                     </div>
                   );
-                })}
+                }
+
+                return (
+                  <div
+                    key={`empty-${idx}`}
+                    className="flex items-center justify-center"
+                    style={{
+                      color: "var(--text-muted)",
+                      position: "relative",
+                      ...slotBorders,
+                    }}
+                    {...dndHandlers}
+                  >
+                    {dropOverlay}
+                    <button
+                      onClick={() => setShowNewDialog(true)}
+                      className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
+                      style={{ border: "1px solid var(--border-color)" }}
+                    >
+                      + New Session
+                    </button>
+                  </div>
+                );
+              })}
             </main>
           </div>
 

@@ -34,7 +34,7 @@ START_TIME = _time.time()
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
-    version="0.2.18-alpha",
+    version="1.0.0",
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -313,15 +313,21 @@ def _resolve_python() -> str:
 def _write_mcp_config(terminal_id: str) -> str:
     """Write a temp MCP config JSON for an orchestrator session.
 
+    Copies cockpit_mcp.py into the temp config directory so the path
+    doesn't depend on _MEIPASS (which is only valid for the bundled process).
     Returns the absolute path to the written config file.
     """
-    mcp_script = Path(__file__).parent / "cockpit_mcp.py"
+    mcp_source = Path(__file__).parent / "cockpit_mcp.py"
+    mcp_dest = _MCP_CONFIG_DIR / "cockpit_mcp.py"
+    # Copy the MCP script to the temp dir (survives PyInstaller _MEI paths)
+    if not mcp_dest.exists() or mcp_source.stat().st_mtime > mcp_dest.stat().st_mtime:
+        shutil.copy2(mcp_source, mcp_dest)
     port = int(os.getenv("PORT", "8420"))
     config = {
         "mcpServers": {
             "cockpit": {
                 "command": _resolve_python(),
-                "args": [str(mcp_script)],
+                "args": [str(mcp_dest)],
                 "env": {
                     "COCKPIT_API_URL": f"http://localhost:{port}",
                     "COCKPIT_ORCHESTRATOR_ID": terminal_id,

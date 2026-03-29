@@ -18,6 +18,7 @@ a = Analysis(
     datas=[
         (os.path.join(root, 'static'), 'static'),
         (frontend_dist, 'frontend_dist'),
+        (os.path.join(root, 'cockpit_mcp.py'), '.'),
     ],
     hiddenimports=[
         'uvicorn',

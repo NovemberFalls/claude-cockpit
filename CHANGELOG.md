@@ -26,7 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Session templates / presets
 - [ ] Session sharing / spectator mode
 
-## [Unreleased]
+## [1.0.0] - 2026-03-29
+
+### Fixed
+- **MCP server not starting in desktop app** — `cockpit_mcp.py` was missing from the PyInstaller bundle `datas`, so the generated MCP config referenced a non-existent file in the `_MEIPASS` directory. Claude CLI would silently fail to start the MCP server.
+- MCP config now copies the script to the temp config directory instead of referencing the `_MEIPASS` path, making it robust across dev and bundled modes.
 
 ### Changed
 - New app branding: neon eye/code-bracket logo replaces hexagon icon across all locations (Tauri icons, favicon, TopBar)
