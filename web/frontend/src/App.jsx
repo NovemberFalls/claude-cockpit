@@ -955,6 +955,8 @@ export default function App() {
                 );
 
                 if (session) {
+                  const isOrch = orchestratorMode && session.id === orchestratorId;
+                  const isWorker = orchestratorMode && orchestratorId !== null && session.id !== orchestratorId;
                   return (
                     <div
                       key={session.id}
@@ -965,7 +967,12 @@ export default function App() {
                         position: "relative",
                         ...slotBorders,
                         opacity: dragSource === idx ? 0.4 : 1,
-                        transition: "opacity 0.2s ease",
+                        transition: "opacity 0.2s ease, box-shadow 0.2s ease",
+                        boxShadow: isOrch
+                          ? "inset 0 0 0 2px var(--accent)"
+                          : isWorker
+                          ? "inset 0 0 0 2px var(--green, #4ade80)"
+                          : "none",
                       }}
                       {...dndHandlers}
                     >
