@@ -123,7 +123,10 @@ TOOLS = [
         "description": (
             "Spawn a new worker Claude session in Cockpit. "
             "The new session will appear as a pane in the UI. "
-            "Returns the terminal_id you can use to send it tasks."
+            "Returns the terminal_id you can use to send it tasks. "
+            "Pass character_file to load a persona (e.g. Nadia or a specialist). "
+            "Pass as_orchestrator=true to give the session its own MCP tools so it "
+            "can spawn and coordinate further sub-workers."
         ),
         "inputSchema": {
             "type": "object",
@@ -134,6 +137,23 @@ TOOLS = [
                     "type": "string",
                     "description": "Claude model (sonnet, opus, haiku)",
                     "default": "sonnet",
+                },
+                "character_file": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to a persona/character .md file to load as "
+                        "the session's system prompt. Use this to spawn a Nadia worker "
+                        "or a specialist (Ash, Finn, Zara, Sam, Dev, Sage)."
+                    ),
+                },
+                "as_orchestrator": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, the new session gets its own Cockpit MCP tools, "
+                        "making it a sub-orchestrator that can spawn and coordinate "
+                        "its own workers. Default false."
+                    ),
+                    "default": False,
                 },
             },
             "required": [],
@@ -323,6 +343,9 @@ def call_tool(name: str, args: dict, msg_id=None):
             "model": args.get("model", "sonnet"),
             "cols": 120,
             "rows": 30,
+            "isOrchestrator": bool(args.get("as_orchestrator", False)),
+            "systemPromptFile": args.get("character_file", ""),
+            "bypassPermissions": True,
         }
         result = api("POST", "/api/terminals", body)
         if "error" in result:
@@ -331,6 +354,7 @@ def call_tool(name: str, args: dict, msg_id=None):
             "terminal_id": result.get("id"),
             "name": result.get("name"),
             "model": result.get("model"),
+            "is_orchestrator": result.get("is_orchestrator", False),
         }, False
 
     else:

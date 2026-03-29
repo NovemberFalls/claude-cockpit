@@ -410,6 +410,7 @@ async def create_terminal(request: Request):
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
     is_orchestrator = body.get("isOrchestrator", False)
+    system_prompt_file = body.get("systemPromptFile", "")
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
@@ -430,6 +431,7 @@ async def create_terminal(request: Request):
             rows=rows,
             mcp_config_path=mcp_config_path,
             terminal_id_override=terminal_id_override,
+            system_prompt_file=system_prompt_file,
         )
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
         # asyncio.sleep keeps the event loop responsive (replaces the blocking

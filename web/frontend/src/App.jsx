@@ -271,6 +271,7 @@ export default function App() {
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
         ...(options.isOrchestrator ? { isOrchestrator: true } : {}),
+        ...(options.characterFile ? { systemPromptFile: options.characterFile } : {}),
       };
 
       const res = await fetch("/api/terminals", {

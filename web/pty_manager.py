@@ -331,6 +331,7 @@ class PtyManager:
         rows: int = 30,
         mcp_config_path: str = "",
         terminal_id_override: str = "",
+        system_prompt_file: str = "",
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY."""
         if len(self.sessions) >= MAX_SESSIONS:
@@ -429,6 +430,17 @@ class PtyManager:
                     raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
                 import shlex as _shlex
                 cmd += f' --mcp-config {_shlex.quote(mcp_config_path)}'
+
+        if system_prompt_file:
+            if _sys.platform == "win32":
+                if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+(\.md|\.txt|\.json)$', system_prompt_file):
+                    raise ValueError(f"Invalid system prompt file path: {system_prompt_file!r}")
+                cmd += f' --append-system-prompt-file {system_prompt_file}'
+            else:
+                if not re.match(r'^/[\w/\.\-\~\(\)\+]+(\.md|\.txt|\.json)$', system_prompt_file):
+                    raise ValueError(f"Invalid system prompt file path: {system_prompt_file!r}")
+                import shlex as _shlex
+                cmd += f' --append-system-prompt-file {_shlex.quote(system_prompt_file)}'
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)
