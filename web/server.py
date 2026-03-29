@@ -575,9 +575,13 @@ async def frontend_assets(path: str):
     return HTMLResponse("Not found", 404)
 
 
-# Serve other frontend static files (favicon, icons, etc.)
+# Serve frontend root-level static files (favicon, icons, etc.)
 @app.get("/favicon.svg")
+@app.get("/favicon.png")
 @app.get("/icons.svg")
+@app.get("/app-icon.png")
+@app.get("/icon-192.png")
+@app.get("/icon-512.png")
 async def frontend_root_files(request: Request):
     if FRONTEND_DIST.is_dir():
         filename = request.url.path.lstrip("/")
