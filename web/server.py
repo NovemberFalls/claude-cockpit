@@ -62,6 +62,46 @@ else:
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
 # Temp directory for MCP config files (one per orchestrator session)
 _MCP_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="cockpit_mcp_"))
+
+# ── MCP script bootstrap ──────────────────────────────────────────────────────
+# Write cockpit_mcp.py to the config dir ONCE at startup so all orchestrator
+# sessions share a single stable, non-volatile path.  This is resilient to:
+#   • PyInstaller bundles where _MEIPASS is volatile (old builds without spec fix)
+#   • Dev mode where the source tree may be at any path
+#   • Future builds — the path is always _MCP_CONFIG_DIR/cockpit_mcp.py
+_MCP_SCRIPT_PATH: Path | None = None
+
+def _bootstrap_mcp_script() -> None:
+    """Locate cockpit_mcp.py and write a stable copy to _MCP_CONFIG_DIR.
+
+    Call once at startup.  Sets _MCP_SCRIPT_PATH or logs a clear error.
+    """
+    global _MCP_SCRIPT_PATH
+    candidates = [
+        Path(__file__).parent / "cockpit_mcp.py",          # dev or bundled (spec-fixed)
+        Path(sys.executable).parent / "cockpit_mcp.py",    # beside exe fallback
+    ]
+    src: Path | None = None
+    for c in candidates:
+        if c.exists():
+            src = c
+            break
+
+    dest = _MCP_CONFIG_DIR / "cockpit_mcp.py"
+    if src is not None:
+        shutil.copy2(src, dest)
+        logger.info("MCP script bootstrapped from %s → %s", src, dest)
+    else:
+        # Source not found (old bundle without spec fix) — log loudly so it's debuggable.
+        logger.error(
+            "cockpit_mcp.py not found in any candidate location %s. "
+            "Orchestrator mode will be unavailable until the app is rebuilt.",
+            [str(c) for c in candidates],
+        )
+        return  # _MCP_SCRIPT_PATH stays None
+    _MCP_SCRIPT_PATH = dest
+
+_bootstrap_mcp_script()
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
@@ -313,21 +353,21 @@ def _resolve_python() -> str:
 def _write_mcp_config(terminal_id: str) -> str:
     """Write a temp MCP config JSON for an orchestrator session.
 
-    Copies cockpit_mcp.py into the temp config directory so the path
-    doesn't depend on _MEIPASS (which is only valid for the bundled process).
+    Uses the stable cockpit_mcp.py copy written at startup by _bootstrap_mcp_script().
+    Raises RuntimeError if bootstrap failed (e.g. old bundle without spec fix).
     Returns the absolute path to the written config file.
     """
-    mcp_source = Path(__file__).parent / "cockpit_mcp.py"
-    mcp_dest = _MCP_CONFIG_DIR / "cockpit_mcp.py"
-    # Copy the MCP script to the temp dir (survives PyInstaller _MEI paths)
-    if not mcp_dest.exists() or mcp_source.stat().st_mtime > mcp_dest.stat().st_mtime:
-        shutil.copy2(mcp_source, mcp_dest)
+    if _MCP_SCRIPT_PATH is None:
+        raise RuntimeError(
+            "cockpit_mcp.py could not be located at startup. "
+            "Rebuild the desktop app to restore Orchestrator mode."
+        )
     port = int(os.getenv("PORT", "8420"))
     config = {
         "mcpServers": {
             "cockpit": {
                 "command": _resolve_python(),
-                "args": [str(mcp_dest)],
+                "args": [str(_MCP_SCRIPT_PATH)],
                 "env": {
                     "COCKPIT_API_URL": f"http://localhost:{port}",
                     "COCKPIT_ORCHESTRATOR_ID": terminal_id,
