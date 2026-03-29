@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for cockpit-server (standalone browser-based exe)
+# PyInstaller spec for cockpit-server (Tauri sidecar)
 
 import os
 

@@ -1,6 +1,6 @@
 # Build Claude Cockpit
 
-Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) and browser exe locally.
+Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) locally.
 
 ## Steps
 
@@ -14,33 +14,28 @@ Build the full Claude Cockpit desktop app (Tauri + PyInstaller sidecar) and brow
    cd /c/Code/Personal/claude-cockpit/web && python -m PyInstaller --clean --noconfirm cockpit-server.spec
    ```
 
-3. **Copy browser exe to local releases** (gitignored):
-   ```
-   mkdir -p /c/Code/Personal/claude-cockpit/releases
-   cp /c/Code/Personal/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/Personal/claude-cockpit/releases/claude-cockpit-browser.exe
-   ```
-
-4. **Copy sidecar to Tauri binaries** (with Rust target triple):
+3. **Copy sidecar to Tauri binaries** (with Rust target triple):
    ```
    cp /c/Code/Personal/claude-cockpit/web/dist/claude-cockpit.exe /c/Code/Personal/claude-cockpit/web/frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
    ```
    **CRITICAL:** Always copy the FRESH PyInstaller exe here BEFORE building Tauri, or the desktop app will bundle a stale server.
 
-5. **Build Tauri app** (requires signing env vars for auto-update):
+4. **Build Tauri app** (requires signing env vars for auto-update):
    ```
    export TAURI_SIGNING_PRIVATE_KEY="$(cat C:/Code/.tauri/claude-cockpit.key)"
    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<password>"
    cd /c/Code/Personal/claude-cockpit/web/frontend && npx @tauri-apps/cli build
    ```
 
-6. **Copy installer and updater zip to local releases** (gitignored):
+5. **Copy installer and updater zip to local releases** (gitignored):
    ```
+   mkdir -p /c/Code/Personal/claude-cockpit/releases
    cp "/c/Code/Personal/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.exe" /c/Code/Personal/claude-cockpit/releases/
    cp "/c/Code/Personal/claude-cockpit/web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_"*"_x64-setup.nsis.zip" /c/Code/Personal/claude-cockpit/releases/
    ```
    Note: Tauri does NOT generate `latest.json`. That's handled by `/push-cockpit` when uploading to GitHub Releases.
 
-7. **Notify user** — "Build complete. Artifacts ready at `C:\Code\Personal\claude-cockpit\releases\`."
+6. **Notify user** — "Build complete. Artifacts ready at `C:\Code\Personal\claude-cockpit\releases\`."
 
 ## Important
 

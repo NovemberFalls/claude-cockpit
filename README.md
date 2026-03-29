@@ -106,18 +106,7 @@ Go to **http://localhost:5174** in your browser. You should see the cockpit inte
 
 Pre-built executables are available on the [GitHub Releases](https://github.com/NovemberFalls/claude-cockpit/releases) page.
 
-### Option A: Browser-Based (simplest)
-
-1. Download **`claude-cockpit-browser.exe`** from the latest release
-2. Double-click it
-3. Your browser will automatically open to **http://localhost:8420**
-4. That's it — the server and frontend are bundled together
-
-To stop: close the terminal window that appeared, or press `Ctrl+C`.
-
-> **Tip:** You can suppress the auto-browser-open by setting the environment variable `NO_BROWSER=1`.
-
-### Option B: Desktop App (native window)
+### Desktop App
 
 1. Download **`Claude Cockpit_x64-setup.exe`** from the latest release
 2. Follow the installer prompts (installs to your user folder, no admin needed)
@@ -130,21 +119,7 @@ The desktop app bundles the server internally and starts it automatically.
 
 ---
 
-## Building the Executables Yourself
-
-### Browser-Based exe
-
-```bash
-# 1. Build the React frontend
-cd web/frontend
-npm run build
-
-# 2. Build the Python executable
-cd ..
-python -m PyInstaller --clean --noconfirm cockpit-server.spec
-```
-
-Output: `web/dist/claude-cockpit.exe` (~41 MB)
+## Building the Desktop App Yourself
 
 ### Desktop App (Tauri)
 
