@@ -296,13 +296,13 @@ const TerminalPane = forwardRef(function TerminalPane({
     return () => { clearTimeout(timer1); clearTimeout(timer2); };
   }, [paneIndex, safeFit]);
 
-  // File drop handler
+  // File drop handler — only intercept actual file drops; let pane-swap drags bubble
   const handleDrop = useCallback(async (e) => {
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (!files.length) return; // Not a file drop — let it propagate for pane reordering
+
     e.preventDefault();
     e.stopPropagation();
-
-    const files = Array.from(e.dataTransfer?.files || []);
-    if (!files.length) return;
 
     const formData = new FormData();
     files.forEach((f) => formData.append("files", f));
@@ -330,6 +330,8 @@ const TerminalPane = forwardRef(function TerminalPane({
   }, [toast]);
 
   const handleDragOver = useCallback((e) => {
+    // Only intercept file drags — pane-swap drags must bubble to the parent wrapper
+    if (!e.dataTransfer?.types?.includes("Files")) return;
     e.preventDefault();
     e.stopPropagation();
   }, []);
@@ -402,7 +404,21 @@ const TerminalPane = forwardRef(function TerminalPane({
           >
             {session.model}
           </span>
-          {isOrchestrator && (
+          {isOrchestrator && session.terminalId && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0"
+              style={{ color: "var(--bg)", backgroundColor: "var(--accent)", cursor: "pointer" }}
+              title={`Orchestrator — click to copy ID: ${session.terminalId}`}
+              onClick={() => {
+                navigator.clipboard.writeText(session.terminalId).then(() => {
+                  toast?.(`Copied ID: ${session.terminalId}`, "success");
+                });
+              }}
+            >
+              ORCH
+            </span>
+          )}
+          {isOrchestrator && !session.terminalId && (
             <span
               className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0"
               style={{ color: "var(--bg)", backgroundColor: "var(--accent)" }}
@@ -419,8 +435,14 @@ const TerminalPane = forwardRef(function TerminalPane({
                 backgroundColor: "var(--bg-surface)",
                 border: "1px solid var(--accent)",
                 opacity: 0.75,
+                cursor: "pointer",
               }}
-              title="Terminal ID — the orchestrator uses this to send tasks here"
+              title={`Click to copy terminal ID: ${session.terminalId}`}
+              onClick={() => {
+                navigator.clipboard.writeText(session.terminalId).then(() => {
+                  toast?.(`Copied ID: ${session.terminalId}`, "success");
+                });
+              }}
             >
               #{session.terminalId}
             </span>

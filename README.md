@@ -31,7 +31,7 @@ Claude Cockpit lets you:
 - Choose from **20 themes** (dark and light variants)
 - **Drag and drop files** into sessions
 - Resume previous Claude sessions
-- Pick your Claude model (Sonnet, Opus, Haiku)
+- Pick your Claude model (Sonnet, Opus, Haiku — including 1M context variants)
 
 It works by wrapping the `claude` CLI in a web-based terminal emulator (xterm.js), managed through a FastAPI backend that handles the PTY (pseudo-terminal) connections.
 
@@ -178,7 +178,7 @@ Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<versi
 1. Click the **+** button in the sidebar (or press `Ctrl+Shift+N`)
 2. Pick a **working directory** — this is the project folder Claude will work in
 3. Optionally give the session a name
-4. Choose your model (Sonnet is the default)
+4. Choose your model (Sonnet, Opus, Haiku, or their 1M context variants)
 5. Click **Create**
 
 ### Layouts
@@ -190,6 +190,8 @@ Use the layout buttons in the bottom status bar to switch between:
 - **2x2** — four panes in a grid
 
 Or use keyboard shortcuts: `Ctrl+Shift+!` (1x1), `Ctrl+Shift+@` (2x1), `Ctrl+Shift+$` (2x2).
+
+**Rearranging panes:** In multi-pane layouts, drag a pane's header bar to swap it with any other pane. You can also drag a session from the sidebar directly onto any pane to place it there.
 
 ### Sidebar
 

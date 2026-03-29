@@ -271,13 +271,26 @@ async def git_status(path: str):
 
 
 @app.get("/api/terminals/{terminal_id}/output")
-async def get_terminal_output(terminal_id: str):
-    """Return the last 200 ANSI-stripped lines of terminal output (used by MCP)."""
+async def get_terminal_output(terminal_id: str, since: int = 0):
+    """Return ANSI-stripped terminal output (used by MCP orchestrator).
+
+    Args:
+        since: Return only lines at index >= since (0 = all lines).
+               Use the returned total_lines value as the next since cursor.
+    """
     session = pty_manager.get_terminal(terminal_id)
     if not session:
         return JSONResponse({"error": "Terminal not found"}, status_code=404)
-    lines = pty_manager.get_output_buffer(terminal_id)
-    return JSONResponse({"terminal_id": terminal_id, "lines": lines})
+    all_lines = pty_manager.get_output_buffer(terminal_id)
+    total = len(all_lines)
+    sliced = all_lines[since:] if since > 0 else all_lines
+    activity_state = session.tracker.state
+    return JSONResponse({
+        "terminal_id": terminal_id,
+        "lines": sliced,
+        "total_lines": total,
+        "activity_state": activity_state,
+    })
 
 
 def _resolve_python() -> str:

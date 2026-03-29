@@ -6,6 +6,8 @@ const MODELS = [
   { id: "sonnet", label: "Sonnet 4.6" },
   { id: "opus", label: "Opus 4.6" },
   { id: "haiku", label: "Haiku 4.5" },
+  { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
+  { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
 ];
 
 export default function TopBar({
@@ -103,7 +105,7 @@ export default function TopBar({
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setModelOpen(false)} />
                 <div
-                  className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[130px]"
+                  className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[170px]"
                   style={{
                     backgroundColor: "var(--bg-elevated)",
                     border: "1px solid var(--border-color)",

@@ -1,195 +1,318 @@
-import { useState } from "react";
-import { X, Plus, FolderOpen, Keyboard, Network, ChevronRight } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 
+const TOUR_STEPS = [
+  {
+    target: null,
+    placement: "center",
+    title: "Welcome to Claude Cockpit",
+    content:
+      "Claude Cockpit lets you run multiple Claude Code sessions side by side. Let\u2019s take a quick tour.",
+  },
+  {
+    target: '[data-tour="sidebar"]',
+    placement: "right",
+    title: "Sidebar",
+    content:
+      "Your saved project folders live here. Click any folder to expand it. Double-click to instantly start a session. Right-click for more options.",
+  },
+  {
+    target: '[data-tour="new-session-btn"]',
+    placement: "right",
+    title: "+ New Session",
+    content:
+      'Click + New to start a Claude Code session. Pick a working directory, model (Sonnet / Opus / Haiku), and optionally check "Start as Orchestrator" for multi-agent mode.',
+  },
+  {
+    target: '[data-tour="layout-switcher"]',
+    placement: "top",
+    title: "Layout Switcher",
+    content:
+      "Switch between 1, 2, or 4 pane layouts. Use Ctrl+Shift+! / @ / $ or the buttons here. Quad layout is great for watching multiple sessions at once.",
+  },
+  {
+    target: '[data-tour="orchestrator-btn"]',
+    placement: "top",
+    title: "Orchestrator Mode",
+    content:
+      "Enable Orchestrator Mode to give one session MCP tools that let it spawn and control all the others \u2014 no commands, just plain English delegation.",
+  },
+  {
+    target: '[data-tour="broadcast-btn"]',
+    placement: "top",
+    title: "Broadcast Mode",
+    content:
+      "Broadcast Mode sends the same message to all running sessions simultaneously. Useful for giving parallel instructions.",
+  },
+  {
+    target: null,
+    placement: "center",
+    title: "You\u2019re All Set",
+    content:
+      "Drag files onto any terminal pane to share them with Claude. Press Ctrl+Shift+N to start a new session anytime. Click the \u24d8 icon in the status bar for a reference guide.",
+  },
+];
+
+const GAP = 12;
+
 export default function OnboardingModal({ onDismiss }) {
-  const [suppress, setSuppress] = useState(false);
+  const [step, setStep] = useState(0);
+  const [rect, setRect] = useState(null);
+  const tooltipRef = useRef(null);
+  const current = TOUR_STEPS[step];
+  const isCenter = current.target === null;
+  const isFirst = step === 0;
+  const isLast = step === TOUR_STEPS.length - 1;
 
-  const handleClose = () => {
-    if (suppress) {
-      try { localStorage.setItem(ONBOARDING_KEY, "true"); } catch (_) {}
+  // Measure the target element whenever step changes
+  const measureTarget = useCallback(() => {
+    if (!current.target) {
+      setRect(null);
+      return;
     }
+    const el = document.querySelector(current.target);
+    if (el) {
+      const r = el.getBoundingClientRect();
+      setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+    } else {
+      setRect(null);
+    }
+  }, [current.target]);
+
+  useEffect(() => {
+    measureTarget();
+    // Re-measure on resize/scroll
+    window.addEventListener("resize", measureTarget);
+    window.addEventListener("scroll", measureTarget, true);
+    return () => {
+      window.removeEventListener("resize", measureTarget);
+      window.removeEventListener("scroll", measureTarget, true);
+    };
+  }, [measureTarget]);
+
+  const finish = useCallback(() => {
+    try {
+      localStorage.setItem(ONBOARDING_KEY, "true");
+    } catch (_) {}
     onDismiss();
-  };
+  }, [onDismiss]);
 
-  const Kbd = ({ children }) => (
-    <kbd
-      className="px-1 py-0.5 rounded text-[10px] font-mono"
-      style={{ backgroundColor: "var(--bg-surface)", border: "1px solid var(--border-color)", color: "var(--text-primary)" }}
-    >
-      {children}
-    </kbd>
-  );
+  const next = useCallback(() => {
+    if (isLast) {
+      finish();
+    } else {
+      setStep((s) => s + 1);
+    }
+  }, [isLast, finish]);
 
-  const Bullet = ({ children }) => (
-    <li className="flex items-start gap-2">
-      <ChevronRight size={10} className="mt-0.5 flex-shrink-0" style={{ color: "var(--accent)" }} />
-      <span>{children}</span>
-    </li>
-  );
+  const back = useCallback(() => {
+    if (!isFirst) setStep((s) => s - 1);
+  }, [isFirst]);
 
-  const Divider = () => (
-    <div style={{ borderTop: "1px solid var(--border-color)" }} />
-  );
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") finish();
+      if (e.key === "ArrowRight" || e.key === "Enter") next();
+      if (e.key === "ArrowLeft") back();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [finish, next, back]);
 
-  const SectionHeader = ({ icon: Icon, label }) => (
-    <div className="flex items-center gap-2 mb-2">
-      <Icon size={14} style={{ color: "var(--accent)" }} />
-      <h3 className="text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-primary)" }}>
-        {label}
-      </h3>
-    </div>
-  );
+  // Compute tooltip position
+  const tooltipStyle = {};
+  if (isCenter) {
+    tooltipStyle.position = "fixed";
+    tooltipStyle.top = "50%";
+    tooltipStyle.left = "50%";
+    tooltipStyle.transform = "translate(-50%, -50%)";
+    tooltipStyle.maxWidth = "380px";
+  } else if (rect) {
+    tooltipStyle.position = "fixed";
+    tooltipStyle.maxWidth = "300px";
+
+    if (current.placement === "right") {
+      tooltipStyle.top = rect.top;
+      tooltipStyle.left = rect.left + rect.width + GAP;
+    } else if (current.placement === "top") {
+      // Position above the target; use bottom-anchoring so we don't need height
+      tooltipStyle.bottom = window.innerHeight - rect.top + GAP;
+      tooltipStyle.left = rect.left + rect.width / 2;
+      tooltipStyle.transform = "translateX(-50%)";
+    }
+  }
+
+  // Spotlight cutout style (the glowing border box)
+  const spotlightPad = 6;
+  const spotlightStyle =
+    !isCenter && rect
+      ? {
+          position: "fixed",
+          top: rect.top - spotlightPad,
+          left: rect.left - spotlightPad,
+          width: rect.width + spotlightPad * 2,
+          height: rect.height + spotlightPad * 2,
+          border: "2px solid var(--accent)",
+          borderRadius: "8px",
+          boxShadow: "0 0 0 9999px rgba(0,0,0,0.65)",
+          zIndex: 9998,
+          pointerEvents: "none",
+          transition: "top 0.3s ease, left 0.3s ease, width 0.3s ease, height 0.3s ease",
+        }
+      : null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ backgroundColor: "rgba(0,0,0,0.55)" }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 9997,
+      }}
     >
+      {/* Overlay — only for center steps (spotlight box-shadow handles it otherwise) */}
+      {isCenter && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            backgroundColor: "rgba(0,0,0,0.65)",
+            zIndex: 9998,
+          }}
+        />
+      )}
+
+      {/* Spotlight cutout */}
+      {spotlightStyle && <div style={spotlightStyle} />}
+
+      {/* Tooltip card */}
       <div
-        className="w-[540px] max-h-[82vh] overflow-y-auto rounded-lg p-6"
+        ref={tooltipRef}
         style={{
+          ...tooltipStyle,
           backgroundColor: "var(--bg-elevated)",
           border: "1px solid var(--border-color)",
           boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+          borderRadius: "10px",
+          padding: "20px",
+          zIndex: 9999,
+          animation: "tour-fade-in 0.2s ease",
         }}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between mb-5">
-          <h2 className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-            Welcome to Claude Cockpit
-          </h2>
-          <button
-            onClick={handleClose}
-            className="p-0.5 rounded hover-color-secondary"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <X size={14} />
-          </button>
-        </div>
-
-        <div className="space-y-5 text-xs" style={{ color: "var(--text-secondary)" }}>
-
-          {/* + New */}
-          <section>
-            <SectionHeader icon={Plus} label="The + New Button" />
-            <p className="leading-relaxed">
-              Opens the <strong style={{ color: "var(--text-primary)" }}>New Session</strong> dialog.
-              Pick a <strong style={{ color: "var(--text-primary)" }}>working directory</strong> (the
-              project folder Claude will work in), optionally name the session, choose a model (Sonnet,
-              Opus, or Haiku), and click <strong style={{ color: "var(--text-primary)" }}>Create</strong>.
-              You can also press <Kbd>Ctrl+Shift+N</Kbd> anywhere in the app.
-            </p>
-            <p className="leading-relaxed mt-1.5">
-              A <strong style={{ color: "var(--accent)" }}>+ button</strong> also appears when you hover
-              any saved folder row — click it to instantly start a session there without opening the dialog.
-            </p>
-          </section>
-
-          <Divider />
-
-          {/* Tips & Tricks */}
-          <section>
-            <SectionHeader icon={Keyboard} label="Tips & Tricks" />
-            <ul className="space-y-1.5">
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Layouts</strong> — Switch between
-                1×1, 2×1, and 2×2 pane layouts with <Kbd>Ctrl+Shift+!</Kbd> <Kbd>Ctrl+Shift+@</Kbd> <Kbd>Ctrl+Shift+$</Kbd>,
-                or use the layout buttons in the status bar.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Instant session</strong> — Double-click
-                any saved folder in the sidebar to immediately start a new session there.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>File sharing</strong> — Drag and drop
-                files, images, or PDFs directly onto a terminal pane to share them with Claude (up to 50 MB each).
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Close a session</strong> — Hover over
-                a session row in the sidebar to reveal the <strong>×</strong> button on the right.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Toggle sidebar</strong> — Press <Kbd>Ctrl+Shift+B</Kbd> to
-                hide/show the sidebar and reclaim horizontal space.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Broadcast Mode</strong> — Enable in the
-                status bar to send the same message to all running sessions at once.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--text-primary)" }}>Themes</strong> — Click the palette
-                icon in the top bar to cycle through 20 themes (10 color palettes × dark/light).
-              </Bullet>
-            </ul>
-          </section>
-
-          <Divider />
-
-          {/* Adding Folders */}
-          <section>
-            <SectionHeader icon={FolderOpen} label="Adding Folders" />
-            <ul className="space-y-1.5">
-              <Bullet>
-                Type a path in the <strong style={{ color: "var(--text-primary)" }}>New Session</strong> dialog
-                — the folder is automatically saved to your sidebar for quick access next time.
-              </Bullet>
-              <Bullet>
-                <strong style={{ color: "var(--accent)" }}>Expand 1 layer</strong> — Right-click any
-                saved folder in the sidebar and choose <em>Expand 1 layer</em>. This instantly
-                discovers and adds all immediate subdirectories, building out your project tree
-                without manual navigation. Great for quickly populating a workspace.
-              </Bullet>
-              <Bullet>
-                Right-click a folder for more options: remove it, toggle bypass permissions, or
-                open a new session in that folder.
-              </Bullet>
-            </ul>
-          </section>
-
-          <Divider />
-
-          {/* Orchestrator Mode */}
-          <section>
-            <SectionHeader icon={Network} label="Orchestrator Mode" />
-            <p className="leading-relaxed">
-              Enable via the <strong style={{ color: "var(--text-primary)" }}>network icon</strong> in
-              the status bar. Create one session as the <strong style={{ color: "var(--accent)" }}>Orchestrator</strong> —
-              it gets MCP tools to list, read, and control all other sessions. Then spin up worker
-              sessions: the orchestrator can delegate tasks, check their output, and coordinate them
-              autonomously. Click the <strong style={{ color: "var(--text-primary)" }}>ⓘ icon</strong> in
-              the top bar for a full step-by-step guide.
-            </p>
-          </section>
-
-        </div>
-
-        {/* Footer */}
-        <div
-          className="flex items-center justify-between mt-6 pt-4"
-          style={{ borderTop: "1px solid var(--border-color)" }}
+        {/* Title */}
+        <h3
+          style={{
+            margin: "0 0 8px 0",
+            fontSize: "14px",
+            fontWeight: 600,
+            color: "var(--text-primary)",
+          }}
         >
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={suppress}
-              onChange={(e) => setSuppress(e.target.checked)}
-              style={{ accentColor: "var(--accent)" }}
-            />
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Don't show this again
-            </span>
-          </label>
-          <button
-            onClick={handleClose}
-            className="px-4 py-1.5 rounded-md text-xs font-semibold transition-colors"
-            style={{ backgroundColor: "var(--accent)", color: "var(--bg)" }}
-          >
-            Got it
-          </button>
+          {current.title}
+        </h3>
+
+        {/* Content */}
+        <p
+          style={{
+            margin: "0 0 20px 0",
+            fontSize: "13px",
+            lineHeight: 1.55,
+            color: "var(--text-secondary)",
+          }}
+        >
+          {current.content}
+        </p>
+
+        {/* Footer: dots + buttons */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          {/* Progress dots */}
+          <div style={{ display: "flex", gap: "6px" }}>
+            {TOUR_STEPS.map((_, i) => (
+              <span
+                key={i}
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  backgroundColor:
+                    i === step ? "var(--accent)" : "var(--border-color)",
+                  transition: "background-color 0.2s ease",
+                }}
+              />
+            ))}
+          </div>
+
+          {/* Buttons */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            {/* Skip (only on non-last steps) */}
+            {!isLast && (
+              <button
+                onClick={finish}
+                style={{
+                  background: "none",
+                  border: "none",
+                  fontSize: "12px",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  padding: "6px 10px",
+                }}
+              >
+                Skip
+              </button>
+            )}
+
+            {/* Back (step > 0) */}
+            {!isFirst && (
+              <button
+                onClick={back}
+                style={{
+                  background: "none",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  color: "var(--text-secondary)",
+                  cursor: "pointer",
+                  padding: "6px 14px",
+                }}
+              >
+                Back
+              </button>
+            )}
+
+            {/* Next / Get Started / Finish */}
+            <button
+              onClick={next}
+              style={{
+                backgroundColor: "var(--accent)",
+                color: "var(--bg)",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "12px",
+                fontWeight: 600,
+                cursor: "pointer",
+                padding: "6px 16px",
+              }}
+            >
+              {isFirst ? "Get Started" : isLast ? "Finish" : "Next"}
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Keyframe for fade-in */}
+      <style>{`
+        @keyframes tour-fade-in {
+          from { opacity: 0; transform: ${isCenter ? "translate(-50%, -50%) scale(0.96)" : "translateY(6px)"}; }
+          to   { opacity: 1; transform: ${isCenter ? "translate(-50%, -50%) scale(1)" : "translateY(0)"}; }
+        }
+      `}</style>
     </div>
   );
 }

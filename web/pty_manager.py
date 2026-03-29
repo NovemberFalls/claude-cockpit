@@ -42,7 +42,7 @@ class SessionStateTracker:
         self.total_cost: float = 0.0
         self._last_token_val: int = 0
         self._last_cost_val: float = 0.0
-        self.output_lines: deque = deque(maxlen=200)  # ring buffer: last 200 ANSI-stripped lines
+        self.output_lines: deque = deque(maxlen=500)  # ring buffer: last 500 ANSI-stripped lines
         self._line_fragment: str = ""  # incomplete line accumulator
 
     def feed(self, raw_data: str) -> None:
@@ -99,8 +99,10 @@ class SessionStateTracker:
                 self.state = "idle"
                 return self.state
 
-        # If no output for 1.5s+ but no recognized pattern, stay in current state
-        if elapsed > 3.0 and self.state == "busy":
+        # If no output for 10s+ but no recognized pattern, assume idle.
+        # Previous 3s threshold was too aggressive — Claude thinking pauses
+        # were misclassified as idle, causing orchestrator to read incomplete output.
+        if elapsed > 10.0 and self.state == "busy":
             self.state = "idle"
 
         return self.state
@@ -131,6 +133,7 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-clos
 _ALLOWED_MODELS = {
     "sonnet", "opus", "haiku",
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6[1m]", "claude-opus-4-6[1m]",
     "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
 }
 # Claude session ID format: hex or UUID-style

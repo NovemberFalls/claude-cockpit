@@ -345,8 +345,15 @@ export default function App() {
         next[from] = tmp;
         return next;
       }
-      // Not in activeIds: insert at target slot, shifting others right
-      next.splice(Math.min(slotIndex, next.length), 0, sessionId);
+      // Not in activeIds: add to end, then swap into target slot
+      // This way only the target slot changes — nothing else shifts
+      next.push(sessionId);
+      const newFrom = next.length - 1;
+      if (newFrom !== slotIndex && slotIndex < next.length - 1) {
+        const tmp = next[slotIndex];
+        next[slotIndex] = sessionId;
+        next[newFrom] = tmp;
+      }
       return next;
     });
   }, []);
@@ -457,6 +464,10 @@ export default function App() {
 
         // Update existing sessions and discover new backend-only sessions
         // (e.g. created by the orchestrator MCP create_session tool).
+
+        // Capture new session IDs discovered this poll cycle
+        const discoveredIds = [];
+
         setSessions((prev) => {
             let changed = false;
             const knownTermIds = new Set(prev.map((s) => s.terminalId).filter(Boolean));
@@ -496,7 +507,10 @@ export default function App() {
               });
             }
 
-            if (newSessions.length > 0) changed = true;
+            if (newSessions.length > 0) {
+              changed = true;
+              newSessions.forEach((s) => discoveredIds.push(s.id));
+            }
             const result = changed ? [...updated, ...newSessions] : prev;
 
             for (const s of result) {
@@ -507,6 +521,15 @@ export default function App() {
 
             return result;
           });
+
+        // Auto-add MCP-spawned sessions to the visible grid
+        if (discoveredIds.length > 0) {
+          setActiveIds((prev) => {
+            const existingSet = new Set(prev);
+            const toAdd = discoveredIds.filter((id) => !existingSet.has(id));
+            return toAdd.length > 0 ? [...prev, ...toAdd] : prev;
+          });
+        }
       } catch (_) {
         pollFailCount.current++;
         // After 3 consecutive failures (~9s), backend is dead — trigger recovery
@@ -562,12 +585,6 @@ export default function App() {
       .slice(0, layout)
       .map((id) => sessions.find((s) => s.id === id))
       .filter(Boolean);
-
-    while (visible.length < layout && visible.length < sessions.length) {
-      const next = sessions.find((s) => !visible.includes(s));
-      if (next) visible.push(next);
-      else break;
-    }
     return visible;
   }, [activeIds, layout, sessions]);
 

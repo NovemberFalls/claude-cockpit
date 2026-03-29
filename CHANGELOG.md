@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - PTY write/read operations now have timeout protection (5s write, 10s read) to prevent session lockups from zombie processes
 - Failed PTY writes mark session as dead immediately instead of silently failing
+- Pane drag-and-drop reordering broken by file-drop handler calling `stopPropagation()` on all drags — now only intercepts actual file drops, letting pane-swap events bubble to the parent wrapper
 
 ## [0.2.18-alpha] - 2026-03-24
 

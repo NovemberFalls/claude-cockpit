@@ -335,10 +335,12 @@ export default function Sidebar({
 
   return (
     <aside
+      data-tour="sidebar"
       className="flex flex-col flex-shrink-0 py-4 px-2 overflow-y-auto h-full"
     >
       {/* New button */}
       <button
+        data-tour="new-session-btn"
         onClick={onNew}
         className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-2 transition-colors hover-bg-surface"
         style={{ color: "var(--text-secondary)" }}
