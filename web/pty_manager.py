@@ -622,25 +622,68 @@ class PtyManager:
             return False
 
     async def write_pty_async(self, terminal_id: str, data: str) -> bool:
-        """Write to PTY stdin (non-blocking, runs in executor with timeout)."""
+        """Write to PTY stdin (non-blocking, runs in executor with timeout).
+
+        For large payloads (>8KB), writes in chunks with async yields between
+        them so the ConPTY pipe buffer can drain.  Timeout scales with data
+        size to support multi-thousand-line pastes.
+        """
         session = self.sessions.get(terminal_id)
         if not session or not session.alive:
             return False
         loop = asyncio.get_event_loop()
-        try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._pty_executor, self._write_pty_sync, terminal_id, data
-                ),
-                timeout=5.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
-            session.alive = False
-            return False
-        except Exception:
-            logger.debug("PTY async write error for %s", terminal_id)
-            return False
+
+        # Scale timeout: 5s base + 1s per 32KB of data
+        data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+        timeout = max(5.0, 5.0 + (data_len / 32768))
+
+        # Small payloads: single write (fast path)
+        if data_len <= 8192:
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._pty_executor, self._write_pty_sync, terminal_id, data
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
+                session.alive = False
+                return False
+            except Exception:
+                logger.debug("PTY async write error for %s", terminal_id)
+                return False
+
+        # Large payloads: chunk with async yields to let the pipe drain
+        chunk_size = 8192
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset:offset + chunk_size]
+            try:
+                ok = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._pty_executor, self._write_pty_sync, terminal_id, chunk
+                    ),
+                    timeout=10.0,
+                )
+                if not ok:
+                    return False
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "PTY write timed out for %s at offset %d/%d",
+                    terminal_id, offset, len(data),
+                )
+                session.alive = False
+                return False
+            except Exception:
+                logger.debug("PTY async write error for %s", terminal_id)
+                return False
+            offset += chunk_size
+            # Yield to event loop between chunks — lets the pipe drain
+            # and keeps WebSocket heartbeats responsive
+            if offset < len(data):
+                await asyncio.sleep(0.01)
+        return True
 
     def _write_pty_sync(self, terminal_id: str, data: str) -> bool:
         """Executor-safe PTY write (avoids isalive() kernel call on event loop)."""

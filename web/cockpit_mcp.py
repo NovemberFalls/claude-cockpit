@@ -311,6 +311,22 @@ def call_tool(name: str, args: dict, msg_id=None):
             .replace("\\x03", "\x03")
         )
 
+        # Wait for the target session to be idle before injecting input.
+        # If the session is still initializing or busy, keystrokes can be
+        # lost or arrive before the prompt is ready.
+        idle_deadline = time.time() + 15
+        while time.time() < idle_deadline:
+            target_state = "unknown"
+            state_result = api("GET", "/api/terminals", retries=0)
+            if "error" not in state_result:
+                for t in state_result.get("terminals", []):
+                    if t["id"] == tid:
+                        target_state = t.get("activity_state", "unknown")
+                        break
+            if target_state == "idle":
+                break
+            time.sleep(1.0)
+
         # Get the current output cursor before sending
         pre_result = api("GET", f"/api/terminals/{tid}/output")
         since = pre_result.get("total_lines", 0) if "error" not in pre_result else 0
@@ -363,11 +379,32 @@ def call_tool(name: str, args: dict, msg_id=None):
         result = api("POST", "/api/terminals", body)
         if "error" in result:
             return result, False
+
+        tid = result.get("id")
+
+        # Wait for the new session to reach idle state before returning.
+        # Without this, the orchestrator fires send_input before the
+        # worker's Claude CLI has finished initializing, losing the input.
+        deadline = time.time() + 30
+        final_state = "starting"
+        time.sleep(2.0)  # Give CLI time to boot before first poll
+        while time.time() < deadline:
+            state_result = api("GET", "/api/terminals", retries=0)
+            if "error" not in state_result:
+                for t in state_result.get("terminals", []):
+                    if t["id"] == tid:
+                        final_state = t.get("activity_state", "starting")
+                        break
+            if final_state == "idle":
+                break
+            time.sleep(1.0)
+
         return {
-            "terminal_id": result.get("id"),
+            "terminal_id": tid,
             "name": result.get("name"),
             "model": result.get("model"),
             "is_orchestrator": result.get("is_orchestrator", False),
+            "activity_state": final_state,
         }, False
 
     else:
