@@ -9,7 +9,7 @@ const ORCH_PERSONAS = [
   {
     id: "vera",
     label: "Vera (Director)",
-    characterFile: "C:\\Code\\Personal\\team\\director.md",
+    characterFile: "C:\\Code\\Personal\\team\\coding-team\\agents\\00-vera-director.md",
     model: "opus",
     name: "Vera",
   },
@@ -162,10 +162,7 @@ export default function NewSessionDialog({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (showSuggestions) {
-      setShowSuggestions(false);
-      return;
-    }
+    setShowSuggestions(false);
     onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
       isOrchestrator: asOrchestrator,
       characterFile: characterFile.trim(),
