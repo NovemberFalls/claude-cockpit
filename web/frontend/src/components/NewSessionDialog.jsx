@@ -5,23 +5,7 @@ function normPath(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
 }
 
-const ORCH_PERSONAS = [
-  {
-    id: "vera",
-    label: "Vera (Director)",
-    characterFile: "C:\\Code\\Personal\\team\\coding-team\\agents\\00-vera-director.md",
-    model: "opus",
-    name: "Vera",
-  },
-  {
-    id: "nadia",
-    label: "Nadia (Principal Engineer)",
-    characterFile: "C:\\Code\\Personal\\team\\coding-team\\agents\\01-nadia-orchestrator.md",
-    model: "opus",
-    name: "Nadia",
-  },
-  { id: "custom", label: "Custom", characterFile: "", model: "", name: "" },
-];
+const LAST_ORCH_KEY = "cockpit_last_orch";
 
 const ORCH_MODELS = [
   { id: "opus", label: "Opus 4.6" },
@@ -46,9 +30,9 @@ export default function NewSessionDialog({
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
   const [asOrchestrator, setAsOrchestrator] = useState(false);
-  const [orchPersona, setOrchPersona] = useState("vera");
-  const [orchModel, setOrchModel] = useState("opus");
-  const [characterFile, setCharacterFile] = useState("");
+  const lastOrch = (() => { try { return JSON.parse(localStorage.getItem(LAST_ORCH_KEY) || "{}"); } catch { return {}; } })();
+  const [orchModel, setOrchModel] = useState(lastOrch.model || "opus");
+  const [characterFile, setCharacterFile] = useState(lastOrch.characterFile || "");
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
@@ -163,6 +147,9 @@ export default function NewSessionDialog({
   const handleSubmit = (e) => {
     e.preventDefault();
     setShowSuggestions(false);
+    if (asOrchestrator) {
+      try { localStorage.setItem(LAST_ORCH_KEY, JSON.stringify({ model: orchModel, characterFile: characterFile.trim() })); } catch (_) {}
+    }
     onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
       isOrchestrator: asOrchestrator,
       characterFile: characterFile.trim(),
@@ -377,18 +364,7 @@ export default function NewSessionDialog({
               <div
                 className="flex items-center gap-2 mt-3 cursor-pointer select-none"
                 title="This session will be the Orchestrator — Claude gets MCP tools to control all other sessions"
-                onClick={() => {
-                  const next = !asOrchestrator;
-                  setAsOrchestrator(next);
-                  if (next) {
-                    // Auto-fill Vera defaults
-                    const vera = ORCH_PERSONAS[0];
-                    setOrchPersona("vera");
-                    setOrchModel(vera.model);
-                    setCharacterFile(vera.characterFile);
-                    if (!name.trim()) setName(vera.name);
-                  }
-                }}
+                onClick={() => setAsOrchestrator(!asOrchestrator)}
               >
                 <div
                   className="flex items-center justify-center rounded flex-shrink-0"
@@ -405,52 +381,9 @@ export default function NewSessionDialog({
                 </span>
               </div>
 
-              {/* Persona & model selectors — only when orchestrator is checked */}
+              {/* Model + character file — only when orchestrator is checked */}
               {asOrchestrator && (
                 <div className="mt-2 flex flex-col gap-2">
-                  {/* Persona selector */}
-                  <div>
-                    <label
-                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      Persona
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={orchPersona}
-                        onChange={(e) => {
-                          const pid = e.target.value;
-                          setOrchPersona(pid);
-                          const preset = ORCH_PERSONAS.find((p) => p.id === pid);
-                          if (preset && pid !== "custom") {
-                            setCharacterFile(preset.characterFile);
-                            setOrchModel(preset.model);
-                            if (!name.trim() || ORCH_PERSONAS.some((p) => p.name === name.trim())) {
-                              setName(preset.name);
-                            }
-                          }
-                        }}
-                        className="w-full px-3 py-1.5 rounded text-xs outline-none appearance-none pr-7"
-                        style={{
-                          backgroundColor: "var(--bg-surface)",
-                          color: "var(--text-primary)",
-                          border: "1px solid var(--border-color)",
-                        }}
-                      >
-                        {ORCH_PERSONAS.map((p) => (
-                          <option key={p.id} value={p.id}>{p.label}</option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={12}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none"
-                        style={{ color: "var(--text-muted)" }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Model selector */}
                   <div>
                     <label
                       className="block text-[11px] uppercase tracking-wider font-medium mb-1"
@@ -481,27 +414,24 @@ export default function NewSessionDialog({
                     </div>
                   </div>
 
-                  {/* Character file — editable, or free-text when custom */}
                   <div>
                     <label
                       className="block text-[11px] uppercase tracking-wider font-medium mb-1"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      Character file{orchPersona !== "custom" ? "" : " (required)"}
+                      Character file (optional)
                     </label>
                     <input
                       type="text"
                       value={characterFile}
                       onChange={(e) => setCharacterFile(e.target.value)}
-                      placeholder={orchPersona === "custom" ? "C:\\path\\to\\persona.md" : ""}
-                      readOnly={orchPersona !== "custom"}
+                      placeholder="C:\path\to\persona.md"
                       className="w-full px-3 py-1.5 rounded text-xs outline-none"
                       style={{
                         backgroundColor: "var(--bg-surface)",
-                        color: orchPersona !== "custom" ? "var(--text-muted)" : "var(--text-primary)",
+                        color: "var(--text-primary)",
                         border: "1px solid var(--border-color)",
                         fontFamily: "monospace",
-                        opacity: orchPersona !== "custom" ? 0.7 : 1,
                       }}
                     />
                   </div>
