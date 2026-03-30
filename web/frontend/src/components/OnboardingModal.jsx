@@ -22,7 +22,7 @@ const TOUR_STEPS = [
     placement: "right",
     title: "+ New Session",
     content:
-      'Click + New to start a Claude Code session. Pick a working directory, model (Sonnet / Opus / Haiku), and optionally check "Start as Orchestrator" for multi-agent mode.',
+      "Click + New to start a Claude Code session. Pick a working directory and optionally bypass permissions for fully autonomous operation.",
   },
   {
     target: '[data-tour="layout-switcher"]',
@@ -30,13 +30,6 @@ const TOUR_STEPS = [
     title: "Layout Switcher",
     content:
       "Switch between 1, 2, or 4 pane layouts. Use Ctrl+Shift+! / @ / $ or the buttons here. Quad layout is great for watching multiple sessions at once.",
-  },
-  {
-    target: '[data-tour="orchestrator-btn"]',
-    placement: "top",
-    title: "Orchestrator Mode",
-    content:
-      "Enable Orchestrator Mode to give one session MCP tools that let it spawn and control all the others \u2014 no commands, just plain English delegation.",
   },
   {
     target: '[data-tour="broadcast-btn"]',

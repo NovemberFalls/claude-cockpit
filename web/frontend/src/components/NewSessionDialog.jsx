@@ -1,27 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X, FolderOpen, Folder, ShieldOff, Network, ChevronDown } from "lucide-react";
+import { X, FolderOpen, Folder, ShieldOff } from "lucide-react";
 
 function normPath(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
 }
-
-const LAST_ORCH_KEY = "cockpit_last_orch";
-
-const ORCH_MODELS = [
-  { id: "opus", label: "Opus 4.6" },
-  { id: "sonnet", label: "Sonnet 4.6" },
-  { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
-  { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
-  { id: "haiku", label: "Haiku 4.5" },
-];
 
 export default function NewSessionDialog({
   recentLocations,
   savedLocations = [],
   onConfirm,
   onCancel,
-  orchestratorMode = false,
-  hasOrchestrator = false,
 }) {
   const initialDir = recentLocations[0] || "C:\\Code";
   const [workdir, setWorkdir] = useState(initialDir);
@@ -29,10 +17,6 @@ export default function NewSessionDialog({
   const initialBypass = savedLocations.find((l) => normPath(l.path) === normPath(initialDir))?.bypassPermissions || false;
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
-  const [asOrchestrator, setAsOrchestrator] = useState(false);
-  const lastOrch = (() => { try { return JSON.parse(localStorage.getItem(LAST_ORCH_KEY) || "{}"); } catch { return {}; } })();
-  const [orchModel, setOrchModel] = useState(lastOrch.model || "opus");
-  const [characterFile, setCharacterFile] = useState(lastOrch.characterFile || "");
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
@@ -147,14 +131,7 @@ export default function NewSessionDialog({
   const handleSubmit = (e) => {
     e.preventDefault();
     setShowSuggestions(false);
-    if (asOrchestrator) {
-      try { localStorage.setItem(LAST_ORCH_KEY, JSON.stringify({ model: orchModel, characterFile: characterFile.trim() })); } catch (_) {}
-    }
-    onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
-      isOrchestrator: asOrchestrator,
-      characterFile: characterFile.trim(),
-      ...(asOrchestrator && orchModel ? { modelOverride: orchModel } : {}),
-    });
+    onConfirm(name.trim(), workdir.trim(), bypassPermissions);
   };
 
   const handleKeyDown = (e) => {
@@ -357,88 +334,6 @@ export default function NewSessionDialog({
               Bypass permissions
             </span>
           </div>
-
-          {/* Orchestrator checkbox — only shown when orchestrator mode is on and no orchestrator exists yet */}
-          {orchestratorMode && !hasOrchestrator && (
-            <>
-              <div
-                className="flex items-center gap-2 mt-3 cursor-pointer select-none"
-                title="This session will be the Orchestrator — Claude gets MCP tools to control all other sessions"
-                onClick={() => setAsOrchestrator(!asOrchestrator)}
-              >
-                <div
-                  className="flex items-center justify-center rounded flex-shrink-0"
-                  style={{
-                    width: 16, height: 16,
-                    border: `1px solid ${asOrchestrator ? "var(--accent)" : "var(--border-color)"}`,
-                    backgroundColor: asOrchestrator ? "rgba(var(--accent-rgb,99,102,241),0.15)" : "transparent",
-                  }}
-                >
-                  {asOrchestrator && <Network size={10} style={{ color: "var(--accent)" }} />}
-                </div>
-                <span className="text-xs" style={{ color: asOrchestrator ? "var(--accent)" : "var(--text-muted)" }}>
-                  Start as Orchestrator
-                </span>
-              </div>
-
-              {/* Model + character file — only when orchestrator is checked */}
-              {asOrchestrator && (
-                <div className="mt-2 flex flex-col gap-2">
-                  <div>
-                    <label
-                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      Model
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={orchModel}
-                        onChange={(e) => setOrchModel(e.target.value)}
-                        className="w-full px-3 py-1.5 rounded text-xs outline-none appearance-none pr-7"
-                        style={{
-                          backgroundColor: "var(--bg-surface)",
-                          color: "var(--text-primary)",
-                          border: "1px solid var(--border-color)",
-                        }}
-                      >
-                        {ORCH_MODELS.map((m) => (
-                          <option key={m.id} value={m.id}>{m.label}</option>
-                        ))}
-                      </select>
-                      <ChevronDown
-                        size={12}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none"
-                        style={{ color: "var(--text-muted)" }}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label
-                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      Character file (optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={characterFile}
-                      onChange={(e) => setCharacterFile(e.target.value)}
-                      placeholder="C:\path\to\persona.md"
-                      className="w-full px-3 py-1.5 rounded text-xs outline-none"
-                      style={{
-                        backgroundColor: "var(--bg-surface)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border-color)",
-                        fontFamily: "monospace",
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </>
-          )}
 
           {/* Actions */}
           <div className="flex justify-end gap-2 mt-3">

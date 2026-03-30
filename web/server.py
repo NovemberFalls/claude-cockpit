@@ -6,11 +6,9 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time as _time
 import uuid
 import webbrowser
@@ -29,8 +27,6 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 from pty_manager import pty_manager
-import workspace_manager
-from workspace_watcher import WorkspaceWatcher
 
 START_TIME = _time.time()
 
@@ -63,95 +59,6 @@ else:
 
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
-# Temp directory for MCP config files (one per orchestrator session)
-_MCP_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="cockpit_mcp_"))
-
-# ── MCP script bootstrap ──────────────────────────────────────────────────────
-# Write cockpit_mcp.py to the config dir ONCE at startup so all orchestrator
-# sessions share a single stable, non-volatile path.  This is resilient to:
-#   • PyInstaller bundles where _MEIPASS is volatile (old builds without spec fix)
-#   • Dev mode where the source tree may be at any path
-#   • Future builds — the path is always _MCP_CONFIG_DIR/cockpit_mcp.py
-_MCP_SCRIPT_PATH: Path | None = None
-
-def _bootstrap_mcp_script() -> None:
-    """Locate cockpit_mcp.py and write a stable copy to _MCP_CONFIG_DIR.
-
-    Call once at startup.  Sets _MCP_SCRIPT_PATH or logs a clear error.
-    """
-    global _MCP_SCRIPT_PATH
-    candidates = [
-        Path(__file__).parent / "cockpit_mcp.py",          # dev or bundled (spec-fixed)
-        Path(sys.executable).parent / "cockpit_mcp.py",    # beside exe fallback
-    ]
-    src: Path | None = None
-    for c in candidates:
-        if c.exists():
-            src = c
-            break
-
-    dest = _MCP_CONFIG_DIR / "cockpit_mcp.py"
-    if src is not None:
-        shutil.copy2(src, dest)
-        logger.info("MCP script bootstrapped from %s → %s", src, dest)
-    else:
-        # Source not found (old bundle without spec fix) — log loudly so it's debuggable.
-        logger.error(
-            "cockpit_mcp.py not found in any candidate location %s. "
-            "Orchestrator mode will be unavailable until the app is rebuilt.",
-            [str(c) for c in candidates],
-        )
-        return  # _MCP_SCRIPT_PATH stays None
-    _MCP_SCRIPT_PATH = dest
-
-_bootstrap_mcp_script()
-
-# ── Workspace watcher & WebSocket broadcaster ────────────────────────────────
-# Lock protecting workspace_events lists on TerminalSession objects.
-# Shared between the watcher thread (writer) and the REST handler (reader/drainer).
-_workspace_events_lock = threading.Lock()
-
-# Connected workspace UI WebSocket clients (set of WebSocket objects)
-_workspace_ws_clients: set = set()
-_workspace_ws_lock = threading.Lock()
-
-# Event loop reference — set at startup so the watcher thread can schedule
-# coroutines onto the main asyncio loop via run_coroutine_threadsafe.
-_app_event_loop: asyncio.AbstractEventLoop | None = None
-
-
-async def _broadcast_workspace_event(compound_id: str, filename: str) -> None:
-    """Broadcast a workspace file-change event to all connected UI clients."""
-    if not _workspace_ws_clients:
-        return
-    msg = json.dumps({"type": "file_changed", "compound_id": compound_id, "filename": filename})
-    dead = set()
-    with _workspace_ws_lock:
-        clients = set(_workspace_ws_clients)
-    for ws in clients:
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            dead.add(ws)
-    if dead:
-        with _workspace_ws_lock:
-            _workspace_ws_clients.difference_update(dead)
-
-
-def _on_workspace_file_event(compound_id: str, filename: str) -> None:
-    """Called from watcher thread — schedules broadcast on the main event loop."""
-    if _app_event_loop is not None:
-        asyncio.run_coroutine_threadsafe(
-            _broadcast_workspace_event(compound_id, filename),
-            _app_event_loop,
-        )
-
-
-_workspace_watcher = WorkspaceWatcher(
-    pty_manager.sessions,
-    _workspace_events_lock,
-    on_event=_on_workspace_file_event,
-)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
@@ -358,12 +265,12 @@ async def git_status(path: str):
         return JSONResponse({"git": False})
 
 
-# ── Terminal Output Buffer (for MCP orchestrator) ─────────
+# ── Terminal Output Buffer ────────────────────────────────
 
 
 @app.get("/api/terminals/{terminal_id}/output")
 async def get_terminal_output(terminal_id: str, since: int = 0):
-    """Return ANSI-stripped terminal output (used by MCP orchestrator).
+    """Return ANSI-stripped terminal output.
 
     Args:
         since: Return only lines at index >= since (0 = all lines).
@@ -381,62 +288,8 @@ async def get_terminal_output(terminal_id: str, since: int = 0):
         "lines": sliced,
         "total_lines": total,
         "activity_state": activity_state,
+        "context_percent": session.tracker.context_percent,
     })
-
-
-def _resolve_python() -> str:
-    """Return a path to the Python interpreter for launching MCP subprocesses.
-
-    Inside a PyInstaller bundle sys.executable is the frozen exe, which cannot
-    run .py scripts.  Fall back to the first 'python' on PATH.
-    """
-    if not getattr(sys, "_MEIPASS", None):
-        return sys.executable  # Dev mode — interpreter is correct
-    found = shutil.which("python")
-    if found:
-        return found
-    raise FileNotFoundError(
-        "Cannot find a Python interpreter on PATH.  "
-        "Orchestrator mode requires Python installed alongside the desktop app."
-    )
-
-
-def _write_mcp_config(terminal_id: str, compound_id: str = "") -> str:
-    """Write a temp MCP config JSON for an orchestrator session.
-
-    Uses the stable cockpit_mcp.py copy written at startup by _bootstrap_mcp_script().
-    Raises RuntimeError if bootstrap failed (e.g. old bundle without spec fix).
-    Returns the absolute path to the written config file.
-    """
-    if _MCP_SCRIPT_PATH is None:
-        raise RuntimeError(
-            "cockpit_mcp.py could not be located at startup. "
-            "Rebuild the desktop app to restore Orchestrator mode."
-        )
-    port = int(os.getenv("PORT", "8420"))
-    # compound_id encodes the full ancestry chain for workspace scoping.
-    # Falls back to terminal_id for top-level orchestrators with no parent.
-    effective_compound_id = compound_id or terminal_id
-    config = {
-        "mcpServers": {
-            "cockpit": {
-                "command": _resolve_python(),
-                "args": [str(_MCP_SCRIPT_PATH)],
-                "env": {
-                    "COCKPIT_API_URL": f"http://localhost:{port}",
-                    "COCKPIT_ORCHESTRATOR_ID": terminal_id,
-                    "COCKPIT_COMPOUND_ID": effective_compound_id,
-                },
-            }
-        }
-    }
-    config_path = _MCP_CONFIG_DIR / f"mcp_{terminal_id}.json"
-    config_path.write_text(json.dumps(config, indent=2))
-    logger.info(
-        "Wrote MCP config for orchestrator %s (compound: %s) → %s",
-        terminal_id, effective_compound_id, config_path,
-    )
-    return str(config_path)
 
 
 # ── Background PTY Reader ─────────────────────────────────
@@ -500,32 +353,10 @@ async def create_terminal(request: Request):
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
-    is_orchestrator = body.get("isOrchestrator", False)
-    system_prompt_file = body.get("systemPromptFile", "")
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
-    # Compound ID of the parent session (set by MCP create_session tool).
-    # When present, this session gets a workspace folder as a child of that tree.
-    parent_compound_id = body.get("parentCompoundId", "")
-
-    # Pre-generate terminal ID whenever we need to reference it before spawn
-    # (orchestrators need it for MCP config; sessions with a parent need it for workspace).
-    needs_pregen = is_orchestrator or bool(parent_compound_id)
-    terminal_id_override = uuid.uuid4().hex[:8] if needs_pregen else ""
-
-    # Compute this session's compound ID.
-    # Top-level orchestrator: compound_id = terminal_id
-    # Child session: compound_id = parent_compound_id + "+" + terminal_id
-    compound_id = ""
-    if needs_pregen:
-        own_id = terminal_id_override
-        compound_id = f"{parent_compound_id}+{own_id}" if parent_compound_id else own_id
 
     try:
-        mcp_config_path = (
-            _write_mcp_config(terminal_id_override, compound_id=compound_id)
-            if is_orchestrator else ""
-        )
         session = pty_manager.create_terminal(
             name=name,
             workdir=workdir,
@@ -535,32 +366,8 @@ async def create_terminal(request: Request):
             bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
-            mcp_config_path=mcp_config_path,
-            terminal_id_override=terminal_id_override,
-            system_prompt_file=system_prompt_file,
-            compound_id=compound_id,
         )
-
-        # Create workspace folder for agent sessions (orchestrators or MCP-spawned children)
-        if compound_id:
-            try:
-                ws_path = workspace_manager.create_workspace(
-                    compound_id=compound_id,
-                    agent_name=name or "Agent",
-                    agent_role="Orchestrator" if is_orchestrator else "Specialist",
-                    model=model,
-                    character_file=system_prompt_file,
-                    parent_session_id=parent_compound_id.split("+")[-1] if parent_compound_id else "",
-                    workdir=workdir or str(Path.cwd()),
-                    pid=0,  # PID not available until after spawn; updated below
-                )
-                session.workspace_path = str(ws_path)
-                logger.info("Workspace created for session %s at %s", session.id, ws_path)
-            except Exception:
-                logger.warning("Failed to create workspace for session %s", session.id, exc_info=True)
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
-        # asyncio.sleep keeps the event loop responsive (replaces the blocking
-        # time.sleep(1.5) that was previously inside pty_manager.create_terminal).
         await asyncio.sleep(1.5)
         if not session.pty.isalive():
             exit_code = getattr(session.pty, "exitstatus", "?")
@@ -572,22 +379,12 @@ async def create_terminal(request: Request):
                 status_code=500,
             )
         logger.info("Session %s alive after spawn", session.id)
-        if compound_id:
-            try:
-                workspace_manager.update_status(compound_id, "active")
-            except Exception:
-                pass
-        # Start background PTY reader — keeps output buffer drained for sessions
-        # with no active WebSocket connection (e.g. MCP-spawned worker sessions).
         asyncio.create_task(_session_reader(session.id))
         return JSONResponse({
             "id": session.id,
             "name": session.name,
             "model": session.model,
             "created_at": session.created_at,
-            "is_orchestrator": is_orchestrator,
-            "compound_id": compound_id,
-            "workspace_path": session.workspace_path,
         })
     except FileNotFoundError:
         return JSONResponse(
@@ -610,129 +407,58 @@ async def list_terminals():
 @app.delete("/api/terminals/{terminal_id}")
 async def delete_terminal(terminal_id: str):
     """Kill a terminal session."""
-    session = pty_manager.sessions.get(terminal_id)
-    compound_id = session.compound_id if session else ""
     if pty_manager.kill_terminal(terminal_id):
-        if compound_id:
-            workspace_manager.update_status(compound_id, "idle")
         return JSONResponse({"status": "killed", "id": terminal_id})
     return JSONResponse({"error": "Terminal not found"}, status_code=404)
 
 
-# ── Workspace REST API ───────────────────────────────────
+@app.get("/api/system")
+async def system_stats():
+    """Return system resource usage: CPU, RAM, and GPU (if available).
 
-
-@app.post("/api/workspaces/{compound_id}/write")
-async def workspace_write(compound_id: str, request: Request):
-    """Write a file to a session's workspace folder (called by MCP workspace_write tool)."""
-    body = await request.json()
-    filename = body.get("filename", "")
-    content = body.get("content", "")
-    if not filename:
-        return JSONResponse({"error": "filename is required"}, status_code=400)
-    try:
-        path = workspace_manager.write_file(compound_id, filename, content)
-        return JSONResponse({"status": "written", "path": str(path)})
-    except (ValueError, OSError) as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-@app.get("/api/workspaces/{compound_id}/read")
-async def workspace_read(compound_id: str, filename: str = ""):
-    """Read a file from a session's workspace folder (called by MCP workspace_read tool)."""
-    if not filename:
-        return JSONResponse({"error": "filename query parameter is required"}, status_code=400)
-    try:
-        content = workspace_manager.read_file(compound_id, filename)
-        return JSONResponse({"compound_id": compound_id, "filename": filename, "content": content})
-    except FileNotFoundError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-@app.get("/api/workspaces/{compound_id}/list")
-async def workspace_list(compound_id: str):
-    """List all workspaces in a session's tree (called by MCP workspace_list tool)."""
-    try:
-        workspaces = workspace_manager.list_workspaces(compound_id)
-        return JSONResponse({"compound_id": compound_id, "workspaces": workspaces})
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-@app.get("/api/workspaces/{terminal_id}/events")
-async def workspace_events(terminal_id: str):
-    """Return and clear pending workspace notifications for a session.
-
-    Uses terminal_id (8-char hex) rather than compound_id so the MCP server
-    can look up its own session without knowing its full ancestry chain.
+    GPU utilization is fetched via nvidia-smi. If nvidia-smi is unavailable
+    or times out, gpu_percent is null — this never causes the endpoint to fail.
+    All float values are rounded to 1 decimal place.
     """
-    with _workspace_events_lock:
-        session = pty_manager.sessions.get(terminal_id)
-        if not session:
-            return JSONResponse({"error": "Session not found"}, status_code=404)
-        events = list(session.workspace_events)
-        session.workspace_events.clear()
-    return JSONResponse({"terminal_id": terminal_id, "events": events})
+    import psutil
 
+    cpu = round(psutil.cpu_percent(interval=0.1), 1)
 
-@app.post("/api/workspaces/{compound_id}/compact")
-async def workspace_compact(compound_id: str, request: Request):
-    """Compact a workspace — concatenate all .md files into compacted.md."""
-    body = await request.json()
-    keep_originals = bool(body.get("keep_originals", False))
+    vm = psutil.virtual_memory()
+    ram_percent = round(vm.percent, 1)
+    ram_used_gb = round(vm.used / (1024 ** 3), 1)
+    ram_total_gb = round(vm.total / (1024 ** 3), 1)
+
+    gpu_percent: float | None = None
     try:
-        path = workspace_manager.compact_workspace(compound_id, keep_originals=keep_originals)
-        return JSONResponse({"status": "compacted", "path": str(path), "compound_id": compound_id})
-    except FileNotFoundError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
-    except (ValueError, OSError) as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
-@app.get("/api/workspaces/all")
-async def workspace_list_all():
-    """List all workspaces (no scope restriction). For UI use."""
-    return JSONResponse({"workspaces": workspace_manager.list_all_workspaces()})
-
-
-@app.websocket("/ws/workspaces")
-async def websocket_workspaces(websocket: WebSocket):
-    """Push workspace tree updates to the UI.
-
-    On connect: sends the full workspace tree snapshot.
-    On file change: broadcasts { type: "file_changed", compound_id, filename }.
-    Client can use this to refresh the tree and live-viewer tabs.
-    """
-    await websocket.accept()
-    with _workspace_ws_lock:
-        _workspace_ws_clients.add(websocket)
-    try:
-        # Send initial tree snapshot
-        tree = workspace_manager.list_all_workspaces()
-        await websocket.send_text(json.dumps({"type": "tree", "workspaces": tree}))
-        # Keep connection alive — server pushes events, client just needs to stay connected
-        while True:
-            msg = await websocket.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
-            # Clients may send { type: "refresh" } to re-fetch the full tree
-            if msg.get("type") == "websocket.receive":
-                try:
-                    data = json.loads(msg.get("text") or "{}")
-                    if data.get("type") == "refresh":
-                        tree = workspace_manager.list_all_workspaces()
-                        await websocket.send_text(json.dumps({"type": "tree", "workspaces": tree}))
-                except Exception:
-                    pass
-    except WebSocketDisconnect:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            first_line = stdout.decode("utf-8", errors="replace").strip().splitlines()[0]
+            gpu_percent = round(float(first_line), 1)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        except (ValueError, IndexError):
+            pass
+    except (FileNotFoundError, OSError):
         pass
     except Exception:
-        logger.debug("Workspace WS error", exc_info=True)
-    finally:
-        with _workspace_ws_lock:
-            _workspace_ws_clients.discard(websocket)
+        logger.debug("GPU query failed", exc_info=True)
+
+    return JSONResponse({
+        "cpu_percent": cpu,
+        "ram_percent": ram_percent,
+        "ram_used_gb": ram_used_gb,
+        "ram_total_gb": ram_total_gb,
+        "gpu_percent": gpu_percent,
+    })
 
 
 @app.post("/api/terminals/{terminal_id}/resize")
@@ -918,10 +644,6 @@ async def static_files(path: str):
 @app.on_event("startup")
 async def startup_event():
     """Clean up orphans, write PID file, start idle cleanup."""
-    # 0. Capture event loop for cross-thread workspace broadcasts
-    global _app_event_loop
-    _app_event_loop = asyncio.get_event_loop()
-
     # 1. Clean up orphaned processes from previous crashes
     pty_manager.cleanup_orphans()
 
@@ -951,12 +673,6 @@ async def startup_event():
             pass
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
-    # 4. Start workspace file watcher
-    try:
-        _workspace_watcher.start()
-    except Exception:
-        logger.warning("WorkspaceWatcher failed to start — workspace notifications disabled", exc_info=True)
-
     logger.info("Startup complete (PID %d)", os.getpid())
 
 
@@ -979,17 +695,11 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             pass
-    # Stop workspace watcher before killing sessions
-    try:
-        _workspace_watcher.stop()
-    except Exception:
-        logger.warning("WorkspaceWatcher stop error", exc_info=True)
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-    shutil.rmtree(_MCP_CONFIG_DIR, ignore_errors=True)
     PID_FILE.unlink(missing_ok=True)
     logger.info("Shutdown complete")
 

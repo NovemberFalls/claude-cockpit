@@ -47,8 +47,6 @@ const TerminalPane = forwardRef(function TerminalPane({
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
-  isOrchestrator = false, // this pane is the orchestrator session
-  isWorker = false,       // orchestrator mode is on and this is a worker
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -407,49 +405,6 @@ const TerminalPane = forwardRef(function TerminalPane({
           >
             {session.model}
           </span>
-          {isOrchestrator && session.terminalId && (
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0"
-              style={{ color: "var(--bg)", backgroundColor: "var(--accent)", cursor: "pointer" }}
-              title={`Orchestrator — click to copy ID: ${session.terminalId}`}
-              onClick={() => {
-                navigator.clipboard.writeText(session.terminalId).then(() => {
-                  toast?.(`Copied ID: ${session.terminalId}`, "success");
-                });
-              }}
-            >
-              ORCH
-            </span>
-          )}
-          {isOrchestrator && !session.terminalId && (
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0"
-              style={{ color: "var(--bg)", backgroundColor: "var(--accent)" }}
-              title="Orchestrator — has MCP tools to control worker sessions"
-            >
-              ORCH
-            </span>
-          )}
-          {isWorker && session.terminalId && (
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0"
-              style={{
-                color: "var(--accent)",
-                backgroundColor: "var(--bg-surface)",
-                border: "1px solid var(--accent)",
-                opacity: 0.75,
-                cursor: "pointer",
-              }}
-              title={`Click to copy terminal ID: ${session.terminalId}`}
-              onClick={() => {
-                navigator.clipboard.writeText(session.terminalId).then(() => {
-                  toast?.(`Copied ID: ${session.terminalId}`, "success");
-                });
-              }}
-            >
-              #{session.terminalId}
-            </span>
-          )}
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -462,6 +417,22 @@ const TerminalPane = forwardRef(function TerminalPane({
           </button>
         </div>
       </div>
+
+      {/* Context gauge — shown only when context_percent is known */}
+      {session.context_percent != null && (
+        <div style={{ height: 2, backgroundColor: "var(--bg-elevated)", flexShrink: 0 }}>
+          <div style={{
+            height: "100%",
+            width: `${session.context_percent}%`,
+            backgroundColor: session.context_percent > 75
+              ? "var(--red)"
+              : session.context_percent > 50
+                ? "var(--yellow)"
+                : "var(--green)",
+            transition: "width 0.5s ease, background-color 0.3s ease",
+          }} />
+        </div>
+      )}
 
       {/* Terminal area */}
       <div
