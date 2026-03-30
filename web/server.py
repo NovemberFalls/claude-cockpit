@@ -572,6 +572,11 @@ async def create_terminal(request: Request):
                 status_code=500,
             )
         logger.info("Session %s alive after spawn", session.id)
+        if compound_id:
+            try:
+                workspace_manager.update_status(compound_id, "active")
+            except Exception:
+                pass
         # Start background PTY reader — keeps output buffer drained for sessions
         # with no active WebSocket connection (e.g. MCP-spawned worker sessions).
         asyncio.create_task(_session_reader(session.id))
