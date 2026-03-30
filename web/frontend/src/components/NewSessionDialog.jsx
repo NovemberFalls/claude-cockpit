@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X, FolderOpen, Folder, ShieldOff, Network } from "lucide-react";
+import { X, FolderOpen, Folder, ShieldOff } from "lucide-react";
 
 function normPath(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
@@ -10,8 +10,6 @@ export default function NewSessionDialog({
   savedLocations = [],
   onConfirm,
   onCancel,
-  orchestratorMode = false,
-  hasOrchestrator = false,
 }) {
   const initialDir = recentLocations[0] || "C:\\Code";
   const [workdir, setWorkdir] = useState(initialDir);
@@ -19,8 +17,6 @@ export default function NewSessionDialog({
   const initialBypass = savedLocations.find((l) => normPath(l.path) === normPath(initialDir))?.bypassPermissions || false;
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
-  const [asOrchestrator, setAsOrchestrator] = useState(false);
-  const [characterFile, setCharacterFile] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(-1);
@@ -134,11 +130,8 @@ export default function NewSessionDialog({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (showSuggestions) {
-      setShowSuggestions(false);
-      return;
-    }
-    onConfirm(name.trim(), workdir.trim(), bypassPermissions, { isOrchestrator: asOrchestrator, characterFile: characterFile.trim() });
+    setShowSuggestions(false);
+    onConfirm(name.trim(), workdir.trim(), bypassPermissions);
   };
 
   const handleKeyDown = (e) => {
@@ -341,56 +334,6 @@ export default function NewSessionDialog({
               Bypass permissions
             </span>
           </div>
-
-          {/* Orchestrator checkbox — only shown when orchestrator mode is on and no orchestrator exists yet */}
-          {orchestratorMode && !hasOrchestrator && (
-            <>
-              <div
-                className="flex items-center gap-2 mt-3 cursor-pointer select-none"
-                title="This session will be the Orchestrator — Claude gets MCP tools to control all other sessions"
-                onClick={() => setAsOrchestrator(!asOrchestrator)}
-              >
-                <div
-                  className="flex items-center justify-center rounded flex-shrink-0"
-                  style={{
-                    width: 16, height: 16,
-                    border: `1px solid ${asOrchestrator ? "var(--accent)" : "var(--border-color)"}`,
-                    backgroundColor: asOrchestrator ? "rgba(var(--accent-rgb,99,102,241),0.15)" : "transparent",
-                  }}
-                >
-                  {asOrchestrator && <Network size={10} style={{ color: "var(--accent)" }} />}
-                </div>
-                <span className="text-xs" style={{ color: asOrchestrator ? "var(--accent)" : "var(--text-muted)" }}>
-                  Start as Orchestrator
-                </span>
-              </div>
-
-              {/* Character file — only when orchestrator is checked */}
-              {asOrchestrator && (
-                <div className="mt-2">
-                  <label
-                    className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    Character file (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={characterFile}
-                    onChange={(e) => setCharacterFile(e.target.value)}
-                    placeholder="C:\Code\Personal\team\coding-team\agents\01-nadia-orchestrator.md"
-                    className="w-full px-3 py-1.5 rounded text-xs outline-none"
-                    style={{
-                      backgroundColor: "var(--bg-surface)",
-                      color: "var(--text-primary)",
-                      border: "1px solid var(--border-color)",
-                      fontFamily: "monospace",
-                    }}
-                  />
-                </div>
-              )}
-            </>
-          )}
 
           {/* Actions */}
           <div className="flex justify-end gap-2 mt-3">

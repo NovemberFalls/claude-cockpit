@@ -44,6 +44,7 @@ class SessionStateTracker:
         self._last_cost_val: float = 0.0
         self.output_lines: deque = deque(maxlen=500)  # ring buffer: last 500 ANSI-stripped lines
         self._line_fragment: str = ""  # incomplete line accumulator
+        self.context_percent: Optional[int] = None  # last seen context window fill %
 
     def feed(self, raw_data: str) -> None:
         """Process new PTY output data."""
@@ -77,6 +78,13 @@ class SessionStateTracker:
                 self.total_cost = val
                 self._last_cost_val = val
 
+        # Detect context window fill percentage from Claude Code output.
+        # Matches patterns like "Context window is 73% full", "73% of context", etc.
+        # The regex looks for "context" followed (within 30 non-digit chars) by a percentage.
+        ctx_match = re.search(r'context\D{0,30}?(\d{1,3})\s*%', clean, re.IGNORECASE)
+        if ctx_match:
+            self.context_percent = int(ctx_match.group(1))
+
     def tick(self) -> str:
         """Check for idle/waiting state based on buffer tail and timing."""
         elapsed = time.time() - self.last_output_time
@@ -101,7 +109,7 @@ class SessionStateTracker:
 
         # If no output for 10s+ but no recognized pattern, assume idle.
         # Previous 3s threshold was too aggressive — Claude thinking pauses
-        # were misclassified as idle, causing orchestrator to read incomplete output.
+        # were misclassified as idle before output was complete.
         if elapsed > 10.0 and self.state == "busy":
             self.state = "idle"
 
@@ -124,6 +132,8 @@ class TerminalSession:
     rows: int = 30
     alive: bool = True
     tracker: SessionStateTracker = field(default_factory=SessionStateTracker)
+    output_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=200))
+    context_percent: Optional[int] = None  # last seen context window fill % (from tracker)
 
 
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
@@ -329,9 +339,6 @@ class PtyManager:
         bypass_permissions: bool = False,
         cols: int = 120,
         rows: int = 30,
-        mcp_config_path: str = "",
-        terminal_id_override: str = "",
-        system_prompt_file: str = "",
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY."""
         if len(self.sessions) >= MAX_SESSIONS:
@@ -345,7 +352,7 @@ class PtyManager:
         if resume_session_id and not _SESSION_ID_RE.match(resume_session_id):
             raise ValueError(f"Invalid session ID format: {resume_session_id!r}")
 
-        terminal_id = terminal_id_override or uuid.uuid4().hex[:8]
+        terminal_id = uuid.uuid4().hex[:8]
         if not name:
             name = f"Session {len(self.sessions) + 1}"
         if not workdir:
@@ -416,31 +423,6 @@ class PtyManager:
             cmd += " --continue"
         if bypass_permissions:
             cmd += " --dangerously-skip-permissions"
-        if mcp_config_path:
-            if _sys.platform == "win32":
-                # Path is passed WITHOUT quotes — winpty's shlex→list2cmdline round-trip
-                # corrupts quoted arguments (turns "path" into \"path\"), so the regex
-                # guarantees the path is safe to use unquoted.
-                if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+\.json$', mcp_config_path):
-                    raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
-                cmd += f' --mcp-config {mcp_config_path}'
-            else:
-                # Unix: absolute path, safe characters only.
-                if not re.match(r'^/[\w/\.\-\~\(\)\+]+\.json$', mcp_config_path):
-                    raise ValueError(f"Invalid MCP config path: {mcp_config_path!r}")
-                import shlex as _shlex
-                cmd += f' --mcp-config {_shlex.quote(mcp_config_path)}'
-
-        if system_prompt_file:
-            if _sys.platform == "win32":
-                if not re.match(r'^[A-Za-z]:\\[\w\\\.\-\~\(\)\+]+(\.md|\.txt|\.json)$', system_prompt_file):
-                    raise ValueError(f"Invalid system prompt file path: {system_prompt_file!r}")
-                cmd += f' --append-system-prompt-file {system_prompt_file}'
-            else:
-                if not re.match(r'^/[\w/\.\-\~\(\)\+]+(\.md|\.txt|\.json)$', system_prompt_file):
-                    raise ValueError(f"Invalid system prompt file path: {system_prompt_file!r}")
-                import shlex as _shlex
-                cmd += f' --append-system-prompt-file {_shlex.quote(system_prompt_file)}'
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)
@@ -576,6 +558,7 @@ class PtyManager:
                 "activity_state": session.tracker.state,
                 "tokens": session.tracker.total_tokens,
                 "cost": session.tracker.total_cost,
+                "context_percent": session.tracker.context_percent,
             })
         return result
 

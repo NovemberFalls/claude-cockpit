@@ -1,5 +1,5 @@
 import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle } from "lucide-react";
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import StateIcon from "./StateIcon";
 
 /** Normalize path separators to backslash for comparison */
@@ -15,10 +15,10 @@ function shortPath(dir) {
 }
 
 /**
- * Build a tree from a flat list of location objects.
+ * Build a location tree from a flat list of location objects.
  * Each node: { path, name, bypassPermissions, children: [] }
  */
-function buildTree(locations) {
+function buildLocationTree(locations) {
   const sorted = [...locations].sort((a, b) => norm(a.path).localeCompare(norm(b.path)));
   const roots = [];
   const nodes = new Map();
@@ -44,28 +44,30 @@ function buildTree(locations) {
   return roots;
 }
 
-/** Context menu for location nodes */
-function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove, onToggleBypass, onClose }) {
-  const menuRef = useRef(null);
-  const [pos, setPos] = useState({ x, y });
+// ---------------------------------------------------------------------------
+// Context menu for location nodes
+// ---------------------------------------------------------------------------
 
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
-    const nx = x + rect.width > window.innerWidth ? window.innerWidth - rect.width - 4 : x;
-    const ny = y + rect.height > window.innerHeight ? window.innerHeight - rect.height - 4 : y;
-    setPos({ x: nx, y: ny });
+function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove, onToggleBypass, onClose }) {
+  const menuRef = useCallback((el) => {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth) el.style.left = `${window.innerWidth - rect.width - 4}px`;
+    if (y + rect.height > window.innerHeight) el.style.top = `${window.innerHeight - rect.height - 4}px`;
   }, [x, y]);
 
   useEffect(() => {
-    const handleClick = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) onClose();
+    const handler = (e) => {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(e.target)
+      ) onClose();
     };
     const handleKey = (e) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", handleKey);
     return () => {
-      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", handleKey);
     };
   }, [onClose]);
@@ -83,8 +85,8 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
       ref={menuRef}
       style={{
         position: "fixed",
-        left: pos.x,
-        top: pos.y,
+        left: x,
+        top: y,
         zIndex: 1000,
         backgroundColor: "var(--bg-surface)",
         border: "1px solid var(--border-color)",
@@ -135,6 +137,10 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Session list components
+// ---------------------------------------------------------------------------
 
 function SessionItem({ session, isActive, onSelect, onDelete }) {
   return (
@@ -282,6 +288,10 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
   );
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar — main export
+// ---------------------------------------------------------------------------
+
 export default function Sidebar({
   sessions,
   activeIds,
@@ -296,12 +306,10 @@ export default function Sidebar({
   onToggleLocationBypass,
   gitStatuses = {},
 }) {
-  if (!open) return null;
-
-  // Context menu state
+  // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
 
-  const tree = useMemo(() => buildTree(savedLocations), [savedLocations]);
+  const locationTree = useMemo(() => buildLocationTree(savedLocations), [savedLocations]);
 
   // Pre-compute workdir → sessions[] map (O(n) once, not per LocationNode)
   const sessionsByDir = useMemo(() => {
@@ -333,111 +341,116 @@ export default function Sidebar({
     setCtxMenu({ x: e.clientX, y: e.clientY, path, isBypass: loc?.bypassPermissions || false });
   }, [savedLocations]);
 
+  if (!open) return null;
+
   return (
     <aside
       data-tour="sidebar"
-      className="flex flex-col flex-shrink-0 py-4 px-2 overflow-y-auto h-full"
+      className="flex flex-col flex-shrink-0 h-full"
+      style={{ overflow: "hidden" }}
     >
-      {/* New button */}
-      <button
-        data-tour="new-session-btn"
-        onClick={onNew}
-        className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-2 transition-colors hover-bg-surface"
-        style={{ color: "var(--text-secondary)" }}
-        title="New session (Ctrl+Shift+N)"
+      <div
+        className="flex flex-col flex-1 overflow-y-auto py-4 px-2"
       >
-        <Plus size={16} />
-        <span>New</span>
-      </button>
+        {/* New button */}
+        <button
+          data-tour="new-session-btn"
+          onClick={onNew}
+          className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-2 transition-colors hover-bg-surface"
+          style={{ color: "var(--text-secondary)" }}
+          title="New session (Ctrl+Shift+N)"
+        >
+          <Plus size={16} />
+          <span>New</span>
+        </button>
 
-      {/* Empty state / first-run card */}
-      {tree.length === 0 && sessions.length === 0 && (
-        <div className="px-2 py-4">
-          <div
-            className="rounded-lg p-4"
-            style={{
-              backgroundColor: "var(--bg-elevated)",
-              border: "1px solid var(--border-color)",
-            }}
-          >
-            <p className="text-xs font-semibold mb-3" style={{ color: "var(--text-primary)" }}>
-              Welcome to Claude Cockpit
-            </p>
-            <ul className="space-y-2 text-xs" style={{ color: "var(--text-secondary)" }}>
-              <li>• Run multiple Claude Code sessions side-by-side</li>
-              <li>• Organize by project folder with git status</li>
-              <li style={{ color: "var(--accent)" }}>
-                • <strong>Orchestrator Mode</strong> — one Claude coordinates others via MCP
-              </li>
-            </ul>
-            <button
-              onClick={onNew}
-              className="mt-4 w-full py-1.5 rounded-md text-xs font-medium transition-colors hover-bg-surface"
+        {/* Empty state / first-run card */}
+        {locationTree.length === 0 && sessions.length === 0 && (
+          <div className="px-2 py-4">
+            <div
+              className="rounded-lg p-4"
               style={{
+                backgroundColor: "var(--bg-elevated)",
                 border: "1px solid var(--border-color)",
-                color: "var(--accent)",
               }}
             >
-              Create your first session →
+              <p className="text-xs font-semibold mb-3" style={{ color: "var(--text-primary)" }}>
+                Welcome to Claude Cockpit
+              </p>
+              <ul className="space-y-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+                <li>• Run multiple Claude Code sessions side-by-side</li>
+                <li>• Organize by project folder with git status</li>
+                <li>• Up to 8 sessions, default layout of 4</li>
+              </ul>
+              <button
+                onClick={onNew}
+                className="mt-4 w-full py-1.5 rounded-md text-xs font-medium transition-colors hover-bg-surface"
+                style={{
+                  border: "1px solid var(--border-color)",
+                  color: "var(--accent)",
+                }}
+              >
+                Create your first session →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Location tree */}
+        {locationTree.length > 0 && (
+          <>
+            <p
+              className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
+              style={{ color: "var(--text-muted)" }}
+            >
+              Locations
+            </p>
+            <div className="flex flex-col">
+              {locationTree.map((node) => (
+                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Resources footer */}
+        <>
+          <div style={{ flex: 1 }} />
+          <div
+            className="border-t pt-3 mt-3"
+            style={{ borderColor: "var(--border-color)" }}
+          >
+            <button
+              onClick={() => {
+                const url = "https://registry.modelcontextprotocol.io/";
+                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
+                  .catch(() => window.open(url, "_blank"));
+              }}
+              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
+              style={{ color: "var(--text-secondary)" }}
+              title="Browse MCP server registry"
+            >
+              <Puzzle size={12} />
+              MCP Servers
             </button>
           </div>
-        </div>
-      )}
-
-      {/* Location tree */}
-      {tree.length > 0 && (
-        <>
-          <p
-            className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
-            style={{ color: "var(--text-muted)" }}
-          >
-            Locations
-          </p>
-          <div className="flex flex-col">
-            {tree.map((node) => (
-              <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
-            ))}
-          </div>
         </>
-      )}
 
-      {/* Resources footer */}
-      <>
-        <div style={{ flex: 1 }} />
-        <div
-          className="border-t pt-3 mt-3"
-          style={{ borderColor: "var(--border-color)" }}
-        >
-          <button
-            onClick={() => {
-              const url = "https://registry.modelcontextprotocol.io/";
-              fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
-                .catch(() => window.open(url, "_blank"));
-            }}
-            className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-            style={{ color: "var(--text-secondary)" }}
-            title="Browse MCP server registry"
-          >
-            <Puzzle size={12} />
-            MCP Servers
-          </button>
-        </div>
-      </>
-
-      {/* Context menu */}
-      {ctxMenu && (
-        <LocationContextMenu
-          x={ctxMenu.x}
-          y={ctxMenu.y}
-          path={ctxMenu.path}
-          isBypass={ctxMenu.isBypass}
-          onExpand={handleExpand}
-          onNewAt={onNewAt}
-          onRemove={onRemoveLocation}
-          onToggleBypass={onToggleLocationBypass}
-          onClose={() => setCtxMenu(null)}
-        />
-      )}
+        {/* Context menu */}
+        {ctxMenu && (
+          <LocationContextMenu
+            x={ctxMenu.x}
+            y={ctxMenu.y}
+            path={ctxMenu.path}
+            isBypass={ctxMenu.isBypass}
+            onExpand={handleExpand}
+            onNewAt={onNewAt}
+            onRemove={onRemoveLocation}
+            onToggleBypass={onToggleLocationBypass}
+            onClose={() => setCtxMenu(null)}
+          />
+        )}
+      </div>
     </aside>
   );
 }

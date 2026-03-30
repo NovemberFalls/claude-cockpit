@@ -77,7 +77,7 @@ export default function App() {
   const [zoomToast, setZoomToast] = useState(null);
   const zoomToastTimer = useRef(null);
   const [model, setModel] = useState("sonnet");
-  const [layout, setLayout] = useState(1);
+  const [layout, setLayout] = useState(4);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [backendError, setBackendError] = useState(false);
@@ -91,8 +91,6 @@ export default function App() {
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
-  const [orchestratorMode, setOrchestratorMode] = useState(false);
-  const [orchestratorId, setOrchestratorId] = useState(null); // local session id
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -101,6 +99,9 @@ export default function App() {
   });
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
+
+  // System stats (polled from /api/system every 5s)
+  const [systemStats, setSystemStats] = useState(null);
 
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
@@ -270,8 +271,6 @@ export default function App() {
         rows: 30,
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
-        ...(options.isOrchestrator ? { isOrchestrator: true } : {}),
-        ...(options.characterFile ? { systemPromptFile: options.characterFile } : {}),
       };
 
       const res = await fetch("/api/terminals", {
@@ -294,7 +293,6 @@ export default function App() {
           s.id === localId ? { ...s, terminalId: data.id, status: "running" } : s
         )
       );
-      if (options.isOrchestrator) setOrchestratorId(localId);
     } catch (err) {
       toast("Failed to create session", "error");
       setSessions((prev) =>
@@ -311,11 +309,7 @@ export default function App() {
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.map((id) => id === localId ? null : id));
-    if (localId === orchestratorId) {
-      setOrchestratorId(null);
-      setOrchestratorMode(false);
-    }
-  }, [sessions, orchestratorId]);
+  }, [sessions]);
 
   // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
@@ -409,6 +403,7 @@ export default function App() {
               activityState: match.activity_state,
               tokens: match.tokens || 0,
               cost: match.cost || 0,
+              context_percent: match.context_percent ?? null,
             });
           }
         }
@@ -457,15 +452,8 @@ export default function App() {
           termMap[t.id] = t;
         }
 
-        // Update existing sessions and discover new backend-only sessions
-        // (e.g. created by the orchestrator MCP create_session tool).
-
-        // Capture new session IDs discovered this poll cycle
-        const discoveredIds = [];
-
         setSessions((prev) => {
             let changed = false;
-            const knownTermIds = new Set(prev.map((s) => s.terminalId).filter(Boolean));
 
             const updated = prev.map((s) => {
               if (!s.terminalId || !termMap[s.terminalId]) return s;
@@ -473,40 +461,15 @@ export default function App() {
               const newState = t.activity_state;
               const newTokens = t.tokens || 0;
               const newCost = t.cost || 0;
-              if (s.activityState === newState && s.tokens === newTokens && s.cost === newCost) {
+              const newContextPercent = t.context_percent ?? null;
+              if (s.activityState === newState && s.tokens === newTokens && s.cost === newCost && s.context_percent === newContextPercent) {
                 return s;
               }
               changed = true;
-              return { ...s, activityState: newState, tokens: newTokens, cost: newCost };
+              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent };
             });
 
-            // Discover sessions that exist on the backend but not in the frontend.
-            // These are created externally (e.g. by the MCP create_session tool).
-            const newSessions = [];
-            for (const t of data.terminals) {
-              if (!t.alive) continue;
-              if (knownTermIds.has(t.id)) continue;
-              // Also skip sessions still in "starting" state (no terminalId yet)
-              if (prev.some((s) => !s.terminalId && s.status === "starting")) continue;
-              newSessions.push({
-                id: nextLocalId++,
-                name: t.name || `Worker ${t.id}`,
-                terminalId: t.id,
-                model: t.model || "sonnet",
-                status: "running",
-                workdir: t.working_dir || "",
-                bypassPermissions: t.bypass_permissions || false,
-                activityState: t.activity_state,
-                tokens: t.tokens || 0,
-                cost: t.cost || 0,
-              });
-            }
-
-            if (newSessions.length > 0) {
-              changed = true;
-              newSessions.forEach((s) => discoveredIds.push(s.id));
-            }
-            const result = changed ? [...updated, ...newSessions] : prev;
+            const result = changed ? updated : prev;
 
             for (const s of result) {
               if (!s.terminalId) continue;
@@ -516,25 +479,6 @@ export default function App() {
 
             return result;
           });
-
-        // Add MCP-spawned sessions to empty visible slots only
-        if (discoveredIds.length > 0) {
-          setActiveIds((prev) => {
-            const existingSet = new Set(prev.filter((id) => id != null));
-            const toAdd = discoveredIds.filter((id) => !existingSet.has(id));
-            if (toAdd.length === 0) return prev;
-            const next = [...prev];
-            let addIdx = 0;
-            for (let i = 0; i < layout && addIdx < toAdd.length; i++) {
-              if (i >= next.length) {
-                next.push(toAdd[addIdx++]);
-              } else if (next[i] == null) {
-                next[i] = toAdd[addIdx++];
-              }
-            }
-            return addIdx > 0 ? next : prev;
-          });
-        }
       } catch (_) {
         pollFailCount.current++;
         // After 3 consecutive failures (~9s), backend is dead — trigger recovery
@@ -582,6 +526,24 @@ export default function App() {
     };
     fetchGit();
     const id = setInterval(fetchGit, 30000);
+    return () => clearInterval(id);
+  }, [backendReady]);
+
+  // Poll /api/system every 5s for CPU/RAM/GPU stats
+  useEffect(() => {
+    if (!backendReady) return;
+    const fetchStats = async () => {
+      try {
+        const res = await fetch("/api/system");
+        if (!res.ok) return;
+        const data = await res.json();
+        setSystemStats(data);
+      } catch (_) {
+        // leave systemStats unchanged on error
+      }
+    };
+    fetchStats();
+    const id = setInterval(fetchStats, 5000);
     return () => clearInterval(id);
   }, [backendReady]);
 
@@ -871,7 +833,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Pane grid */}
+            {/* Pane grid — always mounted, terminals never unmount */}
             <main
               className="flex-1 min-w-0"
               style={{
@@ -955,8 +917,6 @@ export default function App() {
                 );
 
                 if (session) {
-                  const isOrch = orchestratorMode && session.id === orchestratorId;
-                  const isWorker = orchestratorMode && orchestratorId !== null && session.id !== orchestratorId;
                   return (
                     <div
                       key={session.id}
@@ -967,12 +927,7 @@ export default function App() {
                         position: "relative",
                         ...slotBorders,
                         opacity: dragSource === idx ? 0.4 : 1,
-                        transition: "opacity 0.2s ease, box-shadow 0.2s ease",
-                        boxShadow: isOrch
-                          ? "inset 0 0 0 2px var(--accent)"
-                          : isWorker
-                          ? "inset 0 0 0 2px var(--green, #4ade80)"
-                          : "none",
+                        transition: "opacity 0.2s ease",
                       }}
                       {...dndHandlers}
                     >
@@ -987,8 +942,6 @@ export default function App() {
                         onDragSourceChange={layout > 1 ? setDragSource : undefined}
                         terminalZoom={terminalZoom}
                         toast={toast}
-                        isOrchestrator={orchestratorMode && session.id === orchestratorId}
-                        isWorker={orchestratorMode && orchestratorId !== null && session.id !== orchestratorId}
                       />
                     </div>
                   );
@@ -1017,6 +970,8 @@ export default function App() {
                 );
               })}
             </main>
+
+
           </div>
 
           <StatusBar
@@ -1026,13 +981,11 @@ export default function App() {
             connected={sessions.some((s) => s.status === "running")}
             broadcastMode={broadcastMode}
             setBroadcastMode={setBroadcastMode}
-            orchestratorMode={orchestratorMode}
-            setOrchestratorMode={setOrchestratorMode}
-            hasOrchestrator={orchestratorId !== null}
             terminalZoom={terminalZoom}
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}
             onZoomReset={zoomReset}
+            systemStats={systemStats}
           />
 
           {/* Zoom toast */}
@@ -1065,11 +1018,9 @@ export default function App() {
           <NewSessionDialog
             recentLocations={recentLocations}
             savedLocations={savedLocations}
-            orchestratorMode={orchestratorMode}
-            hasOrchestrator={orchestratorId !== null}
-            onConfirm={(name, workdir, bypassPermissions, sessionOptions = {}) => {
+            onConfirm={(name, workdir, bypassPermissions) => {
               setShowNewDialog(false);
-              createSession(name, workdir, undefined, { bypassPermissions, ...sessionOptions });
+              createSession(name, workdir, undefined, { bypassPermissions });
             }}
             onCancel={() => setShowNewDialog(false)}
           />

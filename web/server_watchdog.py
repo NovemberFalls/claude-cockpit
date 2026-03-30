@@ -1,7 +1,7 @@
 """Watchdog service for Claude Cockpit.
 
 Starts the cockpit server as a subprocess and restarts it on crash.
-Usage: python watchdog.py [--port PORT] [--host HOST]
+Usage: python server_watchdog.py [--port PORT] [--host HOST]
 """
 
 from __future__ import annotations

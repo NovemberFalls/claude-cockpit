@@ -7,17 +7,17 @@ Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend
 ```
 claude-cockpit/
   web/
-    server.py          # FastAPI app (port 8420), auth, terminal CRUD, WS bridge
+    server.py          # FastAPI app (port 8420), terminal CRUD, WS bridge
     pty_manager.py     # ConPTY process manager (Windows-specific, winpty)
     logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty)
-    auth.py            # (removed — local-only, no auth needed)
-    tests/             # Python test suite (pytest + pytest-asyncio, 24 tests)
+    tests/             # Python test suite (pytest + pytest-asyncio)
     frontend/
       src/
         App.jsx        # Root component, all session state, session reconciliation
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog,
-                       # ErrorBoundary, Toast, ConfirmDialog, HexGrid, ApiKeysPanel
-        __tests__/     # Frontend tests (vitest, 70 tests)
+                       # ErrorBoundary, Toast, ConfirmDialog, HexGrid, ApiKeysPanel,
+                       # OnboardingModal, StateIcon
+        __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)
       src-tauri/       # Tauri desktop wrapper (Rust, NSIS installer)

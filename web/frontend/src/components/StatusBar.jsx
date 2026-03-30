@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus, Network } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus } from "lucide-react";
 import { version } from "../../package.json";
 
 const layoutOptions = [
@@ -23,13 +23,11 @@ export default function StatusBar({
   connected,
   broadcastMode,
   setBroadcastMode,
-  orchestratorMode,
-  setOrchestratorMode,
-  hasOrchestrator,
   terminalZoom = 13,
   onZoomIn,
   onZoomOut,
   onZoomReset,
+  systemStats,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
   const [showLegend, setShowLegend] = useState(false);
@@ -57,6 +55,14 @@ export default function StatusBar({
         <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
         {runningCount > 0 && (
           <span style={{ color: "var(--green)" }}>{runningCount} running</span>
+        )}
+        {systemStats && (
+          <span style={{ color: "var(--text-muted)", fontSize: "11px" }}>
+            CPU {systemStats.cpu_percent}% · {systemStats.ram_used_gb}/{systemStats.ram_total_gb}GB
+            {systemStats.gpu_percent !== null && systemStats.gpu_percent !== undefined && (
+              <> · GPU {systemStats.gpu_percent}%</>
+            )}
+          </span>
         )}
         <span style={{ opacity: 0.5 }}>v{version}</span>
       </div>
@@ -98,47 +104,6 @@ export default function StatusBar({
               Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
             </p>
 
-            <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "10px 0 8px" }} />
-            <div className="flex items-center gap-1.5 mb-2">
-              <Network size={11} style={{ color: "var(--accent)", flexShrink: 0 }} />
-              <p className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
-                Orchestrator Mode
-              </p>
-            </div>
-            <ol style={{ paddingLeft: "14px", margin: 0 }}>
-              {[
-                ["Enable", <>Click the <Network size={10} style={{ display: "inline", verticalAlign: "middle" }} /> icon in the status bar to turn on Orchestrator Mode.</>],
-                ["Create the Orchestrator", "Open a New Session and check \"Start as Orchestrator\". This session gets MCP tools injected automatically. Look for the ORCH badge."],
-                ["Open worker sessions", "Create more sessions normally (no special options). Each shows a #id badge — that's its terminal address."],
-                ["Give it a task in plain English", "In the orchestrator pane, describe what you want delegated. Claude uses its MCP tools automatically — you don't type commands."],
-              ].map(([step, desc], i) => (
-                <li key={i} className="text-[11px] mb-1.5" style={{ color: "var(--text-muted)", lineHeight: 1.4 }}>
-                  <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{step}: </span>
-                  {desc}
-                </li>
-              ))}
-            </ol>
-            <div style={{ marginTop: "8px", padding: "6px 8px", borderRadius: "4px", backgroundColor: "var(--bg-elevated)", border: "1px solid var(--border-color)" }}>
-              <p className="text-[10px] font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>MCP tools available to the orchestrator:</p>
-              {[
-                ["create_session", "spawn a new worker (name, workdir, model)"],
-                ["list_sessions", "see all running workers and their IDs"],
-                ["send_input", "type into a worker's terminal"],
-                ["get_output", "read a worker's terminal output"],
-                ["get_state", "check if a worker is idle / busy / waiting"],
-              ].map(([tool, desc]) => (
-                <div key={tool} className="flex gap-1.5 text-[10px]" style={{ lineHeight: 1.5 }}>
-                  <code style={{ color: "var(--accent)", flexShrink: 0 }}>{tool}</code>
-                  <span style={{ color: "var(--text-muted)" }}>— {desc}</span>
-                </div>
-              ))}
-            </div>
-            <p className="text-[10px] mt-2" style={{ color: "var(--text-muted)", opacity: 0.7 }}>
-              Example: "Create a worker in C:\Code\Personal and have it run the tests, then report back."
-            </p>
-            <p className="text-[10px] mt-0.5" style={{ color: "var(--text-muted)", opacity: 0.7 }}>
-              Tip: use Quad layout so you can watch orchestrator + 3 workers at once.
-            </p>
           </div>
         )}
 
@@ -164,24 +129,6 @@ export default function StatusBar({
           }}
         >
           <Radio size={14} />
-        </button>
-
-        {/* Orchestrator mode toggle */}
-        <button
-          data-tour="orchestrator-btn"
-          onClick={() => setOrchestratorMode?.(!orchestratorMode)}
-          title={orchestratorMode ? "Orchestrator mode active — click to disable" : "Enable Orchestrator mode"}
-          className={`p-1 rounded transition-colors ${!orchestratorMode ? "hover-color-secondary" : ""}`}
-          style={{ color: orchestratorMode ? "var(--accent)" : "var(--text-muted)", position: "relative" }}
-        >
-          <Network size={14} />
-          {hasOrchestrator && (
-            <span style={{
-              position: "absolute", top: 1, right: 1,
-              width: 5, height: 5, borderRadius: "50%",
-              backgroundColor: "var(--green)",
-            }} />
-          )}
         </button>
 
         {/* Zoom controls */}

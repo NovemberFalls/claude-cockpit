@@ -1,23 +1,20 @@
 # Claude Cockpit
 
-The only multi-session [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manager with built-in **agent orchestration**. Run one Claude session as a coordinator that delegates tasks to other Claude sessions — no other tool does this. Also works as a standalone multi-session terminal with tabs, themes, and a native desktop app.
+A clean, focused multi-session [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manager. Run up to 8 Claude Code terminals side by side in a single window, organized by project, with a native desktop app and 20 themes.
 
 ![Claude Cockpit](screenshot.svg)
 
 ---
 
-## Orchestrator Mode
+## A Note on Orchestrator Mode
 
-Claude Cockpit's defining feature: run one Claude Code session as an **orchestrator** that coordinates other Claude sessions as workers via MCP (Model Context Protocol).
+Previous versions of Claude Cockpit included an **Orchestrator Mode** — one Claude session controlling others via MCP, with a file-based workspace system for agent-to-agent communication.
 
-- The orchestrator session acts as a planner and dispatcher
-- Worker sessions receive delegated subtasks and report results back
-- Multiple agents collaborate in parallel within a single Cockpit window
-- No competing product (Wave Terminal, Warp, VS Code) has this capability
+**That feature has been removed in v1.1.0.**
 
-**How to use it:** Open the info legend (ⓘ icon in the top bar) and select **Orchestrator Mode** for step-by-step setup instructions.
+The orchestrator concept is architecturally sound, and the approach (MCP tools, file-based briefs, structured agent hierarchies) is the right direction. The problem is with the current implementation's design foundation — specifically, routing all inter-agent communication through a browser-facing FastAPI server adds latency, PTY buffer constraints, and tight coupling that make the system fragile at scale.
 
-This is the feature that makes Claude Cockpit unique. If you're running complex multi-agent Claude workflows, this is why you're here.
+I'm re-evaluating the orchestrator approach before committing to a new implementation. When it returns, it will be built on a stronger foundation. Until then, Cockpit does one thing and does it well: manage multiple Claude Code shells cleanly.
 
 ---
 
@@ -25,23 +22,21 @@ This is the feature that makes Claude Cockpit unique. If you're running complex 
 
 Claude Cockpit lets you:
 
-- **Orchestrate multiple Claude agents** — one session coordinates others via MCP (unique capability)
 - Run **up to 8 Claude Code sessions** simultaneously, view 1, 2, or 4 at a time in split panes
-- Organize sessions by **project folder** (workspace)
+- Organize sessions by **project folder** with live git branch and dirty status
 - Choose from **20 themes** (dark and light variants)
-- **Drag and drop files** into sessions
+- **Drag and drop files** into any session
 - Resume previous Claude sessions
 - Pick your Claude model (Sonnet, Opus, Haiku — including 1M context variants)
+- **Bypass permissions** per-session for fully autonomous operation
 
-It works by wrapping the `claude` CLI in a web-based terminal emulator (xterm.js), managed through a FastAPI backend that handles the PTY (pseudo-terminal) connections.
+It works by wrapping the `claude` CLI in a web-based terminal emulator (xterm.js), managed through a FastAPI backend that handles PTY (pseudo-terminal) connections.
 
 ---
 
 ## Prerequisites
 
-> **Platform:** The pre-built desktop app and browser exe target **Windows 10/11**. Running from source works on **Linux and macOS** — install dependencies and start `python server.py` as normal.
-
-Before you start, make sure you have these installed:
+> **Platform:** The pre-built desktop app targets **Windows 10/11**. Running from source works on **Linux and macOS**.
 
 | Requirement | How to check | How to install |
 |-------------|-------------|----------------|
@@ -49,7 +44,7 @@ Before you start, make sure you have these installed:
 | **Node.js 18+** | `node --version` | [nodejs.org](https://nodejs.org/) |
 | **Claude CLI** | `claude --version` | `npm install -g @anthropic-ai/claude-code` |
 
-Claude CLI must be logged in and working. Run `claude` in your terminal first to make sure it works on its own.
+Claude CLI must be logged in and working. Run `claude` in your terminal first to verify.
 
 ---
 
@@ -85,7 +80,7 @@ cd web
 python server.py
 ```
 
-This starts the API server on **http://localhost:8420**.
+Starts the API server on **http://localhost:8420**.
 
 ### 5. Start the frontend dev server (separate terminal)
 
@@ -94,11 +89,11 @@ cd web/frontend
 npm run dev
 ```
 
-This starts the Vite dev server on **http://localhost:5174**.
+Starts the Vite dev server on **http://localhost:5174**.
 
 ### 6. Open the app
 
-Go to **http://localhost:5174** in your browser. You should see the cockpit interface. Click the **+** button in the sidebar to create your first Claude session.
+Go to **http://localhost:5174**. Click **+** in the sidebar to create your first Claude session.
 
 ---
 
@@ -106,24 +101,22 @@ Go to **http://localhost:5174** in your browser. You should see the cockpit inte
 
 Pre-built executables are available on the [GitHub Releases](https://github.com/NovemberFalls/claude-cockpit/releases) page.
 
-### Desktop App
+### Desktop App (Windows)
 
 1. Download **`Claude Cockpit_x64-setup.exe`** from the latest release
-2. Follow the installer prompts (installs to your user folder, no admin needed)
-3. Launch "Claude Cockpit" from your Start Menu or Desktop shortcut
+2. Run the installer (no admin required — installs to your user folder)
+3. Launch "Claude Cockpit" from Start Menu or Desktop
 4. The app opens in its own native window — no browser needed
 
 The desktop app bundles the server internally and starts it automatically.
 
-> **Auto-Update:** The desktop app checks for updates on startup. When a new version is available, you'll see a notification with an **Install & Restart** button — one click to update.
+> **Auto-Update:** The desktop app checks for updates on startup. When a new version is available, you'll see an **Install & Restart** button.
 
 ---
 
 ## Building the Desktop App Yourself
 
-### Desktop App (Tauri)
-
-Requires [Rust](https://rustup.rs/) to be installed.
+Requires [Rust](https://rustup.rs/).
 
 ```bash
 # 1. Build the React frontend
@@ -142,7 +135,7 @@ cd frontend
 npx tauri build
 ```
 
-Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<version>_x64-setup.exe` (~42 MB)
+Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<version>_x64-setup.exe`
 
 ---
 
@@ -150,40 +143,39 @@ Output: `web/frontend/src-tauri/target/release/bundle/nsis/Claude Cockpit_<versi
 
 ### Creating a Session
 
-1. Click the **+** button in the sidebar (or press `Ctrl+Shift+N`)
-2. Pick a **working directory** — this is the project folder Claude will work in
+1. Click **+** in the sidebar (or `Ctrl+Shift+N`)
+2. Pick a **working directory** — the project folder Claude will work in
 3. Optionally give the session a name
-4. Choose your model (Sonnet, Opus, Haiku, or their 1M context variants)
-5. Click **Create**
+4. Toggle **Bypass permissions** if you want Claude to operate without approval prompts
+5. Click **Open Session**
 
 ### Layouts
 
-Use the layout buttons in the bottom status bar to switch between:
+Use the layout buttons in the status bar (bottom right):
 
-- **1x1** — single pane (full screen)
-- **2x1** — two panes side by side
-- **2x2** — four panes in a grid
+- **Single** — one pane, full screen
+- **Split** — two panes side by side
+- **Quad** — four panes in a 2×2 grid
 
-Or use keyboard shortcuts: `Ctrl+Shift+!` (1x1), `Ctrl+Shift+@` (2x1), `Ctrl+Shift+$` (2x2).
+Keyboard shortcuts: `Ctrl+Shift+!` (1), `Ctrl+Shift+@` (2), `Ctrl+Shift+$` (4).
 
-**Rearranging panes:** In multi-pane layouts, drag a pane's header bar to swap it with any other pane. You can also drag a session from the sidebar directly onto any pane to place it there.
+**Rearranging panes:** Drag a pane's header to swap it with another. Drag a session from the sidebar into any pane to place it there.
 
 ### Sidebar
 
-- **Active sessions** are grouped by their working directory
-- **Locations** shows your saved project directories for quick access
-- Click a session to focus it in a pane
-- Right-click for options (new session in same folder, remove location)
+- Sessions are grouped by working directory, with git branch/dirty indicator
+- Right-click any location for options: new session here, expand subfolders, toggle bypass, remove
+- Double-click a folder to open a new session in it instantly
 
 ### Themes
 
-Click the palette icon in the top bar to cycle through 20 themes:
+Click the palette icon in the top bar to pick from 20 themes:
 
-Tokyo Night, Nord, Dracula, Gruvbox, One Dark, Solarized, Synthwave, Monokai, Catppuccin, GitHub — each with dark and light variants.
+Tokyo Night, Nord, Dracula, Gruvbox, One Dark, Solarized, Synthwave, Monokai, Catppuccin, GitHub — each in dark and light variants.
 
 ### File Upload
 
-Drag and drop files directly onto a terminal pane. Supported file types include code files, images, PDFs, JSON, CSV, and more (up to 50 MB each).
+Drag and drop files directly onto any terminal pane. Supported: code files, images, PDFs, JSON, CSV, and more (up to 50 MB each).
 
 ### Keyboard Shortcuts
 
@@ -191,44 +183,25 @@ Drag and drop files directly onto a terminal pane. Supported file types include 
 |----------|--------|
 | `Ctrl+Shift+N` | New session |
 | `Ctrl+Shift+B` | Toggle sidebar |
-| `Ctrl+Shift+!` | 1x1 layout |
-| `Ctrl+Shift+@` | 2x1 layout |
-| `Ctrl+Shift+$` | 2x2 layout |
-
----
-
-## Configuration
-
-Copy `web/.env.example` to `web/.env` and edit as needed:
-
-```env
-# Server config
-HOST=0.0.0.0
-PORT=8420
-
-# Maximum concurrent sessions (default: 8)
-MAX_SESSIONS=8
-
-# Idle session timeout in seconds (default: 0 = disabled)
-IDLE_TIMEOUT=0
-```
+| `Ctrl+Shift+Enter` | Broadcast mode (send to all sessions) |
+| `Ctrl+Shift+!` | Single pane layout |
+| `Ctrl+Shift+@` | Split layout |
+| `Ctrl+Shift+$` | Quad layout |
+| `Ctrl+1–4` | Focus pane 1–4 |
+| `Ctrl+=` / `Ctrl+-` | Zoom in / out |
 
 ---
 
 ## MCP Servers
 
-Claude sessions running inside Cockpit automatically use any [MCP servers](https://modelcontextprotocol.io/) configured in your Claude Code setup. MCP servers extend what Claude can do — browser automation, database access, file management, and more.
-
-> **Cockpit uses MCP for its Orchestrator Mode.** The orchestrator session connects to worker sessions via MCP, enabling true agent-to-agent coordination. See the [Orchestrator Mode](#orchestrator-mode) section above for details.
+Claude sessions inside Cockpit automatically use any [MCP servers](https://modelcontextprotocol.io/) configured in your Claude Code setup (`~/.claude/settings.json`). No additional setup needed inside the app.
 
 ### Finding MCP Servers
 
-- **[Official MCP Registry](https://registry.modelcontextprotocol.io/)** — The canonical directory of MCP servers
-- **[MCP Server Repository](https://github.com/modelcontextprotocol/servers)** — Reference implementations and community servers
+- **[Official MCP Registry](https://registry.modelcontextprotocol.io/)** — the canonical directory
+- **[MCP Server Repository](https://github.com/modelcontextprotocol/servers)** — reference implementations
 
-### Configuring MCP Servers
-
-MCP servers are configured in your Claude Code settings (`~/.claude/settings.json`). Example:
+### Example Configuration
 
 ```json
 {
@@ -236,16 +209,33 @@ MCP servers are configured in your Claude Code settings (`~/.claude/settings.jso
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@anthropic-ai/mcp-filesystem"]
-    },
-    "browser": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-browser"]
     }
   }
 }
 ```
 
-Once configured, MCP tools are available in every Claude session — including those launched from Cockpit. No additional setup needed inside the app.
+---
+
+## Configuration
+
+Copy `web/.env.example` to `web/.env`:
+
+```env
+HOST=0.0.0.0
+PORT=8420
+MAX_SESSIONS=8
+IDLE_TIMEOUT=0
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOST` | `0.0.0.0` | Bind address |
+| `PORT` | `8420` | Server port |
+| `MAX_SESSIONS` | `8` | Maximum concurrent sessions |
+| `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |
+| `NO_BROWSER` | `0` | Set to `1` to suppress auto-opening browser |
 
 ---
 
@@ -257,113 +247,55 @@ claude-cockpit/
 │   ├── server.py           # FastAPI backend (REST + WebSocket)
 │   ├── pty_manager.py      # PTY session manager
 │   ├── pty_backend.py      # PTY backend abstraction + factory
-│   ├── conpty.py           # Windows ConPTY ctypes wrapper (PyInstaller mode)
-│   ├── unix_pty.py         # Linux/macOS PTY backend (ptyprocess)
-│   ├── logging_config.py   # Structured logging setup
-│   ├── cockpit_mcp.py      # MCP orchestrator tools
-│   ├── tests/              # Python test suite (62 tests)
+│   ├── conpty.py           # Windows ConPTY ctypes wrapper
+│   ├── unix_pty.py         # Linux/macOS PTY backend
+│   ├── logging_config.py   # Structured logging
+│   ├── tests/              # Python test suite
 │   ├── requirements.txt    # Python dependencies
 │   ├── cockpit-server.spec # PyInstaller build config
 │   └── frontend/
 │       ├── src/
 │       │   ├── App.jsx              # Main app component
 │       │   ├── components/          # UI components
-│       │   ├── __tests__/           # Frontend tests (70 tests)
+│       │   ├── __tests__/           # Frontend tests
 │       │   ├── themes/themeData.js  # 20 theme definitions
 │       │   └── hooks/useTheme.jsx   # Theme provider
 │       ├── src-tauri/               # Tauri desktop wrapper
-│       ├── vitest.config.js
 │       └── package.json
 ├── .github/workflows/       # CI/CD (GitHub Actions)
-├── pyproject.toml
 ├── CONTRIBUTING.md
 └── README.md
 ```
 
 ---
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HOST` | `0.0.0.0` | Bind address |
-| `PORT` | `8420` | Server port |
-| `MAX_SESSIONS` | `8` | Maximum concurrent terminal sessions |
-| `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |
-| `NO_BROWSER` | `0` | Set to `1` to suppress auto-opening browser |
-
----
-
 ## Testing
 
-### Backend Tests (Python)
+### Backend
 
 ```bash
-cd web
-python -m pytest tests/ -v
+cd web && python -m pytest tests/ -v
 ```
 
-Runs **62 tests** covering:
-
-| Test File | What It Tests |
-|-----------|--------------|
-| `test_server.py` | Health endpoint, browse API, auth, git status |
-| `test_pty_manager.py` | Session lifecycle, max limits, kill/shutdown |
-| `test_session_state_tracker.py` | State transitions, idle detection |
-| `test_pty_backend.py` | Backend factory routing, ABC compliance, non-blocking read contract |
-
-### Frontend Tests (Vitest)
+### Frontend
 
 ```bash
-cd web/frontend
-npm test
+cd web/frontend && npm test
 ```
 
-Runs **70 tests** covering:
-
-| Test File | What It Tests |
-|-----------|--------------|
-| `themeData.test.js` | All 20 themes have required properties, getTheme/listThemes/applyThemeToDOM |
-
-### CI/CD
-
-Tests run automatically on push and PR via GitHub Actions (`.github/workflows/ci.yml`).
+Tests run automatically on push and PR via GitHub Actions.
 
 ---
 
 ## Troubleshooting
 
-### "claude CLI not found"
+**"claude CLI not found"** — Install it: `npm install -g @anthropic-ai/claude-code`, then verify with `claude --version`.
 
-The app needs the `claude` CLI installed and in your system PATH.
+**Port 8420 already in use** — `PORT=9000 python server.py`
 
-```bash
-npm install -g @anthropic-ai/claude-code
-claude --version   # should print a version number
-```
+**"[Session ended]" immediately** — Claude CLI isn't authenticated. Run `claude` manually in that directory first.
 
-### Port 8420 already in use
-
-Something else is using port 8420. Either stop it, or change the port:
-
-```bash
-PORT=9000 python server.py
-```
-
-### Terminal shows "[Session ended]"
-
-The Claude process exited. This can happen if:
-- Claude CLI isn't authenticated (run `claude` manually first)
-- The working directory doesn't exist
-- Claude crashed (check the terminal output for errors)
-
-### WebSocket errors in the console
-
-Transient `ECONNABORTED` or `ECONNRESET` errors in the Vite dev server console are normal during page reloads. They don't affect functionality.
-
-### The exe won't start / antivirus blocks it
-
-PyInstaller executables are sometimes flagged by antivirus software. You may need to add an exception for `claude-cockpit.exe` or `Claude Cockpit` in your antivirus settings.
+**Antivirus blocks the exe** — PyInstaller executables are sometimes flagged. Add an exception for `claude-cockpit.exe` or `Claude Cockpit`.
 
 ---
 
@@ -371,7 +303,7 @@ PyInstaller executables are sometimes flagged by antivirus software. You may nee
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Python, FastAPI, Uvicorn, pywinpty (Windows) / ptyprocess (Linux/macOS) |
+| Backend | Python 3.11+, FastAPI, Uvicorn, pywinpty / ptyprocess |
 | Frontend | React 19, Vite 8, xterm.js, Tailwind CSS |
 | Desktop | Tauri 2 (Rust + WebView2) |
 | Packaging | PyInstaller (server exe), NSIS (installer) |
@@ -380,13 +312,13 @@ PyInstaller executables are sometimes flagged by antivirus software. You may nee
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## Privacy
 
-Claude Cockpit runs entirely on your machine. No data is collected, transmitted, or stored on external servers. Your sessions, code, and conversations never leave your computer.
+Claude Cockpit runs entirely on your machine. No data is collected, transmitted, or stored externally. Your sessions, code, and conversations never leave your computer.
 
 ---
 

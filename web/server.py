@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -60,48 +59,7 @@ else:
 
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
-# Temp directory for MCP config files (one per orchestrator session)
-_MCP_CONFIG_DIR = Path(tempfile.mkdtemp(prefix="cockpit_mcp_"))
 
-# ── MCP script bootstrap ──────────────────────────────────────────────────────
-# Write cockpit_mcp.py to the config dir ONCE at startup so all orchestrator
-# sessions share a single stable, non-volatile path.  This is resilient to:
-#   • PyInstaller bundles where _MEIPASS is volatile (old builds without spec fix)
-#   • Dev mode where the source tree may be at any path
-#   • Future builds — the path is always _MCP_CONFIG_DIR/cockpit_mcp.py
-_MCP_SCRIPT_PATH: Path | None = None
-
-def _bootstrap_mcp_script() -> None:
-    """Locate cockpit_mcp.py and write a stable copy to _MCP_CONFIG_DIR.
-
-    Call once at startup.  Sets _MCP_SCRIPT_PATH or logs a clear error.
-    """
-    global _MCP_SCRIPT_PATH
-    candidates = [
-        Path(__file__).parent / "cockpit_mcp.py",          # dev or bundled (spec-fixed)
-        Path(sys.executable).parent / "cockpit_mcp.py",    # beside exe fallback
-    ]
-    src: Path | None = None
-    for c in candidates:
-        if c.exists():
-            src = c
-            break
-
-    dest = _MCP_CONFIG_DIR / "cockpit_mcp.py"
-    if src is not None:
-        shutil.copy2(src, dest)
-        logger.info("MCP script bootstrapped from %s → %s", src, dest)
-    else:
-        # Source not found (old bundle without spec fix) — log loudly so it's debuggable.
-        logger.error(
-            "cockpit_mcp.py not found in any candidate location %s. "
-            "Orchestrator mode will be unavailable until the app is rebuilt.",
-            [str(c) for c in candidates],
-        )
-        return  # _MCP_SCRIPT_PATH stays None
-    _MCP_SCRIPT_PATH = dest
-
-_bootstrap_mcp_script()
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
@@ -307,12 +265,12 @@ async def git_status(path: str):
         return JSONResponse({"git": False})
 
 
-# ── Terminal Output Buffer (for MCP orchestrator) ─────────
+# ── Terminal Output Buffer ────────────────────────────────
 
 
 @app.get("/api/terminals/{terminal_id}/output")
 async def get_terminal_output(terminal_id: str, since: int = 0):
-    """Return ANSI-stripped terminal output (used by MCP orchestrator).
+    """Return ANSI-stripped terminal output.
 
     Args:
         since: Return only lines at index >= since (0 = all lines).
@@ -330,55 +288,41 @@ async def get_terminal_output(terminal_id: str, since: int = 0):
         "lines": sliced,
         "total_lines": total,
         "activity_state": activity_state,
+        "context_percent": session.tracker.context_percent,
     })
 
 
-def _resolve_python() -> str:
-    """Return a path to the Python interpreter for launching MCP subprocesses.
+# ── Background PTY Reader ─────────────────────────────────
 
-    Inside a PyInstaller bundle sys.executable is the frozen exe, which cannot
-    run .py scripts.  Fall back to the first 'python' on PATH.
+
+async def _session_reader(terminal_id: str):
+    """Drain PTY output for a session — feeds state tracker and queues data for WebSocket consumers.
+
+    Runs as a background task for every session. Without this, sessions with no
+    active WebSocket connection (e.g. MCP-spawned workers) have their PTY output
+    buffer fill up, stalling or killing the underlying Claude process.
     """
-    if not getattr(sys, "_MEIPASS", None):
-        return sys.executable  # Dev mode — interpreter is correct
-    found = shutil.which("python")
-    if found:
-        return found
-    raise FileNotFoundError(
-        "Cannot find a Python interpreter on PATH.  "
-        "Orchestrator mode requires Python installed alongside the desktop app."
-    )
-
-
-def _write_mcp_config(terminal_id: str) -> str:
-    """Write a temp MCP config JSON for an orchestrator session.
-
-    Uses the stable cockpit_mcp.py copy written at startup by _bootstrap_mcp_script().
-    Raises RuntimeError if bootstrap failed (e.g. old bundle without spec fix).
-    Returns the absolute path to the written config file.
-    """
-    if _MCP_SCRIPT_PATH is None:
-        raise RuntimeError(
-            "cockpit_mcp.py could not be located at startup. "
-            "Rebuild the desktop app to restore Orchestrator mode."
-        )
-    port = int(os.getenv("PORT", "8420"))
-    config = {
-        "mcpServers": {
-            "cockpit": {
-                "command": _resolve_python(),
-                "args": [str(_MCP_SCRIPT_PATH)],
-                "env": {
-                    "COCKPIT_API_URL": f"http://localhost:{port}",
-                    "COCKPIT_ORCHESTRATOR_ID": terminal_id,
-                },
-            }
-        }
-    }
-    config_path = _MCP_CONFIG_DIR / f"mcp_{terminal_id}.json"
-    config_path.write_text(json.dumps(config, indent=2))
-    logger.info("Wrote MCP config for orchestrator %s → %s", terminal_id, config_path)
-    return str(config_path)
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return
+    while session.alive:
+        data = await pty_manager.read_pty(terminal_id)
+        if data:
+            session.tracker.feed(data)
+            if "\ufffd" in data:
+                logger.debug(
+                    "PTY replacement chars in terminal %s: %r",
+                    terminal_id,
+                    data[max(0, data.index("\ufffd") - 20): data.index("\ufffd") + 20],
+                )
+            try:
+                session.output_queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass  # WebSocket consumer is slow — data is already in ring buffer
+        else:
+            if not session.alive:
+                break
+            await asyncio.sleep(0.01)
 
 
 # ── Terminal Input ────────────────────────────────────────
@@ -409,17 +353,10 @@ async def create_terminal(request: Request):
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
-    is_orchestrator = body.get("isOrchestrator", False)
-    system_prompt_file = body.get("systemPromptFile", "")
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
-    # For orchestrator sessions, pre-generate the terminal ID so the MCP config
-    # can reference it before the process spawns.
-    terminal_id_override = uuid.uuid4().hex[:8] if is_orchestrator else ""
-
     try:
-        mcp_config_path = _write_mcp_config(terminal_id_override) if is_orchestrator else ""
         session = pty_manager.create_terminal(
             name=name,
             workdir=workdir,
@@ -429,13 +366,8 @@ async def create_terminal(request: Request):
             bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
-            mcp_config_path=mcp_config_path,
-            terminal_id_override=terminal_id_override,
-            system_prompt_file=system_prompt_file,
         )
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
-        # asyncio.sleep keeps the event loop responsive (replaces the blocking
-        # time.sleep(1.5) that was previously inside pty_manager.create_terminal).
         await asyncio.sleep(1.5)
         if not session.pty.isalive():
             exit_code = getattr(session.pty, "exitstatus", "?")
@@ -447,12 +379,12 @@ async def create_terminal(request: Request):
                 status_code=500,
             )
         logger.info("Session %s alive after spawn", session.id)
+        asyncio.create_task(_session_reader(session.id))
         return JSONResponse({
             "id": session.id,
             "name": session.name,
             "model": session.model,
             "created_at": session.created_at,
-            "is_orchestrator": is_orchestrator,
         })
     except FileNotFoundError:
         return JSONResponse(
@@ -478,6 +410,55 @@ async def delete_terminal(terminal_id: str):
     if pty_manager.kill_terminal(terminal_id):
         return JSONResponse({"status": "killed", "id": terminal_id})
     return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+
+@app.get("/api/system")
+async def system_stats():
+    """Return system resource usage: CPU, RAM, and GPU (if available).
+
+    GPU utilization is fetched via nvidia-smi. If nvidia-smi is unavailable
+    or times out, gpu_percent is null — this never causes the endpoint to fail.
+    All float values are rounded to 1 decimal place.
+    """
+    import psutil
+
+    cpu = round(psutil.cpu_percent(interval=0.1), 1)
+
+    vm = psutil.virtual_memory()
+    ram_percent = round(vm.percent, 1)
+    ram_used_gb = round(vm.used / (1024 ** 3), 1)
+    ram_total_gb = round(vm.total / (1024 ** 3), 1)
+
+    gpu_percent: float | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            first_line = stdout.decode("utf-8", errors="replace").strip().splitlines()[0]
+            gpu_percent = round(float(first_line), 1)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        except (ValueError, IndexError):
+            pass
+    except (FileNotFoundError, OSError):
+        pass
+    except Exception:
+        logger.debug("GPU query failed", exc_info=True)
+
+    return JSONResponse({
+        "cpu_percent": cpu,
+        "ram_percent": ram_percent,
+        "ram_used_gb": ram_used_gb,
+        "ram_total_gb": ram_total_gb,
+        "gpu_percent": gpu_percent,
+    })
 
 
 @app.post("/api/terminals/{terminal_id}/resize")
@@ -507,28 +488,28 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     last_pong = _time.time()
 
     async def pty_to_ws():
-        """Read from PTY and forward to WebSocket."""
+        """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY)."""
         while session.alive:
             try:
-                data = await pty_manager.read_pty(terminal_id)
-                if data:
-                    session.tracker.feed(data)
-                    # Diagnostic: log any replacement characters (garbled output investigation)
-                    if "\ufffd" in data:
-                        logger.debug(
-                            "PTY replacement chars in terminal %s: %r",
-                            terminal_id,
-                            data[max(0, data.index("\ufffd") - 20) : data.index("\ufffd") + 20],
-                        )
-                    await websocket.send_text(data)
-                    await asyncio.sleep(0)
-                else:
-                    await asyncio.sleep(0.01)
+                try:
+                    data = await asyncio.wait_for(session.output_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                await websocket.send_text(data)
+                await asyncio.sleep(0)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
                 break
             except Exception as e:
                 logger.debug("PTY->WS forward error: %s", e)
                 await asyncio.sleep(0.05)
+
+        # Drain any buffered data before the "Session ended" banner
+        while not session.output_queue.empty():
+            try:
+                data = session.output_queue.get_nowait()
+                await websocket.send_text(data)
+            except Exception:
+                break
 
         try:
             await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
@@ -714,11 +695,11 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             pass
+
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-    shutil.rmtree(_MCP_CONFIG_DIR, ignore_errors=True)
     PID_FILE.unlink(missing_ok=True)
     logger.info("Shutdown complete")
 
