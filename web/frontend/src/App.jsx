@@ -8,6 +8,7 @@ import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
+import WorkspacePanel from "./components/WorkspacePanel";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -101,6 +102,11 @@ export default function App() {
   });
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
+
+  // Workspace panel
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
+  const [workspaces, setWorkspaces] = useState([]);
+  const workspaceWsRef = useRef(null);
 
   // Auto-update check (Tauri desktop only)
   useEffect(() => {
@@ -585,6 +591,50 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
+  // Workspace panel WebSocket — connects when panel opens, auto-reconnects
+  useEffect(() => {
+    if (!workspacePanelOpen || !backendReady) return;
+
+    let cancelled = false;
+    let reconnectTimer = null;
+
+    function connect() {
+      if (cancelled) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${location.host}/ws/workspaces`);
+      workspaceWsRef.current = ws;
+
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === "tree") {
+            setWorkspaces(msg.workspaces || []);
+          } else if (msg.type === "file_changed") {
+            // Re-fetch full tree on any file change
+            ws.send(JSON.stringify({ type: "refresh" }));
+          }
+        } catch (_) {}
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+    return () => {
+      cancelled = true;
+      clearTimeout(reconnectTimer);
+      if (workspaceWsRef.current) {
+        workspaceWsRef.current.close(1000);
+        workspaceWsRef.current = null;
+      }
+    };
+  }, [workspacePanelOpen, backendReady]);
+
   // Sessions currently occupying visible slots (used for broadcast, etc.)
   const visibleSessions = useMemo(() => {
     return activeIds
@@ -871,7 +921,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Pane grid */}
+            {/* Pane grid + optional file-viewer wrapper */}
             <main
               className="flex-1 min-w-0"
               style={{
@@ -1017,6 +1067,14 @@ export default function App() {
                 );
               })}
             </main>
+
+            {/* Workspace panel — right sidebar */}
+            {workspacePanelOpen && (
+              <WorkspacePanel
+                workspaces={workspaces}
+                onClose={() => setWorkspacePanelOpen(false)}
+              />
+            )}
           </div>
 
           <StatusBar
@@ -1033,6 +1091,8 @@ export default function App() {
             onZoomIn={zoomIn}
             onZoomOut={zoomOut}
             onZoomReset={zoomReset}
+            workspacePanelOpen={workspacePanelOpen}
+            onToggleWorkspacePanel={() => setWorkspacePanelOpen((v) => !v)}
           />
 
           {/* Zoom toast */}
@@ -1069,7 +1129,7 @@ export default function App() {
             hasOrchestrator={orchestratorId !== null}
             onConfirm={(name, workdir, bypassPermissions, sessionOptions = {}) => {
               setShowNewDialog(false);
-              createSession(name, workdir, undefined, { bypassPermissions, ...sessionOptions });
+              createSession(name, workdir, sessionOptions.modelOverride, { bypassPermissions, ...sessionOptions });
             }}
             onCancel={() => setShowNewDialog(false)}
           />

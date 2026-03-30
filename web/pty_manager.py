@@ -124,6 +124,11 @@ class TerminalSession:
     rows: int = 30
     alive: bool = True
     tracker: SessionStateTracker = field(default_factory=SessionStateTracker)
+    output_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=200))
+    # Workspace fields — populated when the session has a workspace folder
+    compound_id: str = ""       # full ancestry chain, e.g. "abc12345+def67890"
+    workspace_path: str = ""    # absolute path to the workspace folder
+    workspace_events: list = field(default_factory=list)  # pending [WORKSPACE_UPDATE] notifications
 
 
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
@@ -332,6 +337,7 @@ class PtyManager:
         mcp_config_path: str = "",
         terminal_id_override: str = "",
         system_prompt_file: str = "",
+        compound_id: str = "",
     ) -> TerminalSession:
         """Spawn a new interactive Claude CLI session in a PTY."""
         if len(self.sessions) >= MAX_SESSIONS:
@@ -476,6 +482,7 @@ class PtyManager:
             bypass_permissions=bypass_permissions,
             cols=cols,
             rows=rows,
+            compound_id=compound_id,
         )
         self.sessions[terminal_id] = session
 

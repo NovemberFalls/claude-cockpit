@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus, Network } from "lucide-react";
+import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus, Network, FolderTree } from "lucide-react";
 import { version } from "../../package.json";
 
 const layoutOptions = [
@@ -30,6 +30,8 @@ export default function StatusBar({
   onZoomIn,
   onZoomOut,
   onZoomReset,
+  workspacePanelOpen,
+  onToggleWorkspacePanel,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
   const [showLegend, setShowLegend] = useState(false);
@@ -164,6 +166,16 @@ export default function StatusBar({
           }}
         >
           <Radio size={14} />
+        </button>
+
+        {/* Workspace panel toggle */}
+        <button
+          onClick={onToggleWorkspacePanel}
+          title={workspacePanelOpen ? "Hide workspace panel" : "Show workspace panel"}
+          className={`p-1 rounded transition-colors ${!workspacePanelOpen ? "hover-color-secondary" : ""}`}
+          style={{ color: workspacePanelOpen ? "var(--accent)" : "var(--text-muted)" }}
+        >
+          <FolderTree size={14} />
         </button>
 
         {/* Orchestrator mode toggle */}

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time as _time
 import uuid
 import webbrowser
@@ -28,6 +29,8 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 from pty_manager import pty_manager
+import workspace_manager
+from workspace_watcher import WorkspaceWatcher
 
 START_TIME = _time.time()
 
@@ -102,6 +105,54 @@ def _bootstrap_mcp_script() -> None:
     _MCP_SCRIPT_PATH = dest
 
 _bootstrap_mcp_script()
+
+# ── Workspace watcher & WebSocket broadcaster ────────────────────────────────
+# Lock protecting workspace_events lists on TerminalSession objects.
+# Shared between the watcher thread (writer) and the REST handler (reader/drainer).
+_workspace_events_lock = threading.Lock()
+
+# Connected workspace UI WebSocket clients (set of WebSocket objects)
+_workspace_ws_clients: set = set()
+_workspace_ws_lock = threading.Lock()
+
+# Event loop reference — set at startup so the watcher thread can schedule
+# coroutines onto the main asyncio loop via run_coroutine_threadsafe.
+_app_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _broadcast_workspace_event(compound_id: str, filename: str) -> None:
+    """Broadcast a workspace file-change event to all connected UI clients."""
+    if not _workspace_ws_clients:
+        return
+    msg = json.dumps({"type": "file_changed", "compound_id": compound_id, "filename": filename})
+    dead = set()
+    with _workspace_ws_lock:
+        clients = set(_workspace_ws_clients)
+    for ws in clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.add(ws)
+    if dead:
+        with _workspace_ws_lock:
+            _workspace_ws_clients.difference_update(dead)
+
+
+def _on_workspace_file_event(compound_id: str, filename: str) -> None:
+    """Called from watcher thread — schedules broadcast on the main event loop."""
+    if _app_event_loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_workspace_event(compound_id, filename),
+            _app_event_loop,
+        )
+
+
+_workspace_watcher = WorkspaceWatcher(
+    pty_manager.sessions,
+    _workspace_events_lock,
+    on_event=_on_workspace_file_event,
+)
+
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOAD_DIR_SIZE = 200 * 1024 * 1024  # 200MB total
 _upload_dir_size = 0  # Running total of bytes in UPLOAD_DIR
@@ -350,7 +401,7 @@ def _resolve_python() -> str:
     )
 
 
-def _write_mcp_config(terminal_id: str) -> str:
+def _write_mcp_config(terminal_id: str, compound_id: str = "") -> str:
     """Write a temp MCP config JSON for an orchestrator session.
 
     Uses the stable cockpit_mcp.py copy written at startup by _bootstrap_mcp_script().
@@ -363,6 +414,9 @@ def _write_mcp_config(terminal_id: str) -> str:
             "Rebuild the desktop app to restore Orchestrator mode."
         )
     port = int(os.getenv("PORT", "8420"))
+    # compound_id encodes the full ancestry chain for workspace scoping.
+    # Falls back to terminal_id for top-level orchestrators with no parent.
+    effective_compound_id = compound_id or terminal_id
     config = {
         "mcpServers": {
             "cockpit": {
@@ -371,14 +425,51 @@ def _write_mcp_config(terminal_id: str) -> str:
                 "env": {
                     "COCKPIT_API_URL": f"http://localhost:{port}",
                     "COCKPIT_ORCHESTRATOR_ID": terminal_id,
+                    "COCKPIT_COMPOUND_ID": effective_compound_id,
                 },
             }
         }
     }
     config_path = _MCP_CONFIG_DIR / f"mcp_{terminal_id}.json"
     config_path.write_text(json.dumps(config, indent=2))
-    logger.info("Wrote MCP config for orchestrator %s → %s", terminal_id, config_path)
+    logger.info(
+        "Wrote MCP config for orchestrator %s (compound: %s) → %s",
+        terminal_id, effective_compound_id, config_path,
+    )
     return str(config_path)
+
+
+# ── Background PTY Reader ─────────────────────────────────
+
+
+async def _session_reader(terminal_id: str):
+    """Drain PTY output for a session — feeds state tracker and queues data for WebSocket consumers.
+
+    Runs as a background task for every session. Without this, sessions with no
+    active WebSocket connection (e.g. MCP-spawned workers) have their PTY output
+    buffer fill up, stalling or killing the underlying Claude process.
+    """
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return
+    while session.alive:
+        data = await pty_manager.read_pty(terminal_id)
+        if data:
+            session.tracker.feed(data)
+            if "\ufffd" in data:
+                logger.debug(
+                    "PTY replacement chars in terminal %s: %r",
+                    terminal_id,
+                    data[max(0, data.index("\ufffd") - 20): data.index("\ufffd") + 20],
+                )
+            try:
+                session.output_queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass  # WebSocket consumer is slow — data is already in ring buffer
+        else:
+            if not session.alive:
+                break
+            await asyncio.sleep(0.01)
 
 
 # ── Terminal Input ────────────────────────────────────────
@@ -413,13 +504,28 @@ async def create_terminal(request: Request):
     system_prompt_file = body.get("systemPromptFile", "")
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
+    # Compound ID of the parent session (set by MCP create_session tool).
+    # When present, this session gets a workspace folder as a child of that tree.
+    parent_compound_id = body.get("parentCompoundId", "")
 
-    # For orchestrator sessions, pre-generate the terminal ID so the MCP config
-    # can reference it before the process spawns.
-    terminal_id_override = uuid.uuid4().hex[:8] if is_orchestrator else ""
+    # Pre-generate terminal ID whenever we need to reference it before spawn
+    # (orchestrators need it for MCP config; sessions with a parent need it for workspace).
+    needs_pregen = is_orchestrator or bool(parent_compound_id)
+    terminal_id_override = uuid.uuid4().hex[:8] if needs_pregen else ""
+
+    # Compute this session's compound ID.
+    # Top-level orchestrator: compound_id = terminal_id
+    # Child session: compound_id = parent_compound_id + "+" + terminal_id
+    compound_id = ""
+    if needs_pregen:
+        own_id = terminal_id_override
+        compound_id = f"{parent_compound_id}+{own_id}" if parent_compound_id else own_id
 
     try:
-        mcp_config_path = _write_mcp_config(terminal_id_override) if is_orchestrator else ""
+        mcp_config_path = (
+            _write_mcp_config(terminal_id_override, compound_id=compound_id)
+            if is_orchestrator else ""
+        )
         session = pty_manager.create_terminal(
             name=name,
             workdir=workdir,
@@ -432,7 +538,26 @@ async def create_terminal(request: Request):
             mcp_config_path=mcp_config_path,
             terminal_id_override=terminal_id_override,
             system_prompt_file=system_prompt_file,
+            compound_id=compound_id,
         )
+
+        # Create workspace folder for agent sessions (orchestrators or MCP-spawned children)
+        if compound_id:
+            try:
+                ws_path = workspace_manager.create_workspace(
+                    compound_id=compound_id,
+                    agent_name=name or "Agent",
+                    agent_role="Orchestrator" if is_orchestrator else "Specialist",
+                    model=model,
+                    character_file=system_prompt_file,
+                    parent_session_id=parent_compound_id.split("+")[-1] if parent_compound_id else "",
+                    workdir=workdir or str(Path.cwd()),
+                    pid=0,  # PID not available until after spawn; updated below
+                )
+                session.workspace_path = str(ws_path)
+                logger.info("Workspace created for session %s at %s", session.id, ws_path)
+            except Exception:
+                logger.warning("Failed to create workspace for session %s", session.id, exc_info=True)
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
         # asyncio.sleep keeps the event loop responsive (replaces the blocking
         # time.sleep(1.5) that was previously inside pty_manager.create_terminal).
@@ -447,12 +572,17 @@ async def create_terminal(request: Request):
                 status_code=500,
             )
         logger.info("Session %s alive after spawn", session.id)
+        # Start background PTY reader — keeps output buffer drained for sessions
+        # with no active WebSocket connection (e.g. MCP-spawned worker sessions).
+        asyncio.create_task(_session_reader(session.id))
         return JSONResponse({
             "id": session.id,
             "name": session.name,
             "model": session.model,
             "created_at": session.created_at,
             "is_orchestrator": is_orchestrator,
+            "compound_id": compound_id,
+            "workspace_path": session.workspace_path,
         })
     except FileNotFoundError:
         return JSONResponse(
@@ -475,9 +605,129 @@ async def list_terminals():
 @app.delete("/api/terminals/{terminal_id}")
 async def delete_terminal(terminal_id: str):
     """Kill a terminal session."""
+    session = pty_manager.sessions.get(terminal_id)
+    compound_id = session.compound_id if session else ""
     if pty_manager.kill_terminal(terminal_id):
+        if compound_id:
+            workspace_manager.update_status(compound_id, "idle")
         return JSONResponse({"status": "killed", "id": terminal_id})
     return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+
+# ── Workspace REST API ───────────────────────────────────
+
+
+@app.post("/api/workspaces/{compound_id}/write")
+async def workspace_write(compound_id: str, request: Request):
+    """Write a file to a session's workspace folder (called by MCP workspace_write tool)."""
+    body = await request.json()
+    filename = body.get("filename", "")
+    content = body.get("content", "")
+    if not filename:
+        return JSONResponse({"error": "filename is required"}, status_code=400)
+    try:
+        path = workspace_manager.write_file(compound_id, filename, content)
+        return JSONResponse({"status": "written", "path": str(path)})
+    except (ValueError, OSError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/workspaces/{compound_id}/read")
+async def workspace_read(compound_id: str, filename: str = ""):
+    """Read a file from a session's workspace folder (called by MCP workspace_read tool)."""
+    if not filename:
+        return JSONResponse({"error": "filename query parameter is required"}, status_code=400)
+    try:
+        content = workspace_manager.read_file(compound_id, filename)
+        return JSONResponse({"compound_id": compound_id, "filename": filename, "content": content})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/workspaces/{compound_id}/list")
+async def workspace_list(compound_id: str):
+    """List all workspaces in a session's tree (called by MCP workspace_list tool)."""
+    try:
+        workspaces = workspace_manager.list_workspaces(compound_id)
+        return JSONResponse({"compound_id": compound_id, "workspaces": workspaces})
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/workspaces/{terminal_id}/events")
+async def workspace_events(terminal_id: str):
+    """Return and clear pending workspace notifications for a session.
+
+    Uses terminal_id (8-char hex) rather than compound_id so the MCP server
+    can look up its own session without knowing its full ancestry chain.
+    """
+    with _workspace_events_lock:
+        session = pty_manager.sessions.get(terminal_id)
+        if not session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        events = list(session.workspace_events)
+        session.workspace_events.clear()
+    return JSONResponse({"terminal_id": terminal_id, "events": events})
+
+
+@app.post("/api/workspaces/{compound_id}/compact")
+async def workspace_compact(compound_id: str, request: Request):
+    """Compact a workspace — concatenate all .md files into compacted.md."""
+    body = await request.json()
+    keep_originals = bool(body.get("keep_originals", False))
+    try:
+        path = workspace_manager.compact_workspace(compound_id, keep_originals=keep_originals)
+        return JSONResponse({"status": "compacted", "path": str(path), "compound_id": compound_id})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except (ValueError, OSError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/workspaces/all")
+async def workspace_list_all():
+    """List all workspaces (no scope restriction). For UI use."""
+    return JSONResponse({"workspaces": workspace_manager.list_all_workspaces()})
+
+
+@app.websocket("/ws/workspaces")
+async def websocket_workspaces(websocket: WebSocket):
+    """Push workspace tree updates to the UI.
+
+    On connect: sends the full workspace tree snapshot.
+    On file change: broadcasts { type: "file_changed", compound_id, filename }.
+    Client can use this to refresh the tree and live-viewer tabs.
+    """
+    await websocket.accept()
+    with _workspace_ws_lock:
+        _workspace_ws_clients.add(websocket)
+    try:
+        # Send initial tree snapshot
+        tree = workspace_manager.list_all_workspaces()
+        await websocket.send_text(json.dumps({"type": "tree", "workspaces": tree}))
+        # Keep connection alive — server pushes events, client just needs to stay connected
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            # Clients may send { type: "refresh" } to re-fetch the full tree
+            if msg.get("type") == "websocket.receive":
+                try:
+                    data = json.loads(msg.get("text") or "{}")
+                    if data.get("type") == "refresh":
+                        tree = workspace_manager.list_all_workspaces()
+                        await websocket.send_text(json.dumps({"type": "tree", "workspaces": tree}))
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.debug("Workspace WS error", exc_info=True)
+    finally:
+        with _workspace_ws_lock:
+            _workspace_ws_clients.discard(websocket)
 
 
 @app.post("/api/terminals/{terminal_id}/resize")
@@ -507,28 +757,28 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     last_pong = _time.time()
 
     async def pty_to_ws():
-        """Read from PTY and forward to WebSocket."""
+        """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY)."""
         while session.alive:
             try:
-                data = await pty_manager.read_pty(terminal_id)
-                if data:
-                    session.tracker.feed(data)
-                    # Diagnostic: log any replacement characters (garbled output investigation)
-                    if "\ufffd" in data:
-                        logger.debug(
-                            "PTY replacement chars in terminal %s: %r",
-                            terminal_id,
-                            data[max(0, data.index("\ufffd") - 20) : data.index("\ufffd") + 20],
-                        )
-                    await websocket.send_text(data)
-                    await asyncio.sleep(0)
-                else:
-                    await asyncio.sleep(0.01)
+                try:
+                    data = await asyncio.wait_for(session.output_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                await websocket.send_text(data)
+                await asyncio.sleep(0)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
                 break
             except Exception as e:
                 logger.debug("PTY->WS forward error: %s", e)
                 await asyncio.sleep(0.05)
+
+        # Drain any buffered data before the "Session ended" banner
+        while not session.output_queue.empty():
+            try:
+                data = session.output_queue.get_nowait()
+                await websocket.send_text(data)
+            except Exception:
+                break
 
         try:
             await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
@@ -663,6 +913,10 @@ async def static_files(path: str):
 @app.on_event("startup")
 async def startup_event():
     """Clean up orphans, write PID file, start idle cleanup."""
+    # 0. Capture event loop for cross-thread workspace broadcasts
+    global _app_event_loop
+    _app_event_loop = asyncio.get_event_loop()
+
     # 1. Clean up orphaned processes from previous crashes
     pty_manager.cleanup_orphans()
 
@@ -692,6 +946,12 @@ async def startup_event():
             pass
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
+    # 4. Start workspace file watcher
+    try:
+        _workspace_watcher.start()
+    except Exception:
+        logger.warning("WorkspaceWatcher failed to start — workspace notifications disabled", exc_info=True)
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
 
@@ -714,6 +974,12 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             pass
+    # Stop workspace watcher before killing sessions
+    try:
+        _workspace_watcher.stop()
+    except Exception:
+        logger.warning("WorkspaceWatcher stop error", exc_info=True)
+
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")

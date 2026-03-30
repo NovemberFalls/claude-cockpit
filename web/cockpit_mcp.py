@@ -26,6 +26,9 @@ def _log(msg: str) -> None:
 
 API_URL = os.environ.get("COCKPIT_API_URL", "http://localhost:8420")
 ORCHESTRATOR_ID = os.environ.get("COCKPIT_ORCHESTRATOR_ID", "")
+# Full compound ID for this session (e.g. "abc12345+def67890").
+# Used to scope workspace tools to this session's tree.
+COCKPIT_COMPOUND_ID = os.environ.get("COCKPIT_COMPOUND_ID", ORCHESTRATOR_ID)
 
 # Thread safety for stdout writes and pending wait tracking
 _send_lock = threading.Lock()
@@ -116,6 +119,109 @@ TOOLS = [
                 },
             },
             "required": ["terminal_id"],
+        },
+    },
+    {
+        "name": "workspace_write",
+        "description": (
+            "Write a file to an agent session's workspace folder. "
+            "Use this to send a brief, progress update, or completion report to a worker. "
+            "The target session must be within your orchestration tree. "
+            "No length limit — bypasses PTY truncation entirely."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_compound_id": {
+                    "type": "string",
+                    "description": (
+                        "The compound session ID of the target workspace "
+                        "(e.g. 'abc12345+def67890'). Must be within your tree."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "File to write (e.g. 'brief.md', 'progress.md', 'completion.md'). "
+                        "Plain filename only — no path separators."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "File content. No length limit.",
+                },
+            },
+            "required": ["target_compound_id", "filename", "content"],
+        },
+    },
+    {
+        "name": "workspace_read",
+        "description": (
+            "Read a file from a session's workspace folder. "
+            "Use this to read a worker's analysis, progress, or completion report. "
+            "Target must be within your orchestration tree."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_compound_id": {
+                    "type": "string",
+                    "description": "The compound session ID of the target workspace.",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "File to read (e.g. 'completion.md').",
+                },
+            },
+            "required": ["target_compound_id", "filename"],
+        },
+    },
+    {
+        "name": "workspace_list",
+        "description": (
+            "List all workspace folders in your orchestration tree "
+            "with their agent name, status, and file list. "
+            "Use this to see which workers have written completion reports."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "workspace_events",
+        "description": (
+            "Return and clear pending workspace notifications for your session. "
+            "Notifications are generated when child sessions write files. "
+            "Poll this instead of polling get_output to know when a worker is done."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "workspace_compact",
+        "description": (
+            "Compact a workspace by concatenating all .md files into a single compacted.md. "
+            "Use before respawning an agent — the new instance reads one file instead of many. "
+            "Optionally keeps the original files after compaction (default: deletes them). "
+            "Sets the workspace status to 'compacted' in _meta.json."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_compound_id": {
+                    "type": "string",
+                    "description": (
+                        "The compound session ID of the workspace to compact. "
+                        "Must be within your orchestration tree."
+                    ),
+                },
+                "keep_originals": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, original .md files are kept after compaction. "
+                        "Default false — originals are deleted to save space."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["target_compound_id"],
         },
     },
     {
@@ -365,6 +471,46 @@ def call_tool(name: str, args: dict, msg_id=None):
                 }, False
         return {"error": f"Terminal {tid} not found"}, False
 
+    elif name == "workspace_write":
+        target = args.get("target_compound_id", "")
+        filename = args.get("filename", "")
+        content = args.get("content", "")
+        if not target or not filename:
+            return {"error": "target_compound_id and filename are required"}, False
+        # Scope check: target must be within this session's tree
+        if target != COCKPIT_COMPOUND_ID and not target.startswith(COCKPIT_COMPOUND_ID + "+"):
+            return {"error": f"Access denied: {target!r} is outside your tree ({COCKPIT_COMPOUND_ID!r})"}, False
+        result = api("POST", f"/api/workspaces/{target}/write", {"filename": filename, "content": content})
+        return result, False
+
+    elif name == "workspace_read":
+        target = args.get("target_compound_id", "")
+        filename = args.get("filename", "")
+        if not target or not filename:
+            return {"error": "target_compound_id and filename are required"}, False
+        if target != COCKPIT_COMPOUND_ID and not target.startswith(COCKPIT_COMPOUND_ID + "+"):
+            return {"error": f"Access denied: {target!r} is outside your tree ({COCKPIT_COMPOUND_ID!r})"}, False
+        result = api("GET", f"/api/workspaces/{target}/read?filename={filename}")
+        return result, False
+
+    elif name == "workspace_list":
+        result = api("GET", f"/api/workspaces/{COCKPIT_COMPOUND_ID}/list")
+        return result, False
+
+    elif name == "workspace_events":
+        result = api("GET", f"/api/workspaces/{ORCHESTRATOR_ID}/events")
+        return result, False
+
+    elif name == "workspace_compact":
+        target = args.get("target_compound_id", "")
+        if not target:
+            return {"error": "target_compound_id is required"}, False
+        if target != COCKPIT_COMPOUND_ID and not target.startswith(COCKPIT_COMPOUND_ID + "+"):
+            return {"error": f"Access denied: {target!r} is outside your tree ({COCKPIT_COMPOUND_ID!r})"}, False
+        keep = bool(args.get("keep_originals", False))
+        result = api("POST", f"/api/workspaces/{target}/compact", {"keep_originals": keep})
+        return result, False
+
     elif name == "create_session":
         body = {
             "name": args.get("name", "Worker"),
@@ -375,6 +521,7 @@ def call_tool(name: str, args: dict, msg_id=None):
             "isOrchestrator": bool(args.get("as_orchestrator", False)),
             "systemPromptFile": args.get("character_file", ""),
             "bypassPermissions": True,
+            "parentCompoundId": COCKPIT_COMPOUND_ID,
         }
         result = api("POST", "/api/terminals", body)
         if "error" in result:

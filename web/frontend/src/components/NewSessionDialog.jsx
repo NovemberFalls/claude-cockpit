@@ -1,9 +1,35 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X, FolderOpen, Folder, ShieldOff, Network } from "lucide-react";
+import { X, FolderOpen, Folder, ShieldOff, Network, ChevronDown } from "lucide-react";
 
 function normPath(dir) {
   return dir.replace(/\//g, "\\").replace(/\\$/, "");
 }
+
+const ORCH_PERSONAS = [
+  {
+    id: "vera",
+    label: "Vera (Director)",
+    characterFile: "C:\\Code\\Personal\\team\\director.md",
+    model: "opus",
+    name: "Vera",
+  },
+  {
+    id: "nadia",
+    label: "Nadia (Principal Engineer)",
+    characterFile: "C:\\Code\\Personal\\team\\coding-team\\agents\\01-nadia-orchestrator.md",
+    model: "opus",
+    name: "Nadia",
+  },
+  { id: "custom", label: "Custom", characterFile: "", model: "", name: "" },
+];
+
+const ORCH_MODELS = [
+  { id: "opus", label: "Opus 4.6" },
+  { id: "sonnet", label: "Sonnet 4.6" },
+  { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
+  { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
+  { id: "haiku", label: "Haiku 4.5" },
+];
 
 export default function NewSessionDialog({
   recentLocations,
@@ -20,6 +46,8 @@ export default function NewSessionDialog({
   const [bypassPermissions, setBypassPermissions] = useState(initialBypass);
   const [manualBypassOverride, setManualBypassOverride] = useState(false);
   const [asOrchestrator, setAsOrchestrator] = useState(false);
+  const [orchPersona, setOrchPersona] = useState("vera");
+  const [orchModel, setOrchModel] = useState("opus");
   const [characterFile, setCharacterFile] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -138,7 +166,11 @@ export default function NewSessionDialog({
       setShowSuggestions(false);
       return;
     }
-    onConfirm(name.trim(), workdir.trim(), bypassPermissions, { isOrchestrator: asOrchestrator, characterFile: characterFile.trim() });
+    onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
+      isOrchestrator: asOrchestrator,
+      characterFile: characterFile.trim(),
+      ...(asOrchestrator && orchModel ? { modelOverride: orchModel } : {}),
+    });
   };
 
   const handleKeyDown = (e) => {
@@ -348,7 +380,18 @@ export default function NewSessionDialog({
               <div
                 className="flex items-center gap-2 mt-3 cursor-pointer select-none"
                 title="This session will be the Orchestrator — Claude gets MCP tools to control all other sessions"
-                onClick={() => setAsOrchestrator(!asOrchestrator)}
+                onClick={() => {
+                  const next = !asOrchestrator;
+                  setAsOrchestrator(next);
+                  if (next) {
+                    // Auto-fill Vera defaults
+                    const vera = ORCH_PERSONAS[0];
+                    setOrchPersona("vera");
+                    setOrchModel(vera.model);
+                    setCharacterFile(vera.characterFile);
+                    if (!name.trim()) setName(vera.name);
+                  }
+                }}
               >
                 <div
                   className="flex items-center justify-center rounded flex-shrink-0"
@@ -365,28 +408,106 @@ export default function NewSessionDialog({
                 </span>
               </div>
 
-              {/* Character file — only when orchestrator is checked */}
+              {/* Persona & model selectors — only when orchestrator is checked */}
               {asOrchestrator && (
-                <div className="mt-2">
-                  <label
-                    className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    Character file (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={characterFile}
-                    onChange={(e) => setCharacterFile(e.target.value)}
-                    placeholder="C:\Code\Personal\team\coding-team\agents\01-nadia-orchestrator.md"
-                    className="w-full px-3 py-1.5 rounded text-xs outline-none"
-                    style={{
-                      backgroundColor: "var(--bg-surface)",
-                      color: "var(--text-primary)",
-                      border: "1px solid var(--border-color)",
-                      fontFamily: "monospace",
-                    }}
-                  />
+                <div className="mt-2 flex flex-col gap-2">
+                  {/* Persona selector */}
+                  <div>
+                    <label
+                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Persona
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={orchPersona}
+                        onChange={(e) => {
+                          const pid = e.target.value;
+                          setOrchPersona(pid);
+                          const preset = ORCH_PERSONAS.find((p) => p.id === pid);
+                          if (preset && pid !== "custom") {
+                            setCharacterFile(preset.characterFile);
+                            setOrchModel(preset.model);
+                            if (!name.trim() || ORCH_PERSONAS.some((p) => p.name === name.trim())) {
+                              setName(preset.name);
+                            }
+                          }
+                        }}
+                        className="w-full px-3 py-1.5 rounded text-xs outline-none appearance-none pr-7"
+                        style={{
+                          backgroundColor: "var(--bg-surface)",
+                          color: "var(--text-primary)",
+                          border: "1px solid var(--border-color)",
+                        }}
+                      >
+                        {ORCH_PERSONAS.map((p) => (
+                          <option key={p.id} value={p.id}>{p.label}</option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        size={12}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none"
+                        style={{ color: "var(--text-muted)" }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Model selector */}
+                  <div>
+                    <label
+                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Model
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={orchModel}
+                        onChange={(e) => setOrchModel(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded text-xs outline-none appearance-none pr-7"
+                        style={{
+                          backgroundColor: "var(--bg-surface)",
+                          color: "var(--text-primary)",
+                          border: "1px solid var(--border-color)",
+                        }}
+                      >
+                        {ORCH_MODELS.map((m) => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
+                      </select>
+                      <ChevronDown
+                        size={12}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none"
+                        style={{ color: "var(--text-muted)" }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Character file — editable, or free-text when custom */}
+                  <div>
+                    <label
+                      className="block text-[11px] uppercase tracking-wider font-medium mb-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Character file{orchPersona !== "custom" ? "" : " (required)"}
+                    </label>
+                    <input
+                      type="text"
+                      value={characterFile}
+                      onChange={(e) => setCharacterFile(e.target.value)}
+                      placeholder={orchPersona === "custom" ? "C:\\path\\to\\persona.md" : ""}
+                      readOnly={orchPersona !== "custom"}
+                      className="w-full px-3 py-1.5 rounded text-xs outline-none"
+                      style={{
+                        backgroundColor: "var(--bg-surface)",
+                        color: orchPersona !== "custom" ? "var(--text-muted)" : "var(--text-primary)",
+                        border: "1px solid var(--border-color)",
+                        fontFamily: "monospace",
+                        opacity: orchPersona !== "custom" ? 0.7 : 1,
+                      }}
+                    />
+                  </div>
                 </div>
               )}
             </>
