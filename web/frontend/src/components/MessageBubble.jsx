@@ -1,6 +1,47 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { User, Bot, ChevronDown, ChevronRight, Info } from "lucide-react";
+import { marked } from "marked";
 import ToolCallBlock from "./ToolCallBlock";
+
+// Configure marked for safe, minimal output
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+});
+
+/**
+ * Strip Claude Code command XML tags from user messages.
+ * <command-message>nadia</command-message>
+ * <command-name>/nadia</command-name>
+ * <command-args>actual text</command-args>
+ * → returns just the content of <command-args>, or the original text if no tags found.
+ * Also strips <system-reminder>...</system-reminder> blocks entirely.
+ */
+function cleanMessageText(text) {
+  if (!text || typeof text !== "string") return text;
+  // Strip system-reminder blocks
+  let cleaned = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
+  // If command-args present, extract just its content
+  const argsMatch = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/);
+  if (argsMatch) return argsMatch[1].trim();
+  // Strip any remaining XML-like tags from command protocol
+  cleaned = cleaned.replace(/<\/?(?:command-message|command-name|command-args)>/g, "").trim();
+  return cleaned || text;
+}
+
+/**
+ * Render markdown to sanitized HTML. Memoize to avoid re-parsing on every render.
+ */
+function useMarkdown(text) {
+  return useMemo(() => {
+    if (!text) return "";
+    try {
+      return marked.parse(text);
+    } catch {
+      return text;
+    }
+  }, [text]);
+}
 
 /**
  * MessageBubble — renders a single conversation message.
@@ -33,18 +74,16 @@ export default function MessageBubble({ message, theme }) {
     );
   }
 
-  // Tool results: render as collapsed blocks
+  // Tool results: handled by ToolCallGroup in ChatPane — skip standalone rendering
   if (isToolResult) {
-    return (
-      <div className="px-4 py-0.5">
-        {message.content?.map((block, i) => (
-          <ToolCallBlock key={`${message.id}-${i}`} block={block} theme={theme} />
-        ))}
-      </div>
-    );
+    return null;
   }
 
   // User and assistant messages
+  // Separate text/thinking blocks from tool_use blocks
+  const textBlocks = message.content?.filter((b) => b.type === "text" || b.type === "thinking") || [];
+  const toolBlocks = message.content?.filter((b) => b.type === "tool_use") || [];
+
   return (
     <div
       className={`flex gap-2 px-4 py-2 ${isUser ? "flex-row-reverse" : ""}`}
@@ -71,44 +110,50 @@ export default function MessageBubble({ message, theme }) {
         className={`flex flex-col min-w-0 ${isUser ? "items-end" : "items-start"}`}
         style={{ maxWidth: "85%" }}
       >
-        {message.content?.map((block, i) => {
+        {textBlocks.map((block, i) => {
           if (block.type === "text") {
+            if (isUser) {
+              const displayText = cleanMessageText(block.text);
+              if (!displayText) return null;
+              return (
+                <div
+                  key={`${message.id}-text-${i}`}
+                  className="rounded-lg px-3 py-2 text-sm leading-relaxed"
+                  style={{
+                    backgroundColor: "var(--accent)",
+                    color: "var(--bg)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {displayText}
+                </div>
+              );
+            }
+            // Assistant: render markdown
             return (
-              <div
-                key={`${message.id}-${i}`}
-                className="rounded-lg px-3 py-2 text-sm leading-relaxed"
-                style={{
-                  backgroundColor: isUser
-                    ? "var(--accent)"
-                    : "var(--bg-elevated)",
-                  color: isUser
-                    ? "var(--bg)"
-                    : "var(--text-primary)",
-                  border: isUser ? "none" : "1px solid var(--border-color)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  fontFamily: "inherit",
-                }}
-              >
-                {block.text}
-              </div>
-            );
-          }
-
-          if (block.type === "tool_use") {
-            return (
-              <div key={`${message.id}-${i}`} className="w-full">
-                <ToolCallBlock block={block} theme={theme} />
-              </div>
+              <MarkdownBlock key={`${message.id}-text-${i}`} text={block.text} />
             );
           }
 
           if (block.type === "thinking") {
-            return <ThinkingBlock key={`${message.id}-${i}`} text={block.text} />;
+            return <ThinkingBlock key={`${message.id}-think-${i}`} text={block.text} />;
           }
 
           return null;
         })}
+
+        {/* Tool uses rendered as a collapsed group — only if there are any */}
+        {toolBlocks.length > 0 && (
+          <ToolCallGroup
+            key={`${message.id}-tools`}
+            blocks={toolBlocks}
+            results={message._pairedResults || []}
+            messageId={message.id}
+            theme={theme}
+          />
+        )}
 
         {/* Timestamp */}
         {message.timestamp && (
@@ -123,6 +168,78 @@ export default function MessageBubble({ message, theme }) {
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * MarkdownBlock — renders assistant text as rendered markdown.
+ */
+function MarkdownBlock({ text }) {
+  const html = useMarkdown(text);
+
+  return (
+    <div
+      className="markdown-content rounded-lg px-3 py-2 text-sm leading-relaxed w-full"
+      style={{
+        backgroundColor: "var(--bg-elevated)",
+        color: "var(--text-primary)",
+        border: "1px solid var(--border-color)",
+        wordBreak: "break-word",
+      }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+/**
+ * ToolCallGroup — renders tool_use blocks + paired tool_result blocks
+ * as a single collapsible section. Collapsed by default.
+ */
+function ToolCallGroup({ blocks, results, messageId, theme }) {
+  const [expanded, setExpanded] = useState(false);
+  const count = blocks.length;
+
+  // Build summary: tool names used
+  const toolNames = [...new Set(blocks.map((b) => b.tool_name))];
+  const summary = toolNames.join(", ");
+
+  return (
+    <div
+      className="w-full rounded my-1"
+      style={{
+        backgroundColor: "var(--bg-elevated)",
+        border: "1px solid var(--border-color)",
+      }}
+    >
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 w-full text-left px-2 py-1.5 rounded transition-colors hover-bg-surface"
+        style={{ color: "var(--text-secondary)", fontSize: 12 }}
+      >
+        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        <span className="font-medium" style={{ color: "var(--text-primary)" }}>
+          {count} tool {count === 1 ? "call" : "calls"}
+        </span>
+        {!expanded && (
+          <span className="truncate ml-1" style={{ color: "var(--text-muted)", flex: 1 }}>
+            {summary}
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div
+          className="px-2 pb-2"
+          style={{ borderTop: "1px solid var(--border-color)", paddingTop: 4 }}
+        >
+          {blocks.map((block, i) => (
+            <ToolCallBlock key={`${messageId}-tool-${i}`} block={block} theme={theme} />
+          ))}
+          {results.map((block, i) => (
+            <ToolCallBlock key={`${messageId}-result-${i}`} block={block} theme={theme} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -780,6 +781,262 @@ async def open_url(request: Request):
     except Exception:
         logger.exception("Failed to open URL: %s", url)
         return JSONResponse({"error": "Failed to open URL"}, 500)
+
+
+# ── Session History ─────────────────────────────────────
+
+_history_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _derive_project_id(workdir: str) -> str:
+    """Derive the Claude Code project ID from a working directory path.
+
+    Must match the logic in pty_manager.py (line 562).
+    """
+    return workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+
+
+def _read_last_line(filepath: Path) -> str:
+    """Efficiently read the last line of a file by seeking backwards from EOF."""
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return ""
+            # Seek backwards to find the last newline
+            pos = size - 1
+            # Skip trailing newline(s)
+            while pos > 0:
+                f.seek(pos)
+                ch = f.read(1)
+                if ch != b"\n" and ch != b"\r":
+                    break
+                pos -= 1
+            # Now find the newline before the last line
+            while pos > 0:
+                f.seek(pos)
+                ch = f.read(1)
+                if ch == b"\n":
+                    break
+                pos -= 1
+            if pos > 0:
+                f.seek(pos + 1)
+            else:
+                f.seek(0)
+            return f.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        logger.debug("Failed to read last line of %s", filepath, exc_info=True)
+        return ""
+
+
+import re
+
+_COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
+_XML_TAGS_RE = re.compile(
+    r"</?(?:command-message|command-name|command-args|system-reminder|"
+    r"local-command-caveat|scheduled-task)[^>]*>[\s\S]*?(?:</\1>)?"
+)
+_XML_BLOCK_RE = re.compile(r"<(?:system-reminder|local-command-caveat)[^>]*>[\s\S]*?</(?:system-reminder|local-command-caveat)>")
+_XML_SIMPLE_RE = re.compile(r"</?(?:command-message|command-name|command-args|scheduled-task)[^>]*>")
+
+
+def _clean_first_message(text: str) -> str:
+    """Strip Claude Code command/system XML tags from a user message preview."""
+    if not text:
+        return text
+    # Strip block-level tags (system-reminder, local-command-caveat)
+    cleaned = _XML_BLOCK_RE.sub("", text)
+    # Extract command-args content if present
+    m = _COMMAND_ARGS_RE.search(cleaned)
+    if m:
+        return m.group(1).strip()
+    # Strip remaining simple tags
+    cleaned = _XML_SIMPLE_RE.sub("", cleaned).strip()
+    return cleaned or text
+
+
+def _scan_session_file(filepath: Path) -> dict | None:
+    """Extract metadata from a single JSONL session file.
+
+    Reads the first 20 lines for session info and the last line for
+    last_modified timestamp. Returns a session metadata dict or None.
+    """
+    try:
+        file_size = filepath.stat().st_size
+        if file_size == 0:
+            return None
+    except OSError:
+        return None
+
+    session_id: str | None = None
+    first_user_message: str | None = None
+    model: str | None = None
+
+    # Read first 20 lines for metadata
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 20:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if session_id is None:
+                    session_id = obj.get("sessionId")
+
+                entry_type = obj.get("type")
+                msg = obj.get("message", {})
+
+                if first_user_message is None and entry_type == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        first_user_message = content.strip()
+                    elif isinstance(content, list):
+                        # Extract text from content blocks
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "").strip()
+                                if text:
+                                    first_user_message = text
+                                    break
+
+                if model is None and entry_type == "assistant":
+                    model = msg.get("model")
+    except Exception:
+        logger.debug("Failed to read head of %s", filepath, exc_info=True)
+        return None
+
+    if not session_id:
+        return None
+
+    # Read last line for timestamp
+    last_modified_iso: str | None = None
+    last_line = _read_last_line(filepath)
+    if last_line:
+        try:
+            last_obj = json.loads(last_line)
+            ts = last_obj.get("timestamp")
+            if ts:
+                last_modified_iso = ts
+        except json.JSONDecodeError:
+            pass
+
+    if not last_modified_iso:
+        # Fall back to file mtime
+        mtime = filepath.stat().st_mtime
+        last_modified_iso = datetime.datetime.fromtimestamp(
+            mtime, tz=datetime.timezone.utc
+        ).isoformat()
+
+    # Count lines via file size heuristic (read first 10KB, count lines, extrapolate)
+    message_count = 0
+    try:
+        chunk_size = min(10240, file_size)
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            chunk = f.read(chunk_size)
+        lines_in_chunk = chunk.count("\n")
+        if chunk_size < file_size:
+            message_count = int(lines_in_chunk * (file_size / chunk_size))
+        else:
+            message_count = lines_in_chunk
+    except Exception:
+        pass
+
+    # Clean command XML tags from the preview text
+    if first_user_message:
+        first_user_message = _clean_first_message(first_user_message)
+
+    return {
+        "session_id": session_id,
+        "first_message": first_user_message or "(no message)",
+        "last_modified": last_modified_iso,
+        "message_count": message_count,
+        "model": model,
+        "file_size_kb": round(file_size / 1024, 1),
+    }
+
+
+def _get_history_sessions(workdir: str) -> list[dict]:
+    """Scan JSONL session files for a project and return metadata list.
+
+    Uses a simple mtime-based cache to avoid rescanning unchanged directories.
+    """
+    project_id = _derive_project_id(workdir)
+    home = Path.home()
+    jsonl_dir = home / ".claude" / "projects" / project_id
+
+    if not jsonl_dir.is_dir():
+        return []
+
+    try:
+        dir_mtime = jsonl_dir.stat().st_mtime
+    except OSError:
+        return []
+
+    cache_key = project_id
+    if cache_key in _history_cache:
+        cached_mtime, cached_result = _history_cache[cache_key]
+        if cached_mtime == dir_mtime:
+            return cached_result
+
+    sessions: list[dict] = []
+    try:
+        for entry in jsonl_dir.iterdir():
+            if entry.suffix != ".jsonl" or not entry.is_file():
+                continue
+            meta = _scan_session_file(entry)
+            if meta:
+                meta["workdir"] = workdir
+                sessions.append(meta)
+    except OSError:
+        logger.debug("Failed to scan JSONL dir: %s", jsonl_dir, exc_info=True)
+
+    # Sort by last_modified descending
+    sessions.sort(key=lambda s: s.get("last_modified", ""), reverse=True)
+
+    _history_cache[cache_key] = (dir_mtime, sessions)
+    return sessions
+
+
+@app.get("/api/history")
+async def get_history(workdir: str = ""):
+    """Return session metadata for all JSONL files in a project directory."""
+    if not workdir:
+        return JSONResponse({"error": "workdir parameter required"}, status_code=400)
+
+    sessions = _get_history_sessions(workdir)
+    return JSONResponse({"sessions": sessions})
+
+
+@app.get("/api/history/{session_id}/messages")
+async def get_history_messages(session_id: str, workdir: str = ""):
+    """Return all parsed messages from a specific history session's JSONL file.
+
+    Read-only viewing of past conversation content.
+    """
+    if not workdir:
+        return JSONResponse({"error": "workdir parameter required"}, status_code=400)
+
+    project_id = _derive_project_id(workdir)
+    home = Path.home()
+    jsonl_path = home / ".claude" / "projects" / project_id / f"{session_id}.jsonl"
+
+    if not jsonl_path.is_file():
+        return JSONResponse(
+            {"error": f"Session file not found: {session_id}"},
+            status_code=404,
+        )
+
+    from jsonl_watcher import read_all_messages
+
+    messages = read_all_messages(str(jsonl_path))
+    return JSONResponse({"session_id": session_id, "messages": messages})
 
 
 # ── Static files ─────────────────────────────────────────

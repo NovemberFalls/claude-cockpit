@@ -1,6 +1,7 @@
 import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
 import StateIcon from "./StateIcon";
+import HistoryPanel from "./HistoryPanel";
 
 /** Normalize path separators to backslash for comparison */
 function norm(dir) {
@@ -305,7 +306,14 @@ export default function Sidebar({
   onRemoveLocation,
   onToggleLocationBypass,
   gitStatuses = {},
+  historyWorkdir,
+  onViewHistorySession,
+  onResumeHistorySession,
+  backendReady,
+  onDragHistorySession,
 }) {
+  // Tab toggle: "sessions" or "history"
+  const [sidebarTab, setSidebarTab] = useState("sessions");
   // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
 
@@ -364,6 +372,45 @@ export default function Sidebar({
           <span>New</span>
         </button>
 
+        {/* Tab toggle */}
+        <div className="flex items-center gap-1 px-3 mb-2">
+          <button
+            onClick={() => setSidebarTab("sessions")}
+            className="text-[10px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded transition-colors"
+            style={{
+              color: sidebarTab === "sessions" ? "var(--accent)" : "var(--text-muted)",
+              backgroundColor: sidebarTab === "sessions" ? "var(--bg-surface)" : "transparent",
+            }}
+          >
+            Sessions
+          </button>
+          <button
+            onClick={() => setSidebarTab("history")}
+            className="text-[10px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded transition-colors"
+            style={{
+              color: sidebarTab === "history" ? "var(--accent)" : "var(--text-muted)",
+              backgroundColor: sidebarTab === "history" ? "var(--bg-surface)" : "transparent",
+            }}
+          >
+            History
+          </button>
+        </div>
+
+        {/* History tab */}
+        {sidebarTab === "history" && (
+          <HistoryPanel
+            workdir={historyWorkdir}
+            onViewSession={onViewHistorySession}
+            onResumeSession={onResumeHistorySession}
+            backendReady={backendReady}
+            onDragHistorySession={onDragHistorySession}
+          />
+        )}
+
+        {/* Sessions tab content */}
+        {sidebarTab === "sessions" && (
+          <>
+
         {/* Empty state / first-run card */}
         {locationTree.length === 0 && sessions.length === 0 && (
           <div className="px-2 py-4">
@@ -413,6 +460,9 @@ export default function Sidebar({
           </>
         )}
 
+          </>
+        )}
+
         {/* Resources footer */}
         <>
           <div style={{ flex: 1 }} />
@@ -436,8 +486,8 @@ export default function Sidebar({
           </div>
         </>
 
-        {/* Context menu */}
-        {ctxMenu && (
+        {/* Context menu (sessions tab only) */}
+        {sidebarTab === "sessions" && ctxMenu && (
           <LocationContextMenu
             x={ctxMenu.x}
             y={ctxMenu.y}

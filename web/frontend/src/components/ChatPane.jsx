@@ -7,6 +7,40 @@ import StreamingIndicator from "./StreamingIndicator";
 import ChatInput from "./ChatInput";
 
 /**
+ * Group messages: pair tool_result messages with their preceding assistant message.
+ * Instead of showing tool_use + tool_result as separate entries, attach the results
+ * to the assistant message so ToolCallGroup can render them together.
+ */
+function groupMessages(messages) {
+  const result = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.type === "tool_result") {
+      // Attach to the last assistant message's _pairedResults
+      // (already handled below when we see tool_use in assistant messages)
+      // Skip standalone rendering — MessageBubble returns null for tool_result
+      result.push(msg);
+      continue;
+    }
+    if (msg.type === "assistant" && msg.content?.some((b) => b.type === "tool_use")) {
+      // Look ahead for the following tool_result message(s)
+      const pairedResults = [];
+      let j = i + 1;
+      while (j < messages.length && messages[j].type === "tool_result") {
+        for (const block of messages[j].content || []) {
+          pairedResults.push(block);
+        }
+        j++;
+      }
+      result.push({ ...msg, _pairedResults: pairedResults });
+    } else {
+      result.push(msg);
+    }
+  }
+  return result;
+}
+
+/**
  * ChatPane — renders a conversation as a chat UI with messages from JSONL.
  *
  * Replaces TerminalPane as the default view. The PTY still runs underneath;
@@ -24,6 +58,8 @@ import ChatInput from "./ChatInput";
  *   skills             — [{name, description}]
  *   isFocused          — boolean
  *   onViewToggle       — () => void — switch to terminal view
+ *   historySessionId   — string|null — when set, enables read-only history viewing mode
+ *   onResume           — function|null — callback to resume a history session; shows Resume button when provided
  */
 const ChatPane = forwardRef(function ChatPane({
   session,
@@ -36,6 +72,8 @@ const ChatPane = forwardRef(function ChatPane({
   skills = [],
   isFocused = false,
   onViewToggle,
+  historySessionId = null,
+  onResume = null,
 }, ref) {
   const { theme } = useTheme();
   const [messages, setMessages] = useState([]);
@@ -46,18 +84,46 @@ const ChatPane = forwardRef(function ChatPane({
   const lastMessageCountRef = useRef(0);
   const autoScrollRef = useRef(true);
 
+  const isHistoryView = !!historySessionId;
+
   // ChatPane does NOT open a WebSocket — that would drain the PTY output
   // queue and break TerminalPane when the user toggles views.
   // Input is sent via REST API instead.
-  const connected = session.status === "running" && !!session.terminalId;
+  const connected = !isHistoryView && session.status === "running" && !!session.terminalId;
 
   useImperativeHandle(ref, () => ({
     focus: () => inputRef.current?.focus?.(),
   }));
 
-  // Poll for messages from the JSONL file
+  // One-time fetch for history view
   useEffect(() => {
-    if (!session.terminalId) return;
+    if (!isHistoryView) return;
+
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch(
+          `/api/history/${historySessionId}/messages?workdir=${encodeURIComponent(session.workdir)}`
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.messages) {
+          const seen = new Map();
+          for (const msg of data.messages) {
+            seen.set(msg.id, msg);
+          }
+          setMessages([...seen.values()]);
+        }
+      } catch {
+        // Network error — history load failed silently
+      }
+    };
+
+    fetchHistory();
+  }, [isHistoryView, historySessionId, session.workdir]);
+
+  // Poll for messages from the JSONL file (live sessions only)
+  useEffect(() => {
+    if (isHistoryView || !session.terminalId) return;
 
     const fetchMessages = async () => {
       try {
@@ -83,7 +149,7 @@ const ChatPane = forwardRef(function ChatPane({
     fetchMessages();
     pollTimerRef.current = setInterval(fetchMessages, 1000);
     return () => clearInterval(pollTimerRef.current);
-  }, [session.terminalId]);
+  }, [isHistoryView, session.terminalId]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -102,16 +168,17 @@ const ChatPane = forwardRef(function ChatPane({
 
   // Send message to PTY via REST API (not WebSocket — WS would drain the output queue)
   const handleSend = useCallback((text) => {
-    if (!session.terminalId) return;
+    if (isHistoryView || !session.terminalId) return;
     fetch(`/api/terminals/${session.terminalId}/input`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: text + "\r" }),
     }).catch(() => {});
-  }, [session.terminalId]);
+  }, [isHistoryView, session.terminalId]);
 
   // Handle file drop — upload then send path to PTY
   const handleFileDrop = useCallback(async (files) => {
+    if (isHistoryView) return;
     const formData = new FormData();
     files.forEach((f) => formData.append("files", f));
     try {
@@ -133,7 +200,7 @@ const ChatPane = forwardRef(function ChatPane({
     } catch (err) {
       toast?.(`Upload failed: ${err.message}`, "error");
     }
-  }, [toast]);
+  }, [isHistoryView, toast]);
 
   const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
   const isWaiting = activityState === "waiting";
@@ -199,6 +266,14 @@ const ChatPane = forwardRef(function ChatPane({
           >
             {session.model}
           </span>
+          {isHistoryView && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded-full"
+              style={{ color: "var(--text-muted)", backgroundColor: "var(--bg-surface)" }}
+            >
+              HISTORY
+            </span>
+          )}
           {(session.tokens > 0 || session.cost > 0) && (
             <div className="flex items-center gap-1.5 ml-1">
               {session.tokens > 0 && (
@@ -215,20 +290,22 @@ const ChatPane = forwardRef(function ChatPane({
           )}
         </div>
         <div className="flex items-center gap-1">
-          {/* View toggle */}
-          <button
-            onClick={onViewToggle}
-            className="p-0.5 rounded transition-colors hover-color-secondary"
-            style={{ color: "var(--text-muted)" }}
-            title="Switch to terminal view"
-          >
-            <TerminalIcon size={13} />
-          </button>
+          {/* View toggle — hidden in history mode */}
+          {!isHistoryView && (
+            <button
+              onClick={onViewToggle}
+              className="p-0.5 rounded transition-colors hover-color-secondary"
+              style={{ color: "var(--text-muted)" }}
+              title="Switch to terminal view"
+            >
+              <TerminalIcon size={13} />
+            </button>
+          )}
           <button
             onClick={onClose}
             className="p-0.5 rounded transition-colors hover-color-red"
             style={{ color: "var(--text-muted)" }}
-            title="Close session"
+            title={isHistoryView ? "Close history view" : "Close session"}
           >
             <X size={13} />
           </button>
@@ -260,26 +337,56 @@ const ChatPane = forwardRef(function ChatPane({
             <div className="text-center" style={{ color: "var(--text-muted)" }}>
               <MessageSquare size={24} className="mx-auto mb-2" style={{ opacity: 0.3 }} />
               <p className="text-xs">
-                {session.status === "starting" ? "Starting session..." : "Send a message to begin"}
+                {isHistoryView
+                  ? "No messages in this conversation"
+                  : session.status === "starting"
+                  ? "Starting session..."
+                  : "Send a message to begin"}
               </p>
             </div>
           </div>
         )}
-        {messages.map((msg) => (
+        {groupMessages(messages).map((msg) => (
           <MessageBubble key={msg.id} message={msg} theme={theme} />
         ))}
-        <StreamingIndicator state={activityState} />
+        {!isHistoryView && <StreamingIndicator state={activityState} />}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
-      <ChatInput
-        onSend={handleSend}
-        disabled={!connected}
-        skills={skills}
-        onFileDrop={handleFileDrop}
-        theme={theme}
-      />
+      {/* Input — read-only bar in history mode, ChatInput in live mode */}
+      {isHistoryView ? (
+        <div
+          className="flex items-center justify-between px-4 py-2"
+          style={{
+            borderTop: "1px solid var(--border-color)",
+            backgroundColor: "var(--bg-surface)",
+          }}
+        >
+          <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+            Read-only — this is a past conversation
+          </span>
+          {onResume && (
+            <button
+              onClick={onResume}
+              className="text-xs font-medium px-3 py-1 rounded-md transition-colors"
+              style={{
+                backgroundColor: "var(--accent)",
+                color: "var(--bg)",
+              }}
+            >
+              Resume
+            </button>
+          )}
+        </div>
+      ) : (
+        <ChatInput
+          onSend={handleSend}
+          disabled={!connected}
+          skills={skills}
+          onFileDrop={handleFileDrop}
+          theme={theme}
+        />
+      )}
     </div>
   );
 });
