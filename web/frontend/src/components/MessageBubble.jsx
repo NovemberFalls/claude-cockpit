@@ -26,7 +26,8 @@ function cleanMessageText(text) {
   if (argsMatch) return argsMatch[1].trim();
   // Strip any remaining XML-like tags from command protocol
   cleaned = cleaned.replace(/<\/?(?:command-message|command-name|command-args|scheduled-task)[^>]*>/g, "").trim();
-  return cleaned || text;
+  // Return null if the entire message was system tags — caller skips rendering
+  return cleaned || null;
 }
 
 /**
@@ -83,6 +84,16 @@ export default function MessageBubble({ message, theme }) {
   // Separate text/thinking blocks from tool_use blocks
   const textBlocks = message.content?.filter((b) => b.type === "text" || b.type === "thinking") || [];
   const toolBlocks = message.content?.filter((b) => b.type === "tool_use") || [];
+
+  // For user messages, check if all text blocks are system tags that get stripped
+  // If so, skip rendering the entire message (no empty avatar bubble)
+  if (isUser && toolBlocks.length === 0) {
+    const hasVisibleText = textBlocks.some((b) => {
+      if (b.type !== "text") return true;
+      return cleanMessageText(b.text) !== null;
+    });
+    if (!hasVisibleText) return null;
+  }
 
   return (
     <div

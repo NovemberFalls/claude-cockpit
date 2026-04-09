@@ -108,6 +108,11 @@ Two independent DnD systems share the same drop targets — be careful not to le
 - **CRITICAL build lesson:** Always copy the fresh PyInstaller exe to `src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe` BEFORE building Tauri. A stale sidecar = "Internal Server Error" on desktop launch.
 - **Tauri webview:** `dragDropEnabled: false` in tauri.conf.json so the web-native file drop handler works in the desktop app.
 
+## Known Issues (Chat Mode)
+
+- **`/remote-control` and `/rc` don't work from chat mode.** Claude Code returns "Unknown skill" for both commands. This appears to be an upstream Claude Code bug ([#29265](https://github.com/anthropics/claude-code/issues/29265)). Workaround: enable Remote Control globally via `/config` → "Enable Remote Control for all sessions", or start sessions with `claude --remote-control` flag.
+- **Terminal view toggle is functional but limited.** The `>_` button switches to xterm.js terminal view. In chat mode, the PTY output queue is not consumed by the WebSocket, so terminal view may show stale output. Toggle back to chat mode for the canonical conversation view.
+
 ## Community Management
 
 - **Weekly cadence:** Run `/triage-issues` and `/audit-repo` roughly once a week to review PRs, issues, and repo health.

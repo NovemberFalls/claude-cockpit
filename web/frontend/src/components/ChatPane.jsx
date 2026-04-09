@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
-import { X, GripVertical, MessageSquare, Terminal as TerminalIcon, Smartphone } from "lucide-react";
+import { X, GripVertical, MessageSquare, Terminal as TerminalIcon } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import MessageBubble from "./MessageBubble";
@@ -344,17 +344,6 @@ const ChatPane = forwardRef(function ChatPane({
           )}
         </div>
         <div className="flex items-center gap-1">
-          {/* Remote control — try /remote-control, fall back to /rc */}
-          {connected && (
-            <button
-              onClick={() => handleSend("/rc")}
-              className="p-0.5 rounded transition-colors hover-color-secondary"
-              style={{ color: "var(--text-muted)" }}
-              title="Enable remote control from phone"
-            >
-              <Smartphone size={13} />
-            </button>
-          )}
           {/* View toggle — hidden in history mode */}
           {!isHistoryView && (
             <button
