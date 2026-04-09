@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -582,6 +583,188 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             await heartbeat_task
         except asyncio.CancelledError:
             pass
+
+
+# ── JSONL Message Stream (SSE) ───────────────────────────
+
+
+from starlette.responses import StreamingResponse
+
+
+@app.get("/api/terminals/{terminal_id}/messages")
+async def get_terminal_messages(terminal_id: str):
+    """Return all parsed messages from a session's JSONL file."""
+    from jsonl_watcher import read_all_messages
+
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    jsonl_path = pty_manager._get_jsonl_path(session)
+    if not jsonl_path:
+        return JSONResponse({"messages": [], "jsonl_path": None})
+
+    messages = read_all_messages(jsonl_path)
+    return JSONResponse({
+        "messages": messages,
+        "jsonl_path": jsonl_path,
+        "claude_session_id": session.claude_session_id,
+    })
+
+
+@app.get("/api/terminals/{terminal_id}/messages/stream")
+async def stream_terminal_messages(terminal_id: str, from_beginning: str = "true"):
+    """SSE stream of new messages from a session's JSONL file.
+
+    Each SSE event is a JSON-encoded message object.
+    Keeps streaming until the client disconnects.
+    """
+    from jsonl_watcher import tail_jsonl
+
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    jsonl_path = pty_manager._get_jsonl_path(session)
+    if not jsonl_path:
+        return JSONResponse({"error": "No JSONL path available"}, status_code=404)
+
+    async def event_generator():
+        try:
+            async for message in tail_jsonl(
+                jsonl_path,
+                from_beginning=(from_beginning.lower() == "true"),
+            ):
+                data = json.dumps(message)
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Awareness API ────────────────────────────────────────
+
+
+def _read_json_file(path: Path) -> dict | list | None:
+    try:
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to read JSON: %s", path, exc_info=True)
+    return None
+
+
+def _read_text_file(path: Path, max_bytes: int = 8192) -> str | None:
+    try:
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            if len(content) > max_bytes:
+                content = content[:max_bytes] + "\n...(truncated)"
+            return content
+    except Exception:
+        logger.debug("Failed to read text: %s", path, exc_info=True)
+    return None
+
+
+def _get_mcp_servers(workdir: str) -> list[dict]:
+    servers = []
+    home = Path.home()
+    user_settings = _read_json_file(home / ".claude" / "settings.json")
+    if user_settings and isinstance(user_settings.get("mcpServers"), dict):
+        for name, config in user_settings["mcpServers"].items():
+            servers.append({"name": name, "source": "user", "command": config.get("command", "")})
+    project_mcp = _read_json_file(Path(workdir) / ".mcp.json")
+    if project_mcp and isinstance(project_mcp.get("mcpServers"), dict):
+        for name, config in project_mcp["mcpServers"].items():
+            servers.append({"name": name, "source": "project", "command": config.get("command", "")})
+    return servers
+
+
+def _get_skills(workdir: str) -> list[dict]:
+    skills = []
+    seen = set()
+
+    def scan_dir(base: Path, source: str):
+        if not base.is_dir():
+            return
+        for f in sorted(base.iterdir()):
+            if f.suffix != ".md" or f.name.startswith("."):
+                continue
+            name = f.stem
+            if name in seen:
+                continue
+            seen.add(name)
+            desc = ""
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")[:1024]
+                for line in content.split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("description:"):
+                        desc = stripped[len("description:"):].strip().strip('"').strip("'")
+                        break
+            except Exception:
+                pass
+            skills.append({"name": name, "description": desc, "source": source})
+
+    scan_dir(Path(workdir) / ".claude" / "commands", "project")
+    scan_dir(Path.home() / ".claude" / "commands", "user")
+    return skills
+
+
+def _get_memory(workdir: str) -> dict:
+    home = Path.home()
+    claude_projects = home / ".claude" / "projects"
+    if not claude_projects.is_dir():
+        return {"index": None, "files": []}
+
+    # Derive project ID from workdir
+    project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    memory_dir = claude_projects / project_id / "memory"
+
+    if not memory_dir.is_dir():
+        return {"index": None, "files": []}
+
+    index = _read_text_file(memory_dir / "MEMORY.md", max_bytes=4096)
+    files = [{"name": f.stem, "filename": f.name}
+             for f in sorted(memory_dir.iterdir())
+             if f.suffix == ".md" and f.name != "MEMORY.md"]
+    return {"index": index, "files": files, "path": str(memory_dir)}
+
+
+def _get_claude_md(workdir: str) -> str | None:
+    current = Path(workdir)
+    for _ in range(10):
+        for name in ("CLAUDE.md", ".claude/CLAUDE.md"):
+            content = _read_text_file(current / name, max_bytes=4096)
+            if content is not None:
+                return content
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+@app.get("/api/awareness")
+async def get_awareness(workdir: str = ""):
+    """Return Claude Code context awareness for a given working directory."""
+    if not workdir:
+        return JSONResponse({"error": "workdir parameter required"}, status_code=400)
+    return JSONResponse({
+        "mcp_servers": _get_mcp_servers(workdir),
+        "skills": _get_skills(workdir),
+        "memory": _get_memory(workdir),
+        "claude_md": _get_claude_md(workdir),
+    })
 
 
 @app.post("/api/open-url")

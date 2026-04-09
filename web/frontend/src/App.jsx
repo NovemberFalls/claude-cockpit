@@ -4,6 +4,7 @@ import HexGrid from "./components/HexGrid";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
+import ChatPane from "./components/ChatPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
@@ -97,6 +98,10 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try { return localStorage.getItem(ONBOARDING_KEY) !== "true"; } catch (_) { return true; }
   });
+  // Per-session view mode: 'chat' (default) or 'terminal'
+  const [viewModes, setViewModes] = useState({}); // { [sessionId]: 'chat' | 'terminal' }
+  const [focusedPane, setFocusedPane] = useState(0);
+  const [awareness, setAwareness] = useState(null);
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
 
@@ -547,6 +552,38 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
+  // Toggle view mode for a session
+  const toggleViewMode = useCallback((sessionId) => {
+    setViewModes((prev) => ({
+      ...prev,
+      [sessionId]: prev[sessionId] === "terminal" ? "chat" : "terminal",
+    }));
+  }, []);
+
+  // Get the focused session for awareness polling
+  const focusedSession = useMemo(() => {
+    const id = activeIds[focusedPane];
+    return id != null ? sessions.find((s) => s.id === id) : null;
+  }, [activeIds, focusedPane, sessions]);
+
+  // Poll /api/awareness for the focused session's workdir
+  useEffect(() => {
+    if (!backendReady || !focusedSession?.workdir) {
+      setAwareness(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchAwareness = async () => {
+      try {
+        const res = await fetch(`/api/awareness?workdir=${encodeURIComponent(focusedSession.workdir)}`);
+        if (res.ok && !cancelled) setAwareness(await res.json());
+      } catch (_) {}
+    };
+    fetchAwareness();
+    const id = setInterval(fetchAwareness, 15000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [backendReady, focusedSession?.workdir]);
+
   // Sessions currently occupying visible slots (used for broadcast, etc.)
   const visibleSessions = useMemo(() => {
     return activeIds
@@ -932,17 +969,34 @@ export default function App() {
                       {...dndHandlers}
                     >
                       {dropOverlay}
-                      <TerminalPane
-                        ref={(el) => { paneRefs.current[idx] = el; }}
-                        session={session}
-                        onClose={() => removeSession(session.id)}
-                        paneIndex={idx}
-                        onSwap={layout > 1 ? swapPanes : undefined}
-                        onPlace={placeSession}
-                        onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                        terminalZoom={terminalZoom}
-                        toast={toast}
-                      />
+                      {(viewModes[session.id] || "chat") === "chat" ? (
+                        <ChatPane
+                          ref={(el) => { paneRefs.current[idx] = el; }}
+                          session={session}
+                          onClose={() => removeSession(session.id)}
+                          paneIndex={idx}
+                          onSwap={layout > 1 ? swapPanes : undefined}
+                          onPlace={placeSession}
+                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                          toast={toast}
+                          skills={awareness?.skills || []}
+                          isFocused={focusedPane === idx}
+                          onViewToggle={() => toggleViewMode(session.id)}
+                        />
+                      ) : (
+                        <TerminalPane
+                          ref={(el) => { paneRefs.current[idx] = el; }}
+                          session={session}
+                          onClose={() => removeSession(session.id)}
+                          paneIndex={idx}
+                          onSwap={layout > 1 ? swapPanes : undefined}
+                          onPlace={placeSession}
+                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                          terminalZoom={terminalZoom}
+                          toast={toast}
+                          onViewToggle={() => toggleViewMode(session.id)}
+                        />
+                      )}
                     </div>
                   );
                 }

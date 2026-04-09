@@ -115,6 +115,21 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Streaming indicator dots */
+.streaming-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  opacity: 0.4;
+  animation: streaming-bounce 1s ease-in-out infinite;
+}
+
+@keyframes streaming-bounce {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
 /* Drag-and-drop overlay pulse */
 @keyframes drop-target-pulse {
   0%, 100% { box-shadow: 0 0 15px rgba(122, 162, 247, 0.2), inset 0 0 15px rgba(122, 162, 247, 0.03); }

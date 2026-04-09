@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { X, GripVertical } from "lucide-react";
+import { X, GripVertical, MessageSquare } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
@@ -47,6 +47,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
+  onViewToggle,    // () => void — switch to chat view
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -407,6 +408,16 @@ const TerminalPane = forwardRef(function TerminalPane({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {onViewToggle && (
+            <button
+              onClick={onViewToggle}
+              className="p-0.5 rounded transition-colors hover-color-secondary"
+              style={{ color: "var(--text-muted)" }}
+              title="Switch to chat view"
+            >
+              <MessageSquare size={13} />
+            </button>
+          )}
           <button
             onClick={onClose}
             className="p-0.5 rounded transition-colors hover-color-red"

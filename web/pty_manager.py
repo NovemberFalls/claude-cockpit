@@ -416,6 +416,17 @@ class PtyManager:
 
         # Build the command
         import shutil
+
+        # Snapshot existing JSONL files BEFORE spawning so we can detect which
+        # new file Claude Code creates. Claude ignores --session-id and generates
+        # its own UUID, so we discover it by diffing the directory.
+        home = os.path.expanduser("~")
+        project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+        jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
+        pre_spawn_files = set()
+        if os.path.isdir(jsonl_dir):
+            pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
+
         cmd = f"claude --model {model}"
         if resume_session_id:
             cmd += f" --resume {resume_session_id}"
@@ -459,6 +470,8 @@ class PtyManager:
             cols=cols,
             rows=rows,
         )
+        # Store pre-spawn file snapshot for JSONL discovery
+        session._pre_spawn_files = pre_spawn_files
         self.sessions[terminal_id] = session
 
         # Track child PID for crash-recovery cleanup
@@ -530,6 +543,52 @@ class PtyManager:
             logger.debug("Resize failed for %s", terminal_id, exc_info=True)
             return False
 
+    def _get_jsonl_path(self, session) -> str | None:
+        """Derive the path to Claude Code's JSONL session file.
+
+        Claude Code stores conversation data at:
+          ~/.claude/projects/<project-id>/<session-id>.jsonl
+
+        Discovery strategy (in order):
+        1. If we know the session ID, use it directly
+        2. Find new files that appeared after this session was spawned
+        3. Fallback: use the most recently modified JSONL file in the project
+           (covers /resume which reuses existing files)
+        """
+        if not session.working_dir:
+            return None
+
+        home = os.path.expanduser("~")
+        project_id = session.working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+        jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
+
+        # Strategy 1: known session ID — once discovered, locked in permanently.
+        # We don't re-discover because the fallback strategy can pick up the wrong
+        # file (e.g., another active Claude session's JSONL).
+        if session.claude_session_id:
+            path = os.path.join(jsonl_dir, f"{session.claude_session_id}.jsonl")
+            if os.path.isfile(path):
+                return path
+
+        if not os.path.isdir(jsonl_dir):
+            return None
+
+        # Strategy 2: find new files since spawn
+        pre = getattr(session, '_pre_spawn_files', None)
+        if pre is not None:
+            current_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
+            new_files = current_files - pre
+            if new_files:
+                newest = max(new_files, key=lambda f: os.path.getmtime(os.path.join(jsonl_dir, f)))
+                discovered_id = newest.replace(".jsonl", "")
+                session.claude_session_id = discovered_id
+                logger.info("Discovered JSONL (new file): %s for terminal %s", discovered_id, session.id)
+                return os.path.join(jsonl_dir, newest)
+
+        # No discovery succeeded. For /resume sessions, the user should use
+        # terminal mode — chat mode requires a discoverable JSONL file.
+        return None
+
     def list_terminals(self) -> list[dict]:
         """List all terminals, marking dead ones but NOT removing them.
 
@@ -551,6 +610,7 @@ class PtyManager:
                 "created_at": session.created_at,
                 "working_dir": session.working_dir,
                 "claude_session_id": session.claude_session_id,
+                "jsonl_path": self._get_jsonl_path(session),
                 "bypass_permissions": session.bypass_permissions,
                 "cols": session.cols,
                 "rows": session.rows,
