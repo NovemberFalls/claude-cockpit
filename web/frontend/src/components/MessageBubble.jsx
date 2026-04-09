@@ -19,13 +19,13 @@ marked.setOptions({
  */
 function cleanMessageText(text) {
   if (!text || typeof text !== "string") return text;
-  // Strip system-reminder blocks
-  let cleaned = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
+  // Strip block-level tags with content (may be truncated)
+  let cleaned = text.replace(/<(?:system-reminder|local-command-caveat)[^>]*>[\s\S]*?(?:<\/(?:system-reminder|local-command-caveat)>|$)/g, "");
   // If command-args present, extract just its content
   const argsMatch = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/);
   if (argsMatch) return argsMatch[1].trim();
   // Strip any remaining XML-like tags from command protocol
-  cleaned = cleaned.replace(/<\/?(?:command-message|command-name|command-args)>/g, "").trim();
+  cleaned = cleaned.replace(/<\/?(?:command-message|command-name|command-args|scheduled-task)[^>]*>/g, "").trim();
   return cleaned || text;
 }
 

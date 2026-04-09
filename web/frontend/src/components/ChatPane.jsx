@@ -344,10 +344,10 @@ const ChatPane = forwardRef(function ChatPane({
           )}
         </div>
         <div className="flex items-center gap-1">
-          {/* Remote control — send /remote-control to PTY */}
+          {/* Remote control — try /remote-control, fall back to /rc */}
           {connected && (
             <button
-              onClick={() => handleSend("/remote-control")}
+              onClick={() => handleSend("/rc")}
               className="p-0.5 rounded transition-colors hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
               title="Enable remote control from phone"
