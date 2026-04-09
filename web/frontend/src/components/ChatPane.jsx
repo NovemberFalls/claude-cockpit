@@ -7,23 +7,74 @@ import StreamingIndicator from "./StreamingIndicator";
 import ChatInput from "./ChatInput";
 
 /**
- * Group messages: pair tool_result messages with their preceding assistant message.
- * Instead of showing tool_use + tool_result as separate entries, attach the results
- * to the assistant message so ToolCallGroup can render them together.
+ * Check if an assistant message contains ONLY tool_use blocks (no text).
+ */
+function isToolOnlyAssistant(msg) {
+  if (msg.type !== "assistant") return false;
+  const blocks = msg.content || [];
+  return blocks.length > 0 && blocks.every((b) => b.type === "tool_use" || b.type === "thinking");
+}
+
+/**
+ * Group messages:
+ * 1. Merge consecutive tool-only assistant messages into one
+ * 2. Pair tool_result messages with their preceding assistant message
+ * This collapses sequences like [assistant(Read), tool_result, assistant(Read), tool_result]
+ * into a single "3 tool calls" collapsed section.
  */
 function groupMessages(messages) {
   const result = [];
-  for (let i = 0; i < messages.length; i++) {
+  let i = 0;
+  while (i < messages.length) {
     const msg = messages[i];
+
+    // Skip tool_results — they get paired with the preceding assistant message
     if (msg.type === "tool_result") {
-      // Attach to the last assistant message's _pairedResults
-      // (already handled below when we see tool_use in assistant messages)
-      // Skip standalone rendering — MessageBubble returns null for tool_result
       result.push(msg);
+      i++;
       continue;
     }
+
+    // For tool-only assistant messages, merge consecutive ones
+    if (isToolOnlyAssistant(msg)) {
+      const mergedToolBlocks = [];
+      const mergedResults = [];
+      const mergedThinking = [];
+      let j = i;
+
+      // Consume consecutive [tool-only-assistant, tool_result*] sequences
+      while (j < messages.length) {
+        const current = messages[j];
+        if (isToolOnlyAssistant(current)) {
+          for (const block of current.content || []) {
+            if (block.type === "tool_use") mergedToolBlocks.push(block);
+            else if (block.type === "thinking") mergedThinking.push(block);
+          }
+          j++;
+          // Consume following tool_results
+          while (j < messages.length && messages[j].type === "tool_result") {
+            for (const block of messages[j].content || []) {
+              mergedResults.push(block);
+            }
+            j++;
+          }
+        } else {
+          break;
+        }
+      }
+
+      // Build merged message using the first message as base
+      result.push({
+        ...msg,
+        content: [...mergedThinking, ...mergedToolBlocks],
+        _pairedResults: mergedResults,
+      });
+      i = j;
+      continue;
+    }
+
+    // Assistant message with text + tool_use: pair with following tool_results
     if (msg.type === "assistant" && msg.content?.some((b) => b.type === "tool_use")) {
-      // Look ahead for the following tool_result message(s)
       const pairedResults = [];
       let j = i + 1;
       while (j < messages.length && messages[j].type === "tool_result") {
@@ -33,9 +84,12 @@ function groupMessages(messages) {
         j++;
       }
       result.push({ ...msg, _pairedResults: pairedResults });
-    } else {
-      result.push(msg);
+      i = j;
+      continue;
     }
+
+    result.push(msg);
+    i++;
   }
   return result;
 }
