@@ -1,4 +1,4 @@
-import { Pencil, Brain, CircleHelp, CircleCheck, CircleX, Loader } from "lucide-react";
+import { Pencil, Brain, CircleHelp, CircleCheck, CircleX, Loader, Clock } from "lucide-react";
 
 const stateIconMap = {
   busy: { icon: Pencil, color: "var(--accent)", className: "state-icon-busy" },
@@ -6,6 +6,7 @@ const stateIconMap = {
   waiting: { icon: CircleHelp, color: "var(--yellow)", className: "" },
   idle: { icon: CircleCheck, color: "var(--green)", className: "" },
   running: { icon: CircleCheck, color: "var(--green)", className: "" },
+  history: { icon: Clock, color: "var(--text-muted)", className: "" },
   error: { icon: CircleX, color: "var(--red)", className: "" },
   starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
 };

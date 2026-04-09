@@ -35,7 +35,7 @@ function loadSavedSessions() { return lsLoad(SESSIONS_KEY); }
 
 function saveSessions(sessions) {
   const toSave = sessions
-    .filter((s) => s.status !== "error")
+    .filter((s) => s.status !== "error" && s.status !== "history")
     .map(({ name, model, workdir }) => ({ name, model, workdir }));
   lsSave(SESSIONS_KEY, toSave);
 }
@@ -589,9 +589,9 @@ export default function App() {
       name: cleanHistoryName(historySession.first_message) || "History",
       terminalId: null,
       model: historySession.model || "unknown",
-      status: "running",
+      status: "history",
       workdir: historySession.workdir,
-      activityState: "idle",
+      activityState: "history",
       tokens: 0,
       cost: 0,
       context_percent: null,
@@ -636,9 +636,12 @@ export default function App() {
       cleanHistoryName(historySession.first_message) || "Resumed",
       historySession.workdir,
       historySession.model,
-      { resumeSessionId: historySession.session_id }
+      {
+        resumeSessionId: historySession.session_id,
+        bypassPermissions: getLocationBypass(historySession.workdir),
+      }
     );
-  }, [historyViews, createSession]);
+  }, [historyViews, createSession, getLocationBypass]);
 
   // Get the focused session for awareness polling
   const focusedSession = useMemo(() => {
@@ -890,7 +893,7 @@ export default function App() {
                   onAddLocations={addLocations}
                   onRemoveLocation={removeLocation}
                   gitStatuses={gitStatuses}
-                  historyWorkdir={focusedSession?.workdir || ""}
+                  historyWorkdir={focusedSession?.workdir || sessions[0]?.workdir || savedLocations[0]?.path || ""}
                   onViewHistorySession={viewHistorySession}
                   onResumeHistorySession={resumeHistorySession}
                   backendReady={backendReady}
