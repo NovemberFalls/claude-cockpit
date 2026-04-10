@@ -833,10 +833,6 @@ def _read_last_line(filepath: Path) -> str:
 import re
 
 _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
-_XML_TAGS_RE = re.compile(
-    r"</?(?:command-message|command-name|command-args|system-reminder|"
-    r"local-command-caveat|scheduled-task)[^>]*>[\s\S]*?(?:</\1>)?"
-)
 _XML_BLOCK_RE = re.compile(r"<(?:system-reminder|local-command-caveat)[^>]*>[\s\S]*?</(?:system-reminder|local-command-caveat)>")
 _XML_SIMPLE_RE = re.compile(r"</?(?:command-message|command-name|command-args|scheduled-task)[^>]*>")
 
