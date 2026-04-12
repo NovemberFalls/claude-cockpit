@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [1.3.1] - 2026-04-12
+
+### Changed
+- Removed stale "MCP" references from `pty_manager.py` and `server.py` output-buffer docstrings. The ring buffer and `get_output_buffer()` are still in active use by the REST history/resume endpoint; only the comments referenced the long-retired cockpit MCP server.
+
 ## [1.3.0] - 2026-04-10
 
 ### Changed

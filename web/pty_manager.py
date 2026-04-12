@@ -57,7 +57,7 @@ class SessionStateTracker:
         if len(self.buffer) > 2000:
             self.buffer = self.buffer[-2000:]
 
-        # Accumulate into per-line ring buffer for MCP get_output
+        # Accumulate into per-line ring buffer for history/resume
         combined = self._line_fragment + clean
         lines = combined.split("\n")
         self._line_fragment = lines[-1]
@@ -323,7 +323,7 @@ class PtyManager:
                 self.kill_terminal(tid)
 
     def get_output_buffer(self, terminal_id: str) -> list:
-        """Return last 200 ANSI-stripped lines of output for a session (for MCP)."""
+        """Return last 500 ANSI-stripped lines of output for a session (history/resume)."""
         session = self.sessions.get(terminal_id)
         if not session:
             return []

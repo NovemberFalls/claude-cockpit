@@ -300,8 +300,8 @@ async def _session_reader(terminal_id: str):
     """Drain PTY output for a session — feeds state tracker and queues data for WebSocket consumers.
 
     Runs as a background task for every session. Without this, sessions with no
-    active WebSocket connection (e.g. MCP-spawned workers) have their PTY output
-    buffer fill up, stalling or killing the underlying Claude process.
+    active WebSocket connection (e.g. detached/background terminals) have their
+    PTY output buffer fill up, stalling or killing the underlying Claude process.
     """
     session = pty_manager.get_terminal(terminal_id)
     if not session:
