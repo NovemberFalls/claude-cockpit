@@ -1,8 +1,10 @@
-import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHandle } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { X, GripVertical, MessageSquare } from "lucide-react";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
+import { X, GripVertical, GitFork, Search } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
@@ -47,7 +49,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
-  onViewToggle,    // () => void — switch to chat view
+  onFork,          // () => void — fork session (new session, same workdir)
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -59,12 +61,28 @@ const TerminalPane = forwardRef(function TerminalPane({
   const reconnectAttempts = useRef(0);
   const pendingDataRef = useRef("");  // Batched WS data for xterm
   const writeRafRef = useRef(null);   // rAF handle for batched writes
+  const searchRef = useRef(null);       // SearchAddon instance
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef(null);
   const { theme } = useTheme();
 
   // Expose focus() to parent via ref
   useImperativeHandle(ref, () => ({
     focus: () => xtermRef.current?.focus(),
   }));
+
+  const searchNext = useCallback(() => {
+    if (searchRef.current && searchQuery) {
+      searchRef.current.findNext(searchQuery, { regex: false, caseSensitive: false });
+    }
+  }, [searchQuery]);
+
+  const searchPrev = useCallback(() => {
+    if (searchRef.current && searchQuery) {
+      searchRef.current.findPrevious(searchQuery, { regex: false, caseSensitive: false });
+    }
+  }, [searchQuery]);
 
   // Safe fit: guard against zero-dimension containers and send resize to PTY
   const safeFit = useCallback(() => {
@@ -184,6 +202,21 @@ const TerminalPane = forwardRef(function TerminalPane({
     term.loadAddon(webLinksAddon);
     term.open(termRef.current);
 
+    // GPU-accelerated rendering (falls back to canvas if WebGL unavailable)
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+      });
+      term.loadAddon(webgl);
+    } catch {
+      // WebGL not available — canvas renderer works fine
+    }
+
+    const searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+    searchRef.current = searchAddon;
+
     xtermRef.current = term;
     fitRef.current = fitAddon;
 
@@ -195,6 +228,16 @@ const TerminalPane = forwardRef(function TerminalPane({
     // session lockups caused by sending \x03 to an unresponsive process.
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return true;
+
+      // Ctrl+Shift+F: toggle terminal search
+      if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && ev.key === "F") {
+        setSearchVisible((v) => {
+          if (!v) setTimeout(() => searchInputRef.current?.focus(), 0);
+          else searchRef.current?.clearDecorations();
+          return !v;
+        });
+        return false;
+      }
 
       // Ctrl+C: copy if selection exists, otherwise let terminal send \x03
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "c" && !ev.shiftKey) {
@@ -214,15 +257,61 @@ const TerminalPane = forwardRef(function TerminalPane({
       }
 
       // Ctrl+V / Ctrl+Shift+V: paste from clipboard.
-      // Wrap in bracketed paste sequences so Claude Code receives the full
-      // block as a single paste event rather than processing each line
-      // independently as it arrives through the PTY.
+      // Images are uploaded to /api/upload and the file path is injected into
+      // the terminal. Text is wrapped in bracketed paste sequences so Claude
+      // Code receives the full block as a single paste event rather than
+      // processing each line independently as it arrives through the PTY.
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
-        navigator.clipboard.readText().then((text) => {
+        const pasteText = (text) => {
           if (text && wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(`\x1b[200~${text}\x1b[201~`);
           }
-        }).catch(() => {});
+        };
+
+        // clipboard.read() can hang waiting for a permission dialog in some
+        // WebView2 / browser contexts. Use a 200ms timeout as a hard fallback
+        // so text paste always works even if image detection is blocked.
+        let handled = false;
+        const fallback = () => {
+          if (handled) return;
+          handled = true;
+          navigator.clipboard.readText().then(pasteText).catch(() => {});
+        };
+        const timer = setTimeout(fallback, 200);
+
+        navigator.clipboard.read().then(async (items) => {
+          clearTimeout(timer);
+          if (handled) return;
+          for (const item of items) {
+            const imageType = item.types.find((t) => t.startsWith("image/"));
+            if (imageType) {
+              handled = true;
+              try {
+                const blob = await item.getType(imageType);
+                const ext = imageType.split("/")[1]?.split("+")[0] || "png";
+                const file = new File([blob], `paste.${ext}`, { type: imageType });
+                const formData = new FormData();
+                formData.append("files", file);
+                const res = await fetch("/api/upload", { method: "POST", body: formData });
+                const data = await res.json();
+                if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
+                  const p = data.paths[0];
+                  wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+                  toast?.("Image pasted", "success");
+                } else if (data.errors?.length) {
+                  toast?.(`Image paste failed: ${data.errors[0]}`, "error");
+                }
+              } catch (err) {
+                toast?.(`Image paste failed: ${err.message}`, "error");
+              }
+              return;
+            }
+          }
+          fallback();
+        }).catch(() => {
+          clearTimeout(timer);
+          fallback();
+        });
         return false;
       }
 
@@ -257,6 +346,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       term.dispose();
       xtermRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
       pendingDataRef.current = "";
       writeRafRef.current = null;
     };
@@ -408,14 +498,14 @@ const TerminalPane = forwardRef(function TerminalPane({
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {onViewToggle && (
+          {onFork && (
             <button
-              onClick={onViewToggle}
+              onClick={onFork}
               className="p-0.5 rounded transition-colors hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
-              title="Switch to chat view"
+              title="Fork session (new session, same workdir)"
             >
-              <MessageSquare size={13} />
+              <GitFork size={13} />
             </button>
           )}
           <button
@@ -442,6 +532,80 @@ const TerminalPane = forwardRef(function TerminalPane({
                 : "var(--green)",
             transition: "width 0.5s ease, background-color 0.3s ease",
           }} />
+        </div>
+      )}
+
+      {/* Search bar */}
+      {searchVisible && (
+        <div
+          className="flex items-center gap-1 px-2 h-8 flex-shrink-0"
+          style={{
+            borderBottom: "1px solid var(--border-color)",
+            backgroundColor: "var(--bg-surface)",
+          }}
+        >
+          <Search size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+          <input
+            ref={searchInputRef}
+            className="flex-1 text-xs px-1.5 py-0.5 rounded"
+            style={{
+              backgroundColor: "var(--bg-elevated)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-color)",
+              outline: "none",
+              minWidth: 0,
+            }}
+            placeholder="Search terminal..."
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              if (e.target.value) {
+                searchRef.current?.findNext(e.target.value, { regex: false, caseSensitive: false });
+              } else {
+                searchRef.current?.clearDecorations();
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (e.shiftKey) searchPrev();
+                else searchNext();
+              }
+              if (e.key === "Escape") {
+                setSearchVisible(false);
+                setSearchQuery("");
+                searchRef.current?.clearDecorations();
+                xtermRef.current?.focus();
+              }
+            }}
+          />
+          <button
+            onClick={searchPrev}
+            className="text-[10px] px-1.5 py-0.5 rounded hover-bg-elevated"
+            style={{ color: "var(--text-muted)" }}
+            title="Previous (Shift+Enter)"
+          >
+            ↑
+          </button>
+          <button
+            onClick={searchNext}
+            className="text-[10px] px-1.5 py-0.5 rounded hover-bg-elevated"
+            style={{ color: "var(--text-muted)" }}
+            title="Next (Enter)"
+          >
+            ↓
+          </button>
+          <button
+            onClick={() => {
+              setSearchVisible(false);
+              setSearchQuery("");
+              searchRef.current?.clearDecorations();
+              xtermRef.current?.focus();
+            }}
+            className="text-[10px] px-1 py-0.5 rounded hover-bg-elevated"
+            style={{ color: "var(--text-muted)" }}
+          >
+            ✕
+          </button>
         </div>
       )}
 

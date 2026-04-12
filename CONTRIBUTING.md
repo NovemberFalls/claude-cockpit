@@ -49,7 +49,7 @@ Thank you for your interest in contributing to Claude Cockpit! This guide will h
 ```bash
 cd web && python -m pytest tests/ -v
 ```
-Currently 24 tests. All must pass before submitting a PR.
+Currently 74 tests. All must pass before submitting a PR.
 
 ### Frontend tests
 ```bash
@@ -73,7 +73,9 @@ cd web/frontend && npm run lint
 
 ## Platform
 
-Claude Cockpit uses ConPTY/pywinpty for terminal management and is **Windows-only**. Please test all changes on Windows before submitting a PR. There is no Linux or macOS PTY support at this time.
+Claude Cockpit uses ConPTY/pywinpty on Windows and ptyprocess on Linux/macOS. The pre-built desktop app targets **Windows 10/11**. Running from source works on **Linux and macOS** via the `unix_pty.py` backend.
+
+Please test changes on Windows before submitting a PR. If your change touches `pty_manager.py` or `pty_backend.py`, verify it doesn't break the platform-routing logic in `get_backend()`.
 
 ## License
 

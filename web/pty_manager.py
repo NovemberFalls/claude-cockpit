@@ -680,8 +680,10 @@ class PtyManager:
         data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
         timeout = max(5.0, 5.0 + (data_len / 32768))
 
-        # Small payloads: single write (fast path)
-        if data_len <= 8192:
+        # Small payloads: single write (fast path).
+        # Threshold is 400 bytes — winpty (used in dev mode) has a ~512-byte
+        # pipe write limit; staying well under it prevents paste truncation.
+        if data_len <= 400:
             try:
                 return await asyncio.wait_for(
                     loop.run_in_executor(
@@ -697,8 +699,9 @@ class PtyManager:
                 logger.debug("PTY async write error for %s", terminal_id)
                 return False
 
-        # Large payloads: chunk with async yields to let the pipe drain
-        chunk_size = 8192
+        # Larger payloads: chunk with async yields to let the pipe drain.
+        # 400-byte chunks keep each write under winpty's pipe limit.
+        chunk_size = 400
         offset = 0
         while offset < len(data):
             chunk = data[offset:offset + chunk_size]
@@ -722,10 +725,10 @@ class PtyManager:
                 logger.debug("PTY async write error for %s", terminal_id)
                 return False
             offset += chunk_size
-            # Yield to event loop between chunks — lets the pipe drain
-            # and keeps WebSocket heartbeats responsive
+            # Yield to event loop between chunks so heartbeats stay responsive.
+            # sleep(0) is enough — no actual delay needed, winpty drains fast.
             if offset < len(data):
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0)
         return True
 
     def _write_pty_sync(self, terminal_id: str, data: str) -> bool:

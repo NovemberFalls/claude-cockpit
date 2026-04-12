@@ -8,21 +8,19 @@ Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend
 claude-cockpit/
   web/
     server.py          # FastAPI app (port 8420), terminal CRUD, WS bridge
-    pty_manager.py     # ConPTY process manager (Windows-specific, winpty)
+    pty_manager.py     # PTY session manager (cross-platform via pty_backend.py)
     logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty)
     tests/             # Python test suite (pytest + pytest-asyncio)
     frontend/
       src/
         App.jsx        # Root component, all session state, session reconciliation
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog,
-                       # ErrorBoundary, Toast, ConfirmDialog, HexGrid, ApiKeysPanel,
-                       # OnboardingModal, StateIcon
+                       # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon
         __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)
       src-tauri/       # Tauri desktop wrapper (Rust, NSIS installer)
-    static/            # Legacy vanilla JS app (unused)
-  src/cockpit/         # Legacy TUI (Textual, not actively used)
+  # Legacy directories (static/, src/cockpit/) removed in v1.3.0 hygiene sweep
 ```
 
 ## How to Run
@@ -65,14 +63,14 @@ cd web/frontend && npm run lint
 
 - **CSS hover utilities:** Use CSS hover classes (`hover-bg-surface`, `hover-color-red`, etc.) defined in `index.css` instead of JS `onMouseEnter`/`onMouseLeave` handlers for performance.
 - **Python logging:** Use `cockpit.server`, `cockpit.pty`, and other `cockpit.*` loggers via `logging.getLogger()`. No `print()` statements.
-- **React components:** Sidebar sub-components (`SessionItem`, `LocationNode`, `InstanceGroup`) are module-scope, not nested inside parent components. They receive all dependencies via props to avoid React identity/re-render issues.
+- **React components:** Sidebar sub-components (`SessionItem`, `LocationNode`, `LocationContextMenu`) are module-scope, not nested inside parent components. They receive all dependencies via props to avoid React identity/re-render issues.
 - **Themes:** 10 color palettes with dark/light variants in `themeData.js`. Theme context provided by `useTheme` hook.
 - **Error handling:** No bare `except Exception: pass`. Always log with `exc_info=True`.
 - **User errors:** Surface via Toast notifications, not console.log.
 
 ## Architecture
 
-- **ConPTY ctypes wrapper:** `pty_manager.py` uses `winpty.PtyProcess` to spawn `claude --model {model}` processes. For bundled (Tauri) mode, a ctypes wrapper around Windows ConPTY APIs handles pseudo-terminal creation.
+- **PTY backend abstraction:** `pty_backend.py` provides `get_backend()` which selects the platform-appropriate PTY implementation: `winpty.PtyProcess` (dev mode on Windows), `conpty.PtyProcess` (bundled/Tauri mode on Windows), or `unix_pty.UnixPtyProcess` (Linux/macOS). `pty_manager.py` calls this factory to spawn `claude --model {model}` processes.
 - **SessionStateTracker:** Parses ANSI escape sequences from terminal output to track session activity state (idle, busy, waiting, starting).
 - **WebSocket bridge:** `/ws/terminal/{id}` proxies between the browser and ConPTY, with ping/pong heartbeat every 30 seconds.
 - **Session model:** `{ id, name, terminalId, model, status, workdir }` -- workdir supported end-to-end from frontend through REST API to ConPTY cwd.

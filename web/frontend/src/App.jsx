@@ -4,7 +4,6 @@ import HexGrid from "./components/HexGrid";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
-import ChatPane from "./components/ChatPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
@@ -14,6 +13,7 @@ const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
 const SESSIONS_KEY = "cockpit-sessions";
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
+const WORKSPACES_KEY = "cockpit-workspaces";
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -49,16 +49,6 @@ function notifyActivityChange(name, terminalId, prevState, currState) {
   } else if (currState === "idle" && prevState === "busy") {
     new Notification("Task Complete", { body: `${name} has finished`, tag: `cockpit-${terminalId}` });
   }
-}
-
-/** Clean XML tags from history session names for pane headers */
-function cleanHistoryName(text) {
-  if (!text) return null;
-  let cleaned = text.replace(/<(?:system-reminder|local-command-caveat)[^>]*>[\s\S]*?(?:<\/(?:system-reminder|local-command-caveat)>|$)/g, "");
-  const m = cleaned.match(/<command-args>([\s\S]*?)<\/command-args>/);
-  if (m) cleaned = m[1];
-  cleaned = cleaned.replace(/<\/?(?:command-message|command-name|command-args|scheduled-task)[^>]*>/g, "").trim();
-  return cleaned ? cleaned.slice(0, 40) : null;
 }
 
 const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
@@ -108,13 +98,7 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(() => {
     try { return localStorage.getItem(ONBOARDING_KEY) !== "true"; } catch (_) { return true; }
   });
-  // Per-session view mode: 'chat' (default) or 'terminal'
-  const [viewModes, setViewModes] = useState({}); // { [sessionId]: 'chat' | 'terminal' }
-  const [focusedPane, setFocusedPane] = useState(0);
-  const [awareness, setAwareness] = useState(null);
-  // History viewing — tracks which local session id is showing a history session
-  const [historyViews, setHistoryViews] = useState({}); // { [localId]: session_id_string }
-  const [draggedHistorySession, setDraggedHistorySession] = useState(null);
+  const [workspacePresets, setWorkspacePresets] = useState(() => lsLoad(WORKSPACES_KEY, []));
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
 
@@ -328,13 +312,6 @@ export default function App() {
     }
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.map((id) => id === localId ? null : id));
-    // Clean up history view tracking if this was a history session
-    setHistoryViews((prev) => {
-      if (!(localId in prev)) return prev;
-      const next = { ...prev };
-      delete next[localId];
-      return next;
-    });
   }, [sessions]);
 
   // Select a session: fill an empty pane slot if available, never auto-rearrange
@@ -573,99 +550,55 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
-  // Toggle view mode for a session
-  const toggleViewMode = useCallback((sessionId) => {
-    setViewModes((prev) => ({
-      ...prev,
-      [sessionId]: prev[sessionId] === "terminal" ? "chat" : "terminal",
-    }));
-  }, []);
-
-  // View a history session in read-only mode
-  const viewHistorySession = useCallback((historySession) => {
-    const localId = nextLocalId++;
-    const syntheticSession = {
-      id: localId,
-      name: cleanHistoryName(historySession.first_message) || "History",
-      terminalId: null,
-      model: historySession.model || "unknown",
-      status: "history",
-      workdir: historySession.workdir,
-      activityState: "history",
-      tokens: 0,
-      cost: 0,
-      context_percent: null,
+  // Fork a session: create a new session in the same workdir with continue
+  const forkSession = useCallback((sessionId) => {
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    createSession(
+      `${session.name} (fork)`,
+      session.workdir,
+      session.model,
+      { continueSession: true, bypassPermissions: session.bypassPermissions }
+    );
+  }, [sessions, createSession]);
+  // Workspace preset management
+  const saveWorkspace = useCallback((name) => {
+    const preset = {
+      name,
+      layout,
+      sessions: sessions
+        .filter((s) => s.status === "running")
+        .map(({ name, model, workdir }) => ({ name, model, workdir })),
+      activeIds: activeIds.slice(0, layout).map((id) => {
+        if (id == null) return null;
+        const s = sessions.find((s) => s.id === id);
+        return s ? sessions.filter((x) => x.status === "running").indexOf(s) : null;
+      }),
     };
-    setSessions((prev) => [...prev, syntheticSession]);
-    setActiveIds((prev) => {
-      const slot = findEmptySlot(prev, layout);
-      if (slot === -1) {
-        // Replace focused pane
-        const next = [...prev];
-        next[focusedPane] = localId;
-        return next;
-      }
-      const next = [...prev];
-      while (next.length <= slot) next.push(null);
-      next[slot] = localId;
+    setWorkspacePresets((prev) => {
+      const next = [...prev.filter((p) => p.name !== name), preset];
+      lsSave(WORKSPACES_KEY, next);
       return next;
     });
-    setHistoryViews((prev) => ({
-      ...prev,
-      [localId]: historySession.session_id,
-    }));
-  }, [layout, focusedPane]);
+    toast(`Workspace "${name}" saved`, "success");
+  }, [layout, sessions, activeIds, toast]);
 
-  // Resume a history session as a live session
-  const resumeHistorySession = useCallback((historySession) => {
-    // Remove the history view session if it exists
-    const historyLocalId = Object.entries(historyViews).find(
-      ([_, sid]) => sid === historySession.session_id
-    )?.[0];
-    if (historyLocalId) {
-      const id = parseInt(historyLocalId);
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      setActiveIds((prev) => prev.map((aid) => aid === id ? null : aid));
-      setHistoryViews((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
+  const loadWorkspace = useCallback(async (preset) => {
+    setLayout(preset.layout);
+    // Create sessions from preset
+    for (const s of preset.sessions) {
+      await createSession(s.name, s.workdir, s.model);
     }
-    createSession(
-      cleanHistoryName(historySession.first_message) || "Resumed",
-      historySession.workdir,
-      historySession.model,
-      {
-        resumeSessionId: historySession.session_id,
-        bypassPermissions: getLocationBypass(historySession.workdir),
-      }
-    );
-  }, [historyViews, createSession, getLocationBypass]);
+    toast(`Workspace "${preset.name}" loaded`, "success");
+  }, [createSession, toast]);
 
-  // Get the focused session for awareness polling
-  const focusedSession = useMemo(() => {
-    const id = activeIds[focusedPane];
-    return id != null ? sessions.find((s) => s.id === id) : null;
-  }, [activeIds, focusedPane, sessions]);
-
-  // Poll /api/awareness for the focused session's workdir
-  useEffect(() => {
-    if (!backendReady || !focusedSession?.workdir) {
-      setAwareness(null);
-      return;
-    }
-    let cancelled = false;
-    const fetchAwareness = async () => {
-      try {
-        const res = await fetch(`/api/awareness?workdir=${encodeURIComponent(focusedSession.workdir)}`);
-        if (res.ok && !cancelled) setAwareness(await res.json());
-      } catch (_) {}
-    };
-    fetchAwareness();
-    const id = setInterval(fetchAwareness, 15000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [backendReady, focusedSession?.workdir]);
+  const deleteWorkspace = useCallback((name) => {
+    setWorkspacePresets((prev) => {
+      const next = prev.filter((p) => p.name !== name);
+      lsSave(WORKSPACES_KEY, next);
+      return next;
+    });
+  }, []);
 
   // Sessions currently occupying visible slots (used for broadcast, etc.)
   const visibleSessions = useMemo(() => {
@@ -893,11 +826,11 @@ export default function App() {
                   onAddLocations={addLocations}
                   onRemoveLocation={removeLocation}
                   gitStatuses={gitStatuses}
-                  historyWorkdir={focusedSession?.workdir || sessions[0]?.workdir || savedLocations[0]?.path || ""}
-                  onViewHistorySession={viewHistorySession}
-                  onResumeHistorySession={resumeHistorySession}
                   backendReady={backendReady}
-                  onDragHistorySession={setDraggedHistorySession}
+                  workspacePresets={workspacePresets}
+                  onSaveWorkspace={saveWorkspace}
+                  onLoadWorkspace={loadWorkspace}
+                  onDeleteWorkspace={deleteWorkspace}
                 />
                 {/* Resize handle */}
                 <div
@@ -1008,9 +941,6 @@ export default function App() {
                     } else if (data.startsWith("pane:")) {
                       const from = parseInt(data.slice(5), 10);
                       if (!isNaN(from) && from !== idx) swapPanes(from, idx);
-                    } else if (data.startsWith("history:") && draggedHistorySession) {
-                      viewHistorySession(draggedHistorySession);
-                      setDraggedHistorySession(null);
                     }
                   },
                 };
@@ -1062,41 +992,18 @@ export default function App() {
                       {...dndHandlers}
                     >
                       {dropOverlay}
-                      {(viewModes[session.id] || "chat") === "chat" ? (
-                        <ChatPane
-                          ref={(el) => { paneRefs.current[idx] = el; }}
-                          session={session}
-                          onClose={() => removeSession(session.id)}
-                          paneIndex={idx}
-                          onSwap={layout > 1 ? swapPanes : undefined}
-                          onPlace={placeSession}
-                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                          toast={toast}
-                          skills={awareness?.skills || []}
-                          isFocused={focusedPane === idx}
-                          onViewToggle={() => toggleViewMode(session.id)}
-                          historySessionId={historyViews[session.id] || null}
-                          onResume={historyViews[session.id] ? () => resumeHistorySession({
-                            session_id: historyViews[session.id],
-                            workdir: session.workdir,
-                            model: session.model,
-                            first_message: session.name,
-                          }) : undefined}
-                        />
-                      ) : (
-                        <TerminalPane
-                          ref={(el) => { paneRefs.current[idx] = el; }}
-                          session={session}
-                          onClose={() => removeSession(session.id)}
-                          paneIndex={idx}
-                          onSwap={layout > 1 ? swapPanes : undefined}
-                          onPlace={placeSession}
-                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                          terminalZoom={terminalZoom}
-                          toast={toast}
-                          onViewToggle={() => toggleViewMode(session.id)}
-                        />
-                      )}
+                      <TerminalPane
+                        ref={(el) => { paneRefs.current[idx] = el; }}
+                        session={session}
+                        onClose={() => removeSession(session.id)}
+                        paneIndex={idx}
+                        onSwap={layout > 1 ? swapPanes : undefined}
+                        onPlace={placeSession}
+                        onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                        terminalZoom={terminalZoom}
+                        toast={toast}
+                        onFork={() => forkSession(session.id)}
+                      />
                     </div>
                   );
                 }

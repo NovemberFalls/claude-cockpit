@@ -7,6 +7,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,8 +20,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 load_dotenv()
 
@@ -53,10 +55,8 @@ app.add_middleware(
 
 # Detect PyInstaller bundle for static file path
 if getattr(sys, "_MEIPASS", None):
-    STATIC_DIR = Path(sys._MEIPASS) / "static"
     FRONTEND_DIST = Path(sys._MEIPASS) / "frontend_dist"
 else:
-    STATIC_DIR = Path(__file__).parent / "static"
     FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
 
 # Session-scoped temp directory for file uploads
@@ -112,8 +112,7 @@ async def index():
             FRONTEND_DIST / "index.html",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
-    # Fallback to legacy static frontend
-    return FileResponse(STATIC_DIR / "index.html")
+    return HTMLResponse("Frontend not built. Run: cd web/frontend && npm run build", 404)
 
 
 @app.get("/api/me")
@@ -487,8 +486,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
-    last_pong = _time.time()
-
     async def pty_to_ws():
         """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY)."""
         while session.alive:
@@ -519,18 +516,9 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             pass
 
     async def heartbeat():
-        """Send periodic ping; close connection if client stops responding."""
-        nonlocal last_pong
+        """Send periodic ping to keep the connection alive."""
         while True:
             await asyncio.sleep(30)
-            # If no pong received for 2 heartbeat cycles, connection is dead
-            if _time.time() - last_pong > 90:
-                logger.info("WS client unresponsive for terminal %s — closing", terminal_id)
-                try:
-                    await websocket.close(code=1001, reason="Pong timeout")
-                except Exception:
-                    pass
-                break
             try:
                 await websocket.send_text('{"type":"ping"}')
             except Exception:
@@ -559,7 +547,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                             )
                             continue
                         if ctrl.get("type") == "pong":
-                            last_pong = _time.time()
                             continue
                     except json.JSONDecodeError:
                         pass
@@ -587,9 +574,6 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
 
 
 # ── JSONL Message Stream (SSE) ───────────────────────────
-
-
-from starlette.responses import StreamingResponse
 
 
 @app.get("/api/terminals/{terminal_id}/messages")
@@ -830,8 +814,6 @@ def _read_last_line(filepath: Path) -> str:
         return ""
 
 
-import re
-
 _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
 _XML_BLOCK_RE = re.compile(r"<(?:system-reminder|local-command-caveat)[^>]*>[\s\S]*?</(?:system-reminder|local-command-caveat)>")
 _XML_SIMPLE_RE = re.compile(r"</?(?:command-message|command-name|command-args|scheduled-task)[^>]*>")
@@ -868,6 +850,7 @@ def _scan_session_file(filepath: Path) -> dict | None:
     session_id: str | None = None
     first_user_message: str | None = None
     model: str | None = None
+    cwd: str | None = None
 
     # Read first 20 lines for metadata
     try:
@@ -904,6 +887,9 @@ def _scan_session_file(filepath: Path) -> dict | None:
 
                 if model is None and entry_type == "assistant":
                     model = msg.get("model")
+
+                if cwd is None:
+                    cwd = obj.get("cwd")
     except Exception:
         logger.debug("Failed to read head of %s", filepath, exc_info=True)
         return None
@@ -955,7 +941,61 @@ def _scan_session_file(filepath: Path) -> dict | None:
         "message_count": message_count,
         "model": model,
         "file_size_kb": round(file_size / 1024, 1),
+        "workdir": cwd or "",
     }
+
+
+def _sort_ts(s: dict) -> float:
+    """Sort key for history sessions — converts any timestamp format to epoch seconds."""
+    ts = s.get("last_modified", "")
+    if not ts:
+        return 0.0
+    try:
+        val = float(ts)
+        return val / 1000 if val > 1e12 else val  # ms → s if needed
+    except (ValueError, TypeError):
+        pass
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _get_all_history_sessions() -> list[dict]:
+    """Scan ALL Claude Code project directories and return merged session list."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.is_dir():
+        return []
+
+    # Cache the all-sessions result keyed on the projects dir mtime
+    try:
+        dir_mtime = projects_dir.stat().st_mtime
+    except OSError:
+        return []
+
+    cache_key = "__all__"
+    if cache_key in _history_cache:
+        cached_mtime, cached_result = _history_cache[cache_key]
+        if cached_mtime == dir_mtime:
+            return cached_result
+
+    all_sessions: list[dict] = []
+    try:
+        for project_dir in projects_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for entry in project_dir.iterdir():
+                if entry.suffix != ".jsonl" or not entry.is_file():
+                    continue
+                meta = _scan_session_file(entry)
+                if meta:
+                    all_sessions.append(meta)
+    except OSError:
+        logger.debug("Failed to scan projects dir", exc_info=True)
+
+    all_sessions.sort(key=_sort_ts, reverse=True)
+    _history_cache[cache_key] = (dir_mtime, all_sessions)
+    return all_sessions
 
 
 def _get_history_sessions(workdir: str) -> list[dict]:
@@ -988,13 +1028,14 @@ def _get_history_sessions(workdir: str) -> list[dict]:
                 continue
             meta = _scan_session_file(entry)
             if meta:
-                meta["workdir"] = workdir
+                # Prefer cwd from the JSONL file; fall back to the requested workdir
+                if not meta.get("workdir"):
+                    meta["workdir"] = workdir
                 sessions.append(meta)
     except OSError:
         logger.debug("Failed to scan JSONL dir: %s", jsonl_dir, exc_info=True)
 
-    # Sort by last_modified descending
-    sessions.sort(key=lambda s: s.get("last_modified", ""), reverse=True)
+    sessions.sort(key=_sort_ts, reverse=True)
 
     _history_cache[cache_key] = (dir_mtime, sessions)
     return sessions
@@ -1002,11 +1043,11 @@ def _get_history_sessions(workdir: str) -> list[dict]:
 
 @app.get("/api/history")
 async def get_history(workdir: str = ""):
-    """Return session metadata for all JSONL files in a project directory."""
-    if not workdir:
-        return JSONResponse({"error": "workdir parameter required"}, status_code=400)
-
-    sessions = _get_history_sessions(workdir)
+    """Return session metadata. Without workdir, returns ALL sessions across every project."""
+    if workdir:
+        sessions = _get_history_sessions(workdir)
+    else:
+        sessions = _get_all_history_sessions()
     return JSONResponse({"sessions": sessions})
 
 
@@ -1066,14 +1107,6 @@ async def frontend_root_files(request: Request):
         file_path = FRONTEND_DIST / filename
         if file_path.is_file():
             return FileResponse(file_path)
-    return HTMLResponse("Not found", 404)
-
-
-@app.get("/static/{path:path}")
-async def static_files(path: str):
-    file_path = STATIC_DIR / path
-    if file_path.is_file():
-        return FileResponse(file_path)
     return HTMLResponse("Not found", 404)
 
 

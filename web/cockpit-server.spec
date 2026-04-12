@@ -16,7 +16,6 @@ a = Analysis(
     pathex=[root],
     binaries=[],
     datas=[
-        (os.path.join(root, 'static'), 'static'),
         (frontend_dist, 'frontend_dist'),
     ],
     hiddenimports=[

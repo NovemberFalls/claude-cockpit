@@ -7,24 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Roadmap
 
-### v0.3.0 — Linux & UX
-- [x] Linux/macOS PTY support (`unix_pty.py` via ptyprocess, registered in `get_backend()`)
+### Completed
+- [x] Linux/macOS PTY support (`unix_pty.py` via ptyprocess)
+- [x] Zoom controls (Ctrl+/-, Ctrl+mousewheel, Ctrl+0 reset)
+- [x] Chat UI with JSONL-powered conversation view (added in v1.1.0, reverted to terminal-only in v1.3.0)
+- [x] History panel for browsing past sessions
+
+### Backlog
 - [ ] Code splitting / lazy loading (bundle >500KB warning)
 - [ ] Session search / filter
 - [ ] Keyboard-driven session switching (Ctrl+Tab)
-- [x] Zoom controls (Ctrl+/-, Ctrl+mousewheel, Ctrl+0 reset)
-
-### v0.4.0 — Cross-Platform
-- [x] Linux PTY backend (`UnixPtyProcess` in `unix_pty.py`, implements `PtyProcess` ABC)
-- [x] macOS PTY backend (same `UnixPtyProcess` — ptyprocess works on both)
 - [ ] CI matrix: Linux + macOS runners
 - [ ] Homebrew formula / apt package
-
-### Future
 - [ ] Plugin system for custom session types
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
-- [ ] Session sharing / spectator mode
+
+## [1.3.0] - 2026-04-10
+
+### Changed
+- Reverted to terminal-only UI — removed chat mode components (ChatInput, ChatPane, HistoryPanel)
+- History browsing moved into Sidebar with cross-project session scanning
+- TerminalPane now handles chat-mode toggle, file drops, and input routing internally
+- PTY write chunking reduced from 8KB to 400 bytes to prevent winpty paste truncation
+- Inter-chunk sleep reduced from 10ms to 0 (winpty drains fast enough)
+
+### Fixed
+- Sidecar crash from invalid regex backreference in session state tracker
+- WebSocket pong timeout removed — sessions no longer freeze when app is idle/minimized/locked
+
+## [1.2.0] - 2026-04-07
+
+### Fixed
+- History panel workdir fallback and session state tracking
+- Bypass history restore on session resume
+- Removed broken remote control button from chat header
+- Fixed system tag hiding in chat view
+- XML tag stripping for remote control commands
+
+### Added
+- Documented known issues with `/remote-control` and `/rc` in chat mode
+
+## [1.1.0] - 2026-03-30
+
+### Removed
+- **Orchestrator layer** — `cockpit_mcp.py`, `workspace_manager.py`, `workspace_watcher.py`, `WorkspacePanel.jsx`, `HubView.jsx`, all `/api/workspaces/*` endpoints, orchestrator session type, hub mode
+- `marked` and `watchdog` dependencies
+
+### Added
+- Chat UI foundation — JSONL-powered conversation view with markdown rendering
+- History panel for browsing past Claude Code sessions
+- Tool call grouping and message bubble components
+- Remote control button in chat header
+- Consecutive tool-only assistant message merging
+
+### Changed
+- PyInstaller spec updated to remove `cockpit_mcp.py` reference
 
 ## [1.0.0] - 2026-03-29
 
@@ -94,7 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Max session limit (configurable, default 8)
 - Idle session timeout (configurable, default 2h)
 - Upload directory size limit (200MB)
-- Python test suite (24 tests)
+- Python test suite
 - GitHub Actions CI pipeline
 - CLAUDE.md project conventions
 

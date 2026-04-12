@@ -1,7 +1,6 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle, Save, Trash2, Play } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
 import StateIcon from "./StateIcon";
-import HistoryPanel from "./HistoryPanel";
 
 /** Normalize path separators to backslash for comparison */
 function norm(dir) {
@@ -306,29 +305,40 @@ export default function Sidebar({
   onRemoveLocation,
   onToggleLocationBypass,
   gitStatuses = {},
-  historyWorkdir,
-  onViewHistorySession,
-  onResumeHistorySession,
-  backendReady,
-  onDragHistorySession,
+  workspacePresets = [],
+  onSaveWorkspace,
+  onLoadWorkspace,
+  onDeleteWorkspace,
 }) {
-  // Tab toggle: "sessions" or "history"
-  const [sidebarTab, setSidebarTab] = useState("sessions");
   // Context menu state (location tree)
   const [ctxMenu, setCtxMenu] = useState(null);
+  // Session filter
+  const [sessionFilter, setSessionFilter] = useState("");
+  // Workspace save dialog
+  const [showSaveWorkspace, setShowSaveWorkspace] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState("");
 
   const locationTree = useMemo(() => buildLocationTree(savedLocations), [savedLocations]);
+
+  // Filter sessions by search term
+  const filteredSessions = useMemo(() => {
+    if (!sessionFilter.trim()) return sessions;
+    const q = sessionFilter.toLowerCase();
+    return sessions.filter((s) =>
+      s.name.toLowerCase().includes(q) || (s.workdir || "").toLowerCase().includes(q)
+    );
+  }, [sessions, sessionFilter]);
 
   // Pre-compute workdir → sessions[] map (O(n) once, not per LocationNode)
   const sessionsByDir = useMemo(() => {
     const map = {};
-    for (const s of sessions) {
+    for (const s of filteredSessions) {
       const key = norm(s.workdir);
       if (!map[key]) map[key] = [];
       map[key].push(s);
     }
     return map;
-  }, [sessions]);
+  }, [filteredSessions]);
 
   // Expand 1 layer: fetch subdirs from backend and add them
   const handleExpand = useCallback(async (path) => {
@@ -372,44 +382,109 @@ export default function Sidebar({
           <span>New</span>
         </button>
 
-        {/* Tab toggle */}
-        <div className="flex items-center gap-1 px-3 mb-2">
-          <button
-            onClick={() => setSidebarTab("sessions")}
-            className="text-[10px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded transition-colors"
-            style={{
-              color: sidebarTab === "sessions" ? "var(--accent)" : "var(--text-muted)",
-              backgroundColor: sidebarTab === "sessions" ? "var(--bg-surface)" : "transparent",
-            }}
-          >
-            Sessions
-          </button>
-          <button
-            onClick={() => setSidebarTab("history")}
-            className="text-[10px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded transition-colors"
-            style={{
-              color: sidebarTab === "history" ? "var(--accent)" : "var(--text-muted)",
-              backgroundColor: sidebarTab === "history" ? "var(--bg-surface)" : "transparent",
-            }}
-          >
-            History
-          </button>
-        </div>
-
-        {/* History tab */}
-        {sidebarTab === "history" && (
-          <HistoryPanel
-            workdir={historyWorkdir}
-            onViewSession={onViewHistorySession}
-            onResumeSession={onResumeHistorySession}
-            backendReady={backendReady}
-            onDragHistorySession={onDragHistorySession}
-          />
+        {/* Session filter */}
+        {sessions.length > 0 && (
+          <div className="px-2 mb-2">
+            <input
+              className="w-full text-xs px-2.5 py-1.5 rounded-md"
+              style={{
+                backgroundColor: "var(--bg-surface)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-color)",
+                outline: "none",
+              }}
+              placeholder="Filter sessions..."
+              value={sessionFilter}
+              onChange={(e) => setSessionFilter(e.target.value)}
+            />
+          </div>
         )}
 
-        {/* Sessions tab content */}
-        {sidebarTab === "sessions" && (
-          <>
+        {/* Workspace presets */}
+        <div className="px-2 mb-2">
+          <div className="flex items-center justify-between mb-1">
+            <p
+              className="text-[10px] uppercase tracking-widest font-semibold px-1"
+              style={{ color: "var(--text-muted)" }}
+            >
+              Workspaces
+            </p>
+            <button
+              onClick={() => setShowSaveWorkspace((v) => !v)}
+              className="p-0.5 rounded transition-colors hover-bg-surface"
+              style={{ color: "var(--text-muted)" }}
+              title="Save current workspace"
+            >
+              <Save size={12} />
+            </button>
+          </div>
+          {showSaveWorkspace && (
+            <div className="flex items-center gap-1 mb-1">
+              <input
+                autoFocus
+                className="flex-1 text-xs px-2 py-1 rounded"
+                style={{
+                  backgroundColor: "var(--bg-surface)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-color)",
+                  outline: "none",
+                  minWidth: 0,
+                }}
+                placeholder="Workspace name..."
+                value={workspaceName}
+                onChange={(e) => setWorkspaceName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && workspaceName.trim()) {
+                    onSaveWorkspace?.(workspaceName.trim());
+                    setWorkspaceName("");
+                    setShowSaveWorkspace(false);
+                  }
+                  if (e.key === "Escape") {
+                    setShowSaveWorkspace(false);
+                    setWorkspaceName("");
+                  }
+                }}
+              />
+            </div>
+          )}
+          {workspacePresets.length > 0 && (
+            <div className="flex flex-col gap-0.5">
+              {workspacePresets.map((preset) => (
+                <div
+                  key={preset.name}
+                  className="group flex items-center gap-1 px-1 py-0.5 rounded-md hover-bg-surface"
+                >
+                  <button
+                    onClick={() => onLoadWorkspace?.(preset)}
+                    className="flex items-center gap-1.5 flex-1 text-left min-w-0"
+                    title={`Load workspace: ${preset.sessions.length} session(s), layout ${preset.layout}`}
+                  >
+                    <Play size={10} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    <span className="text-xs truncate" style={{ color: "var(--text-secondary)" }}>
+                      {preset.name}
+                    </span>
+                    <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>
+                      {preset.sessions.length}s
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => onDeleteWorkspace?.(preset.name)}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-all hover-color-red"
+                    style={{ color: "var(--text-muted)" }}
+                    title="Delete workspace"
+                  >
+                    <Trash2 size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {workspacePresets.length === 0 && !showSaveWorkspace && (
+            <p className="text-[10px] px-1" style={{ color: "var(--text-muted)" }}>
+              No saved workspaces
+            </p>
+          )}
+        </div>
 
         {/* Empty state / first-run card */}
         {locationTree.length === 0 && sessions.length === 0 && (
@@ -460,9 +535,6 @@ export default function Sidebar({
           </>
         )}
 
-          </>
-        )}
-
         {/* Resources footer */}
         <>
           <div style={{ flex: 1 }} />
@@ -486,8 +558,8 @@ export default function Sidebar({
           </div>
         </>
 
-        {/* Context menu (sessions tab only) */}
-        {sidebarTab === "sessions" && ctxMenu && (
+        {/* Context menu */}
+        {ctxMenu && (
           <LocationContextMenu
             x={ctxMenu.x}
             y={ctxMenu.y}
