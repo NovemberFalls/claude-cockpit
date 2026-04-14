@@ -1004,7 +1004,8 @@ export default function App() {
                     setDragSource(null);
                     const data = e.dataTransfer.getData("text/plain");
                     if (data.startsWith("session:")) {
-                      placeSession(data.slice(8), idx);
+                      const sid = parseInt(data.slice(8), 10);
+                      if (!isNaN(sid)) placeSession(sid, idx);
                     } else if (data.startsWith("pane:")) {
                       const from = parseInt(data.slice(5), 10);
                       if (!isNaN(from) && from !== idx) swapPanes(from, idx);
