@@ -2,10 +2,39 @@ import { useState } from "react";
 import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus } from "lucide-react";
 import { version } from "../../package.json";
 
+// Custom 4x2 grid icon — matches Lucide stroke style for visual consistency
+// with Square/Columns/Grid2x2.
+function Grid4x2({ size = 14, ...props }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...props}
+    >
+      {/* Outer rounded rect */}
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      {/* 3 vertical dividers (creating 4 columns) */}
+      <line x1="7" y1="5" x2="7" y2="19" />
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="17" y1="5" x2="17" y2="19" />
+      {/* 1 horizontal divider (creating 2 rows) */}
+      <line x1="2" y1="12" x2="22" y2="12" />
+    </svg>
+  );
+}
+
 const layoutOptions = [
   { value: 1, icon: Square, label: "Single" },
   { value: 2, icon: Columns, label: "Split" },
   { value: 4, icon: Grid2x2, label: "Quad" },
+  { value: 8, icon: Grid4x2, label: "Octo" },
 ];
 
 const legendItems = [
@@ -101,7 +130,7 @@ export default function StatusBar({
             ))}
             <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "8px 0" }} />
             <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-              Ctrl+1-4 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
+              Ctrl+1-8 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
             </p>
 
           </div>
@@ -173,7 +202,7 @@ export default function StatusBar({
             <button
               key={value}
               onClick={() => setLayout(value)}
-              title={`${label} (Ctrl+${value === 4 ? 4 : value})`}
+              title={`${label} (Ctrl+Shift+${value})`}
               className={`p-1 rounded transition-colors ${layout !== value ? "hover-color-secondary" : ""}`}
               style={{
                 color: layout === value ? "var(--accent)" : "var(--text-muted)",

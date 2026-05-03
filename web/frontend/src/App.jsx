@@ -8,6 +8,7 @@ import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
+import BridgeModal from "./components/BridgeModal";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -92,6 +93,8 @@ export default function App() {
   const [gitStatuses, setGitStatuses] = useState({});
   const [broadcastMode, setBroadcastMode] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
+  const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
+  const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -304,15 +307,53 @@ export default function App() {
     }
   }, [model, layout, addLocations, toast]);
 
-  // Remove a session (kills terminal on server)
+  // Remove a session (kills terminal on server) with 12s undo window.
+  // Undo resumes via claude_session_id (exact session) if available, or
+  // continueSession: true (most-recent session in workdir) as a fallback.
+  // Note: claude_session_id is populated by the polling loop from /api/terminals
+  // if the backend exposes that field. If it doesn't, undo falls back to
+  // continueSession: true, which resumes the most-recent session in the workdir.
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
-    if (session?.terminalId) {
-      fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" }).catch(() => toast("Failed to kill session on server", "error"));
+    if (!session) return;
+
+    // Kill backend terminal (best-effort — same behavior as before)
+    if (session.terminalId) {
+      fetch(`/api/terminals/${session.terminalId}`, { method: "DELETE" })
+        .catch(() => toast("Failed to kill session on server", "error"));
     }
+
+    // Remove from local state
     setSessions((prev) => prev.filter((s) => s.id !== localId));
     setActiveIds((prev) => prev.map((id) => id === localId ? null : id));
-  }, [sessions]);
+
+    // Quick Resume: 12s undo window. Skip the offer if the session never
+    // produced any meaningful state (status was 'starting' or 'error' and
+    // there is no claude_session_id to resume from).
+    const canResume = session.terminalId && (
+      !!session.claude_session_id || session.status === "running"
+    );
+    if (!canResume) return;
+
+    toast(
+      `Closed "${session.name}"`,
+      "info",
+      12000,
+      {
+        label: "Undo",
+        onClick: () => {
+          createSession(
+            session.name,
+            session.workdir,
+            session.model,
+            session.claude_session_id
+              ? { resumeSessionId: session.claude_session_id, bypassPermissions: session.bypassPermissions }
+              : { continueSession: true, bypassPermissions: session.bypassPermissions }
+          );
+        },
+      }
+    );
+  }, [sessions, toast, createSession]);
 
   // Select a session: fill an empty pane slot if available, never auto-rearrange
   const selectSession = useCallback((id) => {
@@ -407,6 +448,10 @@ export default function App() {
               tokens: match.tokens || 0,
               cost: match.cost || 0,
               context_percent: match.context_percent ?? null,
+              // claude_session_id allows precise --resume on close/undo.
+              // If the backend doesn't expose this field yet, it will be undefined
+              // and removeSession will fall back to continueSession: true.
+              claude_session_id: match.claude_session_id || null,
             });
           }
         }
@@ -465,11 +510,18 @@ export default function App() {
               const newTokens = t.tokens || 0;
               const newCost = t.cost || 0;
               const newContextPercent = t.context_percent ?? null;
-              if (s.activityState === newState && s.tokens === newTokens && s.cost === newCost && s.context_percent === newContextPercent) {
+              const newClaudeSessionId = t.claude_session_id || null;
+              if (
+                s.activityState === newState &&
+                s.tokens === newTokens &&
+                s.cost === newCost &&
+                s.context_percent === newContextPercent &&
+                s.claude_session_id === newClaudeSessionId
+              ) {
                 return s;
               }
               changed = true;
-              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent };
+              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId };
             });
 
             const result = changed ? updated : prev;
@@ -549,6 +601,110 @@ export default function App() {
     const id = setInterval(fetchStats, 5000);
     return () => clearInterval(id);
   }, [backendReady]);
+
+  // Poll /api/bridge every 3s to track active bridges for the indicator overlay
+  useEffect(() => {
+    if (!backendReady) return;
+    const fetchBridges = async () => {
+      try {
+        const res = await fetch("/api/bridge");
+        if (!res.ok) return;
+        const data = await res.json();
+        setActiveBridges(data.bridges || []);
+      } catch (_) {
+        // soft-fail — stale bridge state is not critical
+      }
+    };
+    fetchBridges();
+    const id = setInterval(fetchBridges, 3000);
+    return () => clearInterval(id);
+  }, [backendReady]);
+
+  // Bridge modal handlers
+  const handleOpenBridge = useCallback((sessionId) => {
+    setBridgeModal({ open: true, fromSessionId: sessionId });
+  }, []);
+
+  const handleCloseBridge = useCallback(() => {
+    setBridgeModal({ open: false, fromSessionId: null });
+  }, []);
+
+  const fetchLatestAssistant = useCallback(async (terminalId) => {
+    try {
+      const res = await fetch(`/api/terminals/${terminalId}/latest-assistant`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.text || null;
+    } catch (_) {
+      return null;
+    }
+  }, []);
+
+  const handleSendManual = useCallback(async ({ to, text, prefix }) => {
+    // 'to' is a local sessionId; look up terminalIds for both sides
+    const fromSession = sessions.find((s) => s.id === bridgeModal.fromSessionId);
+    const toSession = sessions.find((s) => s.id === to);
+    if (!fromSession?.terminalId || !toSession?.terminalId) {
+      toast("Session not running", "error");
+      return;
+    }
+    try {
+      const res = await fetch("/api/bridge/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_terminal_id: fromSession.terminalId,
+          to_terminal_id: toSession.terminalId,
+          message: text,
+          prefix,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) toast(`Bridged to "${toSession.name}"`, "success");
+      else toast(`Bridge failed: ${data.error || "unknown"}`, "error");
+    } catch (err) {
+      toast(`Bridge failed: ${err.message}`, "error");
+    }
+    handleCloseBridge();
+  }, [sessions, bridgeModal.fromSessionId, toast, handleCloseBridge]);
+
+  const handleStartAuto = useCallback(async ({ to, prompt, maxTurns }) => {
+    const fromSession = sessions.find((s) => s.id === bridgeModal.fromSessionId);
+    const toSession = sessions.find((s) => s.id === to);
+    if (!fromSession?.terminalId || !toSession?.terminalId) {
+      toast("Session not running", "error");
+      return;
+    }
+    try {
+      const res = await fetch("/api/bridge/auto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_terminal_id: fromSession.terminalId,
+          to_terminal_id: toSession.terminalId,
+          kickoff_prompt: prompt,
+          max_turns: maxTurns,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) toast(`Auto-bridge started (${data.bridge_id})`, "info");
+      else toast(`Bridge failed: ${data.error || "unknown"}`, "error");
+    } catch (err) {
+      toast(`Bridge failed: ${err.message}`, "error");
+    }
+    handleCloseBridge();
+  }, [sessions, bridgeModal.fromSessionId, toast, handleCloseBridge]);
+
+  const handleEndBridge = useCallback(async (bridgeId) => {
+    try {
+      await fetch(`/api/bridge/${bridgeId}`, { method: "DELETE" });
+      toast("Bridge ended", "info");
+      // Optimistically remove; next poll will reconcile
+      setActiveBridges((prev) => prev.filter((b) => b.bridge_id !== bridgeId));
+    } catch (err) {
+      toast(`Failed to end bridge: ${err.message}`, "error");
+    }
+  }, [toast]);
 
   // Fork a session: create a new session in the same workdir with continue
   const forkSession = useCallback((sessionId) => {
@@ -663,7 +819,11 @@ export default function App() {
         e.preventDefault();
         setLayout(4);
       }
-      if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "4") {
+      if (e.ctrlKey && e.shiftKey && e.key === "*") {
+        e.preventDefault();
+        setLayout(8);
+      }
+      if (e.ctrlKey && !e.shiftKey && e.key >= "1" && e.key <= "8") {
         const i = parseInt(e.key) - 1;
         if (i < layout && activeIds[i] != null) {
           e.preventDefault();
@@ -743,8 +903,10 @@ export default function App() {
     document.addEventListener("mouseup", onUp);
   }, [sidebarWidth]);
 
-  const gridTemplate = layout === 1 ? "1fr" : "1fr 1fr";
-  const gridRows = layout === 4 ? "1fr 1fr" : "1fr";
+  const cols = layout === 8 ? 4 : layout >= 2 ? 2 : 1;
+  const rows = layout >= 4 ? 2 : 1;
+  const gridTemplate = `repeat(${cols}, 1fr)`;
+  const gridRows = `repeat(${rows}, 1fr)`;
 
   // Splash screen while waiting for backend
   if (!backendReady) {
@@ -910,11 +1072,11 @@ export default function App() {
                 const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
                 const slotBorders = {
                   borderRight:
-                    layout >= 2 && idx % 2 === 0
+                    cols > 1 && (idx % cols) < cols - 1
                       ? "1px solid var(--border-color)"
                       : "none",
                   borderBottom:
-                    layout === 4 && idx < 2
+                    rows > 1 && idx < cols
                       ? "1px solid var(--border-color)"
                       : "none",
                 };
@@ -937,7 +1099,7 @@ export default function App() {
                     setDragSource(null);
                     const data = e.dataTransfer.getData("text/plain");
                     if (data.startsWith("session:")) {
-                      placeSession(data.slice(8), idx);
+                      placeSession(parseInt(data.slice(8), 10), idx);
                     } else if (data.startsWith("pane:")) {
                       const from = parseInt(data.slice(5), 10);
                       if (!isNaN(from) && from !== idx) swapPanes(from, idx);
@@ -977,6 +1139,15 @@ export default function App() {
                 );
 
                 if (session) {
+                  // Find an active bridge involving this session's terminalId
+                  const activeBridge = session.terminalId
+                    ? activeBridges.find(
+                        (b) =>
+                          b.state === "active" &&
+                          (b.from_id === session.terminalId || b.to_id === session.terminalId)
+                      ) || null
+                    : null;
+
                   return (
                     <div
                       key={session.id}
@@ -1003,6 +1174,9 @@ export default function App() {
                         terminalZoom={terminalZoom}
                         toast={toast}
                         onFork={() => forkSession(session.id)}
+                        onOpenBridge={() => handleOpenBridge(session.id)}
+                        activeBridge={activeBridge}
+                        onEndBridge={handleEndBridge}
                       />
                     </div>
                   );
@@ -1086,6 +1260,22 @@ export default function App() {
             onCancel={() => setShowNewDialog(false)}
           />
         )}
+
+        {bridgeModal.open && (() => {
+          const fromSession = sessions.find((s) => s.id === bridgeModal.fromSessionId);
+          if (!fromSession) return null;
+          return (
+            <BridgeModal
+              open={true}
+              fromSession={fromSession}
+              allSessions={sessions}
+              onSendManual={handleSendManual}
+              onStartAuto={handleStartAuto}
+              onClose={handleCloseBridge}
+              fetchLatestAssistant={fetchLatestAssistant}
+            />
+          );
+        })()}
 
         {showOnboarding && <OnboardingModal onDismiss={() => setShowOnboarding(false)} />}
         <ToastContainer toasts={toasts} onDismiss={dismissToast} />

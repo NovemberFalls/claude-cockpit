@@ -7,14 +7,15 @@ Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend
 ```
 claude-cockpit/
   web/
-    server.py          # FastAPI app (port 8420), terminal CRUD, WS bridge
+    server.py          # FastAPI app (port 8420), terminal CRUD, WS + bridge routes
     pty_manager.py     # PTY session manager (cross-platform via pty_backend.py)
-    logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty)
+    bridge_manager.py  # Peer-bridge: V1 manual relay + V2 autonomous loop between two sessions
+    logging_config.py  # Structured logging setup (cockpit.server, cockpit.pty, cockpit.bridge)
     tests/             # Python test suite (pytest + pytest-asyncio)
     frontend/
       src/
-        App.jsx        # Root component, all session state, session reconciliation
-        components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog,
+        App.jsx        # Root component, all session state, session reconciliation, bridge polling
+        components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog, BridgeModal,
                        # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon
         __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
@@ -93,7 +94,8 @@ Two independent DnD systems share the same drop targets — be careful not to le
 - **Max 8 sessions:** Default concurrent session limit is 8, configurable via `MAX_SESSIONS` env var.
 - **No idle timeout:** Idle timeout is disabled by default (`IDLE_TIMEOUT=0`). Dead sessions (process exited) are still purged after 30s.
 - **PTY timeout protection:** Writes timeout after 5s, reads after 10s — prevents session lockups from zombie processes.
-- **Ctrl+C handling:** `TerminalPane.jsx` has a `customKeyEventHandler` — Ctrl+C copies when text is selected, sends `\x03` only when no selection. Ctrl+V pastes from clipboard.
+- **Ctrl+C handling:** `TerminalPane.jsx` has a `customKeyEventHandler` — Ctrl+C copies when text is selected, sends `\x03` only when no selection.
+- **Ctrl+V / paste handling:** A capture-phase `paste` DOM listener on the terminal container handles paste BEFORE xterm's own listener fires (avoiding double-paste / auto-submit). Image items in `clipboardData.items` are uploaded via `/api/upload` and the path is injected. Plain text uses `xterm.paste(text)` so xterm wraps it in bracketed-paste sequences when the PTY is in that mode (Claude Code is, by default). The `customKeyEventHandler` just returns `false` for Ctrl+V to suppress xterm sending the raw `\x16` character.
 
 ## Build & Release
 
@@ -105,6 +107,20 @@ Two independent DnD systems share the same drop targets — be careful not to le
 - **Auto-update:** Desktop app checks GitHub Releases for `latest.json` on startup. Tauri does NOT auto-generate `latest.json` — the push skill builds it from the `.nsis.zip.sig` file. Builds must be signed with `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env vars. Signing key at `C:\Code\.tauri\claude-cockpit.key` (password-protected).
 - **CRITICAL build lesson:** Always copy the fresh PyInstaller exe to `src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe` BEFORE building Tauri. A stale sidecar = "Internal Server Error" on desktop launch.
 - **Tauri webview:** `dragDropEnabled: false` in tauri.conf.json so the web-native file drop handler works in the desktop app.
+
+## Peer Bridge
+
+Two running cockpit sessions can exchange messages via `bridge_manager.py`:
+
+- **Manual relay (V1):** one-shot. The Bridge icon in any pane header opens `BridgeModal`. Pick another running session, choose "Relay my latest reply" (auto-fetches via `GET /api/terminals/{id}/latest-assistant`) or a custom message + preset chips, click Send. Backend wraps in bracketed paste and injects to the peer's PTY with a `[From session "<name>"]:` prefix.
+- **Autonomous relay (V2):** the Auto tab in `BridgeModal` shows a neon-red warning panel + a confirm-twice gate. On confirm, both sessions get a framed kickoff prompt, and `bridge_manager` watches each side's JSONL via `tail_jsonl`. Each new assistant turn is auto-relayed to the peer (idle-gated, bracketed-paste wrapped). Bridge ends on: turn cap (`max_turns`, default 4), `BRIDGE-DONE` sentinel in any reply, user clicks Stop, either session dies, or PTY write fails.
+- **Conflict guard:** the `/api/bridge/auto` route returns 409 if either session is already in an `state=="active"` bridge.
+- **Active indicator:** TerminalPane shows a pulsing red glow + "BRIDGE · turn X/Y · Stop" overlay (via `index.css` `@keyframes bridge-active-glow`) for any pane whose `terminalId` is in an active bridge. App.jsx polls `GET /api/bridge` every 3s.
+- **Routes:** `GET /api/terminals/{id}/latest-assistant`, `POST /api/bridge/manual`, `POST /api/bridge/auto`, `DELETE /api/bridge/{id}`, `GET /api/bridge`.
+
+## Quick Resume Undo
+
+Closing a pane via X kills the backend terminal but the local session record's `claude_session_id` is captured first. App.jsx then shows a 12-second Toast with an "Undo" action that calls `createSession` with `resumeSessionId: <claude_session_id>` (preferred) or `continueSession: true` (fallback when the session never produced a JSONL).
 
 ## Known Issues (Chat Mode)
 

@@ -1,0 +1,402 @@
+/**
+ * Tests for the paste handler logic in TerminalPane.
+ * (web/frontend/src/components/TerminalPane.jsx, lines ~231–324)
+ *
+ * Strategy:
+ *   xterm.js is mocked entirely (vi.mock) so we can exercise the pasteHandler
+ *   closure without needing a real DOM canvas / WebGL context.  The tests
+ *   extract the pasteHandler by capturing the 'paste' event listener that
+ *   TerminalPane registers on its termRef element during mount.
+ *
+ * What is tested:
+ *   1. text_paste_calls_xterm_paste_once       — text paste uses xterm.paste(), not wsRef.send
+ *   2. image_paste_uploads_and_sends_path       — image paste POSTs to /api/upload, sends path via WS
+ *   3. image_paste_sends_quoted_path_when_spaces — path with spaces is quoted before WS send
+ *   4. paste_event_calls_preventDefault_and_stopPropagation
+ *   5. ctrl_v_keydown_returns_false             — customKeyEventHandler blocks Ctrl+V
+ *
+ * Note on test 5: the customKeyEventHandler is registered via
+ * term.attachCustomKeyEventHandler().  We capture the registered function
+ * and invoke it directly.
+ *
+ * Dependencies already present in package.json:
+ *   @testing-library/react ^16, vitest ^3, jsdom ^25
+ */
+
+import React from "react";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { render, act, waitFor } from "@testing-library/react";
+import "@testing-library/jest-dom";
+
+// ---------------------------------------------------------------------------
+// jsdom polyfills required by TerminalPane
+// ---------------------------------------------------------------------------
+
+// ResizeObserver is not in jsdom — mock it globally before any imports
+if (typeof global.ResizeObserver === "undefined") {
+  global.ResizeObserver = class ResizeObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
+// requestAnimationFrame stub (jsdom has a basic one but let's be safe)
+if (typeof global.requestAnimationFrame === "undefined") {
+  global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+}
+
+// WebSocket stub — created fresh per test via global injection
+let _wsSendSpy = vi.fn();
+let _wsInstance = null;
+
+// ---------------------------------------------------------------------------
+// Tracking variables for captured handlers (reset per test)
+// ---------------------------------------------------------------------------
+
+let capturedPasteHandler = null;
+let capturedKeyHandler = null;
+let mockTermPaste = null;
+
+// ---------------------------------------------------------------------------
+// Mock xterm and addons BEFORE importing the component.
+// vi.mock is hoisted by vitest, so these run before any test imports.
+// ---------------------------------------------------------------------------
+
+vi.mock("@xterm/xterm", () => {
+  const TerminalMock = vi.fn();
+  return { Terminal: TerminalMock };
+});
+
+vi.mock("@xterm/addon-fit", () => ({
+  FitAddon: vi.fn().mockImplementation(() => ({
+    activate: vi.fn(),
+    fit: vi.fn(),
+    proposeDimensions: vi.fn().mockReturnValue({ cols: 80, rows: 24 }),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/addon-web-links", () => ({
+  WebLinksAddon: vi.fn().mockImplementation(() => ({
+    activate: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: vi.fn().mockImplementation(() => ({
+    activate: vi.fn(),
+    onContextLoss: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: vi.fn().mockImplementation(() => ({
+    activate: vi.fn(),
+    findNext: vi.fn(),
+    findPrevious: vi.fn(),
+    clearDecorations: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
+
+// Mock theme hook
+vi.mock("../hooks/useTheme", () => ({
+  useTheme: () => ({
+    theme: {
+      bg: "#1a1b26", fg: "#a9b1d6", accent: "#7aa2f7",
+      bgSurface: "#16161e", bgElevated: "#1a1b26", bgHighlight: "#292e42",
+      fgDim: "#565f89", fgMuted: "#3b4261", red: "#f7768e",
+      green: "#9ece6a", yellow: "#e0af68", purple: "#bb9af7",
+      cyan: "#7dcfff", border: "#292e42", hexBase: "#7aa2f7",
+      hexGlow: "#7aa2f7", hexGlowIntensity: 0.4,
+      fontFamily: "monospace", scanlines: false,
+    },
+  }),
+}));
+
+vi.mock("../components/StateIcon", () => ({
+  default: () => React.createElement("span", null),
+}));
+
+// ---------------------------------------------------------------------------
+// Intercept addEventListener to capture the paste and capture keyhandler
+// ---------------------------------------------------------------------------
+
+const _origAddEventListener = EventTarget.prototype.addEventListener;
+
+function patchListeners() {
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (type === "paste") {
+      capturedPasteHandler = listener;
+    }
+    return _origAddEventListener.call(this, type, listener, options);
+  };
+}
+
+function unpatchListeners() {
+  EventTarget.prototype.addEventListener = _origAddEventListener;
+}
+
+// ---------------------------------------------------------------------------
+// Build the Terminal mock fresh for each test so clearAllMocks doesn't
+// break the implementation.
+// ---------------------------------------------------------------------------
+
+async function setupTerminalMock() {
+  const { Terminal } = await import("@xterm/xterm");
+  capturedKeyHandler = null;
+  mockTermPaste = vi.fn();
+
+  Terminal.mockImplementation(() => ({
+    loadAddon: vi.fn(),
+    open: vi.fn(),
+    paste: mockTermPaste,
+    clear: vi.fn(),
+    write: vi.fn(),
+    writeln: vi.fn(),
+    onData: vi.fn(),
+    onKey: vi.fn(),
+    hasSelection: vi.fn().mockReturnValue(false),
+    getSelection: vi.fn().mockReturnValue(""),
+    selectAll: vi.fn(),
+    clearSelection: vi.fn(),
+    scrollToBottom: vi.fn(),
+    resize: vi.fn(),
+    focus: vi.fn(),
+    blur: vi.fn(),
+    attachCustomKeyEventHandler: vi.fn().mockImplementation((fn) => {
+      capturedKeyHandler = fn;
+    }),
+    dispose: vi.fn(),
+    options: { theme: {}, fontSize: 13 },
+    _core: {},
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Minimal session fixture
+// ---------------------------------------------------------------------------
+
+const SESSION = {
+  id: "sess-1",
+  name: "Test",
+  terminalId: "term-1",
+  model: "sonnet",
+  status: "running",
+  activityState: "idle",
+};
+
+// ---------------------------------------------------------------------------
+// renderPane — render TerminalPane with a mock WebSocket
+// ---------------------------------------------------------------------------
+
+async function renderPane() {
+  _wsSendSpy = vi.fn();
+  _wsInstance = {
+    readyState: 1, // WebSocket.OPEN
+    send: _wsSendSpy,
+    close: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  };
+
+  // Intercept WebSocket constructor with static OPEN constant
+  const MockWebSocket = vi.fn().mockImplementation(() => _wsInstance);
+  MockWebSocket.OPEN = 1;
+  MockWebSocket.CONNECTING = 0;
+  MockWebSocket.CLOSING = 2;
+  MockWebSocket.CLOSED = 3;
+  global.WebSocket = MockWebSocket;
+
+  const { default: TerminalPane } = await import("../components/TerminalPane.jsx");
+
+  let unmount;
+  await act(async () => {
+    const result = render(
+      React.createElement(TerminalPane, {
+        session: SESSION,
+        onClose: vi.fn(),
+        onNameChange: vi.fn(),
+        paneIndex: 0,
+        onSwap: vi.fn(),
+        onPlace: vi.fn(),
+        onDragSourceChange: vi.fn(),
+      }),
+    );
+    unmount = result.unmount;
+  });
+
+  return { wsSendSpy: _wsSendSpy, unmount };
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — build fake clipboard events
+// ---------------------------------------------------------------------------
+
+function makeTextPasteEvent(text = "hello world") {
+  return {
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+    clipboardData: {
+      getData: vi.fn().mockReturnValue(text),
+      items: [],
+    },
+  };
+}
+
+function makeImagePasteEvent({ type = "image/png" } = {}) {
+  const blob = new Blob(["fake-image-bytes"], { type });
+  const item = {
+    kind: "file",
+    type,
+    getAsFile: vi.fn().mockReturnValue(blob),
+  };
+  return {
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+    clipboardData: {
+      getData: vi.fn().mockReturnValue(""),
+      items: [item],
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test suite
+// ---------------------------------------------------------------------------
+
+describe("TerminalPane paste handler", () => {
+  beforeEach(async () => {
+    capturedPasteHandler = null;
+    capturedKeyHandler = null;
+    await setupTerminalMock();
+    patchListeners();
+    // Reset module cache so each test gets a fresh TerminalPane import
+    vi.resetModules();
+    await setupTerminalMock();
+  });
+
+  afterEach(() => {
+    unpatchListeners();
+    vi.clearAllMocks();
+  });
+
+  // 1
+  it("text_paste_calls_xterm_paste_once", async () => {
+    const { unmount } = await renderPane();
+
+    expect(capturedPasteHandler).not.toBeNull();
+
+    const ev = makeTextPasteEvent("my pasted text");
+    await act(async () => {
+      await capturedPasteHandler(ev);
+    });
+
+    expect(mockTermPaste).toHaveBeenCalledTimes(1);
+    expect(mockTermPaste).toHaveBeenCalledWith("my pasted text");
+    // wsRef.send should NOT be called directly for text — xterm's onData handles it
+    expect(_wsSendSpy).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
+  // 2
+  it("image_paste_uploads_and_sends_path", async () => {
+    const { wsSendSpy, unmount } = await renderPane();
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ paths: ["C:\\uploads\\paste.png"] }),
+    });
+
+    const ev = makeImagePasteEvent({ type: "image/png" });
+    await act(async () => {
+      await capturedPasteHandler(ev);
+    });
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith("/api/upload", expect.objectContaining({ method: "POST" }));
+    });
+
+    // Give async operations time to settle
+    await waitFor(() => {
+      expect(wsSendSpy).toHaveBeenCalled();
+    });
+
+    const sent = wsSendSpy.mock.calls[0][0];
+    // Path has no spaces — should not be quoted
+    expect(sent).toBe("C:\\uploads\\paste.png");
+
+    unmount();
+  });
+
+  // 3
+  it("image_paste_sends_quoted_path_when_spaces", async () => {
+    const { wsSendSpy, unmount } = await renderPane();
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ paths: ["C:\\my uploads\\paste.png"] }),
+    });
+
+    const ev = makeImagePasteEvent({ type: "image/png" });
+    await act(async () => {
+      await capturedPasteHandler(ev);
+    });
+
+    await waitFor(() => {
+      expect(wsSendSpy).toHaveBeenCalled();
+    });
+
+    const sent = wsSendSpy.mock.calls[0][0];
+    // Path contains a space → must be wrapped in double quotes
+    expect(sent).toBe('"C:\\my uploads\\paste.png"');
+
+    unmount();
+  });
+
+  // 4
+  it("paste_event_calls_preventDefault_and_stopPropagation", async () => {
+    const { unmount } = await renderPane();
+
+    const ev = makeTextPasteEvent("test");
+    await act(async () => {
+      await capturedPasteHandler(ev);
+    });
+
+    expect(ev.preventDefault).toHaveBeenCalled();
+    expect(ev.stopPropagation).toHaveBeenCalled();
+
+    unmount();
+  });
+
+  // 5
+  it("ctrl_v_keydown_returns_false", async () => {
+    const { unmount } = await renderPane();
+
+    // Wait for the customKeyEventHandler to be registered
+    await waitFor(() => {
+      expect(capturedKeyHandler).not.toBeNull();
+    });
+
+    const ctrlVEvent = {
+      type: "keydown",
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+      key: "v",
+    };
+
+    const result = capturedKeyHandler(ctrlVEvent);
+    // Handler must return false for Ctrl+V so xterm doesn't send raw \x16
+    expect(result).toBe(false);
+
+    unmount();
+  });
+});

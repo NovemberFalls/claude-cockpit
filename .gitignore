@@ -46,3 +46,6 @@ releases/
 web/dist/
 web/build/
 web/.cockpit.pid
+
+# Reaper hygiene-tool incremental review cache
+.reaper/

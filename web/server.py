@@ -31,6 +31,7 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 from pty_manager import pty_manager
+from bridge_manager import bridge_manager
 
 START_TIME = _time.time()
 
@@ -571,6 +572,123 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             await heartbeat_task
         except asyncio.CancelledError:
             pass
+
+
+# ── Bridge / Peer Coordination ────────────────────────────
+
+
+@app.get("/api/terminals/{terminal_id}/latest-assistant")
+async def get_latest_assistant(terminal_id: str):
+    """Return the text content of the most recent assistant turn from this session's JSONL."""
+    from jsonl_watcher import read_all_messages
+
+    session = pty_manager.get_terminal(terminal_id)
+    if not session:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    jsonl_path = pty_manager._get_jsonl_path(session)
+    if not jsonl_path:
+        return JSONResponse({"text": None, "reason": "no JSONL yet"})
+
+    messages = read_all_messages(jsonl_path)
+    for entry in reversed(messages):
+        if entry.get("type") != "assistant":
+            continue
+        text_parts = [
+            b.get("text", "")
+            for b in entry.get("content", [])
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        joined = "\n".join(p for p in text_parts if p).strip()
+        if joined:
+            return JSONResponse({
+                "text": joined,
+                "message_id": entry.get("id"),
+                "timestamp": entry.get("timestamp"),
+            })
+    return JSONResponse({"text": None, "reason": "no assistant message found"})
+
+
+@app.post("/api/bridge/manual")
+async def bridge_manual(request: Request):
+    """One-shot relay: inject a message from one session's latest output into another session."""
+    body = await request.json()
+    from_id = body.get("from_terminal_id", "")
+    to_id = body.get("to_terminal_id", "")
+    message = body.get("message", "")
+    prefix = body.get("prefix")  # optional attribution prefix, may be None
+    if not from_id or not to_id or not message:
+        return JSONResponse(
+            {"ok": False, "error": "from_terminal_id, to_terminal_id, message required"},
+            status_code=400,
+        )
+    if from_id == to_id:
+        return JSONResponse(
+            {"ok": False, "error": "Cannot bridge a session to itself"},
+            status_code=400,
+        )
+    result = await bridge_manager.start_manual(from_id, to_id, message, prefix)
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status)
+
+
+@app.post("/api/bridge/auto")
+async def bridge_auto(request: Request):
+    """Start an autonomous two-session bridge with a shared kickoff prompt."""
+    body = await request.json()
+    from_id = body.get("from_terminal_id", "")
+    to_id = body.get("to_terminal_id", "")
+    kickoff = body.get("kickoff_prompt", "")
+    try:
+        max_turns = int(body.get("max_turns", 4))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"ok": False, "error": "max_turns must be an integer"},
+            status_code=400,
+        )
+    if not from_id or not to_id or not kickoff:
+        return JSONResponse(
+            {"ok": False, "error": "from_terminal_id, to_terminal_id, kickoff_prompt required"},
+            status_code=400,
+        )
+    if from_id == to_id:
+        return JSONResponse(
+            {"ok": False, "error": "Cannot bridge a session to itself"},
+            status_code=400,
+        )
+    if not 1 <= max_turns <= 10:
+        return JSONResponse(
+            {"ok": False, "error": "max_turns must be between 1 and 10"},
+            status_code=400,
+        )
+    # Guard: refuse if either session is already enrolled in an active bridge.
+    # Two active bridges on the same session would interleave writes to its PTY
+    # input buffer and produce corrupt, unpredictable output.
+    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
+    busy_ids = {b["from_id"] for b in active} | {b["to_id"] for b in active}
+    if from_id in busy_ids or to_id in busy_ids:
+        return JSONResponse(
+            {"ok": False, "error": "One or both sessions already in an active bridge"},
+            status_code=409,
+        )
+    result = await bridge_manager.start_auto(from_id, to_id, kickoff, max_turns)
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status)
+
+
+@app.delete("/api/bridge/{bridge_id}")
+async def bridge_stop(bridge_id: str):
+    """Stop an active auto bridge by bridge_id."""
+    ok = bridge_manager.stop(bridge_id)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Bridge not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/bridge")
+async def bridge_list():
+    """List all known bridges (active and recently ended)."""
+    return JSONResponse({"bridges": bridge_manager.list_active()})
 
 
 # ── JSONL Message Stream (SSE) ───────────────────────────

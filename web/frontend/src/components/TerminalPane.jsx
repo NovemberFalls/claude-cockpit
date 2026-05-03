@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, GripVertical, GitFork, Search } from "lucide-react";
+import { X, GripVertical, GitFork, Search, Link2 } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
@@ -50,6 +50,9 @@ const TerminalPane = forwardRef(function TerminalPane({
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
   onFork,          // () => void — fork session (new session, same workdir)
+  onOpenBridge,    // () => void — open the bridge modal pre-selected to this pane
+  activeBridge,    // null | { bridge_id, from_name, to_name, turns_used, max_turns } — active bridge involving this pane
+  onEndBridge,     // (bridgeId: string) => void — terminate an active bridge
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -220,6 +223,58 @@ const TerminalPane = forwardRef(function TerminalPane({
     xtermRef.current = term;
     fitRef.current = fitAddon;
 
+    // Capture-phase paste handler — runs BEFORE xterm's own paste listener on
+    // the textarea. stopPropagation() prevents xterm from also handling it,
+    // eliminating the double-paste race. terminal.paste(text) uses xterm's
+    // own bracketed-paste-mode-aware path, so onData fires exactly once with
+    // correctly framed data.
+    const pasteHandler = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Image: synchronous detection from clipboardData.items
+      const items = Array.from(e.clipboardData?.items || []);
+      const imageItem = items.find(
+        (it) => it.kind === "file" && it.type?.startsWith("image/")
+      );
+
+      if (imageItem) {
+        const blob = imageItem.getAsFile();
+        if (!blob) {
+          toast?.("Image paste failed: empty blob", "error");
+          return;
+        }
+        const ext = imageItem.type.split("/")[1]?.split("+")[0] || "png";
+        const file = new File([blob], `paste.${ext}`, { type: imageItem.type });
+        const formData = new FormData();
+        formData.append("files", file);
+        try {
+          const res = await fetch("/api/upload", { method: "POST", body: formData });
+          const data = await res.json();
+          if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
+            const p = data.paths[0];
+            wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+            toast?.("Image pasted", "success");
+          } else if (data.errors?.length) {
+            toast?.(`Image paste failed: ${data.errors[0]}`, "error");
+          }
+        } catch (err) {
+          toast?.(`Image paste failed: ${err.message}`, "error");
+        }
+        return;
+      }
+
+      // Text: defer to xterm's paste() which respects bracketed-paste mode.
+      // This fires onData exactly once with the wrapped text, which then
+      // gets sent through the existing wsRef.current.send path.
+      const text = e.clipboardData?.getData("text/plain");
+      if (text && xtermRef.current) {
+        xtermRef.current.paste(text);
+      }
+    };
+    const termEl = termRef.current;
+    termEl.addEventListener("paste", pasteHandler, { capture: true });
+
     // Fit once mounted (double-rAF to ensure layout is settled)
     requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
@@ -256,62 +311,12 @@ const TerminalPane = forwardRef(function TerminalPane({
         return false;
       }
 
-      // Ctrl+V / Ctrl+Shift+V: paste from clipboard.
-      // Images are uploaded to /api/upload and the file path is injected into
-      // the terminal. Text is wrapped in bracketed paste sequences so Claude
-      // Code receives the full block as a single paste event rather than
-      // processing each line independently as it arrives through the PTY.
+      // Ctrl+V / Ctrl+Shift+V: prevent xterm from sending raw \x16. The actual
+      // paste is handled by a capture-phase 'paste' DOM listener on termRef
+      // (registered earlier in this effect) — that gives us synchronous access
+      // to clipboardData, blocks xterm's own paste listener via stopPropagation,
+      // and uses xterm.paste() for correct bracketed-paste-mode handling.
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
-        const pasteText = (text) => {
-          if (text && wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(`\x1b[200~${text}\x1b[201~`);
-          }
-        };
-
-        // clipboard.read() can hang waiting for a permission dialog in some
-        // WebView2 / browser contexts. Use a 200ms timeout as a hard fallback
-        // so text paste always works even if image detection is blocked.
-        let handled = false;
-        const fallback = () => {
-          if (handled) return;
-          handled = true;
-          navigator.clipboard.readText().then(pasteText).catch(() => {});
-        };
-        const timer = setTimeout(fallback, 200);
-
-        navigator.clipboard.read().then(async (items) => {
-          clearTimeout(timer);
-          if (handled) return;
-          for (const item of items) {
-            const imageType = item.types.find((t) => t.startsWith("image/"));
-            if (imageType) {
-              handled = true;
-              try {
-                const blob = await item.getType(imageType);
-                const ext = imageType.split("/")[1]?.split("+")[0] || "png";
-                const file = new File([blob], `paste.${ext}`, { type: imageType });
-                const formData = new FormData();
-                formData.append("files", file);
-                const res = await fetch("/api/upload", { method: "POST", body: formData });
-                const data = await res.json();
-                if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-                  const p = data.paths[0];
-                  wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
-                  toast?.("Image pasted", "success");
-                } else if (data.errors?.length) {
-                  toast?.(`Image paste failed: ${data.errors[0]}`, "error");
-                }
-              } catch (err) {
-                toast?.(`Image paste failed: ${err.message}`, "error");
-              }
-              return;
-            }
-          }
-          fallback();
-        }).catch(() => {
-          clearTimeout(timer);
-          fallback();
-        });
         return false;
       }
 
@@ -338,6 +343,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     }
 
     return () => {
+      termEl.removeEventListener("paste", pasteHandler, { capture: true });
       clearTimeout(resizeTimer.current);
       clearTimeout(reconnectTimer.current);
       cancelAnimationFrame(writeRafRef.current);
@@ -429,18 +435,26 @@ const TerminalPane = forwardRef(function TerminalPane({
   }, []);
 
   const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
+  const isBridged = !!activeBridge;
   const isWaiting = activityState === "waiting";
+  const wrapperStyle = {
+    boxShadow: isBridged
+      ? "inset 0 0 0 2px #ff0033, 0 0 18px rgba(255, 0, 51, 0.55)"
+      : isWaiting
+        ? "inset 0 0 0 1px var(--yellow), 0 0 15px rgba(234, 179, 8, 0.3)"
+        : "none",
+    animation: isBridged
+      ? "bridge-active-glow 2s ease-in-out infinite"
+      : isWaiting
+        ? "attention-glow 2s ease-in-out infinite"
+        : "none",
+    transition: "box-shadow 0.3s ease",
+  };
 
   return (
     <div
       className="flex flex-col h-full min-w-0"
-      style={{
-        boxShadow: isWaiting
-          ? "inset 0 0 0 1px var(--yellow), 0 0 15px rgba(234, 179, 8, 0.3)"
-          : "none",
-        animation: isWaiting ? "attention-glow 2s ease-in-out infinite" : "none",
-        transition: "box-shadow 0.3s ease",
-      }}
+      style={wrapperStyle}
     >
       {/* Pane header */}
       <div
@@ -500,6 +514,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         <div className="flex items-center gap-1">
           {onFork && (
             <button
+              type="button"
               onClick={onFork}
               className="p-0.5 rounded transition-colors hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
@@ -508,11 +523,25 @@ const TerminalPane = forwardRef(function TerminalPane({
               <GitFork size={13} />
             </button>
           )}
+          {onOpenBridge && (
+            <button
+              type="button"
+              onClick={onOpenBridge}
+              className="p-0.5 rounded transition-colors hover-color-secondary"
+              style={{ color: "var(--text-muted)" }}
+              title="Bridge to another session"
+              aria-label="Open bridge modal"
+            >
+              <Link2 size={13} />
+            </button>
+          )}
           <button
+            type="button"
             onClick={onClose}
             className="p-0.5 rounded transition-colors hover-color-red"
             style={{ color: "var(--text-muted)" }}
             title="Close session"
+            aria-label="Close session"
           >
             <X size={13} />
           </button>
@@ -611,15 +640,61 @@ const TerminalPane = forwardRef(function TerminalPane({
 
       {/* Terminal area */}
       <div
-        ref={termRef}
         className="flex-1 min-h-0"
-        style={{
-          padding: "4px 8px",
-          backgroundColor: theme.bg,
-        }}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-      />
+        style={{ position: "relative" }}
+      >
+        <div
+          ref={termRef}
+          className="w-full h-full"
+          style={{
+            padding: "4px 8px",
+            backgroundColor: theme.bg,
+          }}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+        />
+        {activeBridge && (
+          <div
+            style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              zIndex: 30,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 10px",
+              borderRadius: 6,
+              backgroundColor: "rgba(255, 0, 51, 0.15)",
+              border: "1px solid #ff5577",
+              backdropFilter: "blur(4px)",
+              fontSize: 11,
+              fontWeight: 600,
+              color: "#ff5577",
+              pointerEvents: "auto",
+            }}
+          >
+            <span>BRIDGE · turn {activeBridge.turns_used}/{activeBridge.max_turns}</span>
+            <button
+              type="button"
+              onClick={() => onEndBridge?.(activeBridge.bridge_id)}
+              className="px-2 py-0.5 rounded"
+              style={{
+                background: "#ff0033",
+                color: "#fff",
+                border: "none",
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+              title="End the bridge immediately"
+              aria-label="End bridge"
+            >
+              Stop
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 });
