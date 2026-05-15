@@ -740,10 +740,50 @@ class PtyManager:
             if not session.pty.isalive():
                 session.alive = False
                 return False
-            session.pty.write(data)
+            data_bytes = data.encode("utf-8")
+            total = len(data_bytes)
+            written_bytes = 0
+            remaining = data
+            max_retries = 50
+            retries = 0
+            while remaining:
+                if retries >= max_retries:
+                    logger.error(
+                        "PTY write safety valve tripped for %s — %d/%d bytes written",
+                        terminal_id, written_bytes, total,
+                    )
+                    return False
+                n = session.pty.write(remaining)
+                # ConPTY's write() returns None — it handles partials internally,
+                # so treat None as a complete write.
+                if n is None:
+                    break
+                if n <= 0:
+                    logger.error(
+                        "PTY write returned %d for %s — %d/%d bytes written",
+                        n, terminal_id, written_bytes, total,
+                    )
+                    return False
+                written_bytes += n
+                if written_bytes >= total:
+                    break
+                if n < len(remaining.encode("utf-8")):
+                    logger.warning(
+                        "PTY partial write for %s — wrote %d of %d remaining bytes",
+                        terminal_id, n, len(remaining.encode("utf-8")),
+                    )
+                try:
+                    remaining = data_bytes[written_bytes:].decode("utf-8")
+                except UnicodeDecodeError:
+                    logger.warning(
+                        "PTY partial write split UTF-8 character for %s — %d/%d bytes",
+                        terminal_id, written_bytes, total,
+                    )
+                    return False
+                retries += 1
             return True
         except Exception:
-            logger.debug("PTY write error for %s", terminal_id)
+            logger.debug("PTY write error for %s", terminal_id, exc_info=True)
             session.alive = False
             return False
 
