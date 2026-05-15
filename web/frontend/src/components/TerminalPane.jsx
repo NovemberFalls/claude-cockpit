@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
 import { X, GripVertical, GitFork, Search, Link2 } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
@@ -65,6 +66,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const pendingDataRef = useRef("");  // Batched WS data for xterm
   const writeRafRef = useRef(null);   // rAF handle for batched writes
   const searchRef = useRef(null);       // SearchAddon instance
+  const webglRef = useRef(null);        // WebglAddon instance (null after context loss)
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
@@ -205,15 +207,31 @@ const TerminalPane = forwardRef(function TerminalPane({
     term.loadAddon(webLinksAddon);
     term.open(termRef.current);
 
-    // GPU-accelerated rendering (falls back to canvas if WebGL unavailable)
+    // GPU-accelerated rendering — WebGL primary, CanvasAddon fallback.
+    // clearTextureAtlas() after open forces an immediate atlas build, preventing
+    // the glyph corruption (backslash→pipe, letters→%/&) that occurs when the
+    // atlas is lazily populated across multiple competing WebGL contexts.
+    const loadCanvasFallback = () => {
+      try {
+        term.loadAddon(new CanvasAddon());
+      } catch {
+        // Canvas also unavailable — DOM renderer is the final fallback
+      }
+    };
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
+        webglRef.current = null;
+        loadCanvasFallback();
       });
       term.loadAddon(webgl);
+      webglRef.current = webgl;
+      // Flush atlas immediately after load to prevent stale glyph mappings
+      webgl.clearTextureAtlas?.();
     } catch {
-      // WebGL not available — canvas renderer works fine
+      // WebGL not available — fall back to canvas renderer
+      loadCanvasFallback();
     }
 
     const searchAddon = new SearchAddon();
@@ -275,6 +293,55 @@ const TerminalPane = forwardRef(function TerminalPane({
     const termEl = termRef.current;
     termEl.addEventListener("paste", pasteHandler, { capture: true });
 
+    // Alt+V paste handler — mirrors the Ctrl+V paste handler above but reads from
+    // navigator.clipboard.read() since there is no DOM paste event for Alt+V.
+    // Claude Code uses Alt+V as its native image-paste shortcut; ConPTY cannot
+    // access the system clipboard, so we must intercept here and upload the image
+    // before injecting the path into the PTY.
+    const handleAltVPaste = async () => {
+      try {
+        const clipboardItems = await navigator.clipboard.read();
+        let handledImage = false;
+
+        for (const item of clipboardItems) {
+          const imageType = item.types.find((t) => t.startsWith("image/"));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const ext = imageType.split("/")[1]?.split("+")[0] || "png";
+            const file = new File([blob], `paste.${ext}`, { type: imageType });
+            const formData = new FormData();
+            formData.append("files", file);
+            try {
+              const res = await fetch("/api/upload", { method: "POST", body: formData });
+              const data = await res.json();
+              if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
+                const p = data.paths[0];
+                wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+                toast?.("Image pasted", "success");
+              } else if (data.errors?.length) {
+                toast?.(`Image paste failed: ${data.errors[0]}`, "error");
+              }
+            } catch (err) {
+              toast?.(`Image paste failed: ${err.message}`, "error");
+            }
+            handledImage = true;
+            break;
+          }
+        }
+
+        if (!handledImage) {
+          // No image — fall back to text
+          const text = await navigator.clipboard.readText();
+          if (text && xtermRef.current) {
+            xtermRef.current.paste(text);
+          }
+        }
+      } catch (err) {
+        // Clipboard API unavailable or permission denied — log silently
+        toast?.(`Paste failed: ${err.message}`, "error");
+      }
+    };
+
     // Fit once mounted (double-rAF to ensure layout is settled)
     requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
@@ -320,6 +387,15 @@ const TerminalPane = forwardRef(function TerminalPane({
         return false;
       }
 
+      // Alt+V: intercept Claude Code's native image-paste shortcut. The PTY
+      // process cannot access the system clipboard, so we read it here via the
+      // Clipboard API and upload any image to the backend before injecting the
+      // path — matching exactly what the Ctrl+V capture-phase handler does.
+      if (ev.altKey && (ev.key === "v" || ev.key === "V") && !ev.ctrlKey && !ev.metaKey) {
+        handleAltVPaste(); // async — fire-and-forget from sync handler
+        return false;
+      }
+
       return true; // All other keys handled normally
     });
 
@@ -353,15 +429,18 @@ const TerminalPane = forwardRef(function TerminalPane({
       xtermRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
+      webglRef.current = null;
       pendingDataRef.current = "";
       writeRafRef.current = null;
     };
   }, []); // Only run once on mount
 
-  // Update theme when it changes
+  // Update theme when it changes — also flush the WebGL glyph atlas so remapped
+  // color values don't produce corrupted character substitutions in the new theme.
   useEffect(() => {
     if (xtermRef.current) {
       xtermRef.current.options.theme = buildXtermTheme(theme);
+      webglRef.current?.clearTextureAtlas?.();
     }
   }, [theme]);
 
@@ -516,9 +595,10 @@ const TerminalPane = forwardRef(function TerminalPane({
             <button
               type="button"
               onClick={onFork}
-              className="p-0.5 rounded transition-colors hover-color-secondary"
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
-              title="Fork session (new session, same workdir)"
+              data-tooltip="Fork"
+              aria-label="Fork session (new session, same workdir)"
             >
               <GitFork size={13} />
             </button>
@@ -527,10 +607,10 @@ const TerminalPane = forwardRef(function TerminalPane({
             <button
               type="button"
               onClick={onOpenBridge}
-              className="p-0.5 rounded transition-colors hover-color-secondary"
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
               style={{ color: "var(--text-muted)" }}
-              title="Bridge to another session"
-              aria-label="Open bridge modal"
+              data-tooltip="Bridge"
+              aria-label="Bridge to another session"
             >
               <Link2 size={13} />
             </button>
@@ -538,9 +618,9 @@ const TerminalPane = forwardRef(function TerminalPane({
           <button
             type="button"
             onClick={onClose}
-            className="p-0.5 rounded transition-colors hover-color-red"
+            className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-red"
             style={{ color: "var(--text-muted)" }}
-            title="Close session"
+            data-tooltip="Close"
             aria-label="Close session"
           >
             <X size={13} />

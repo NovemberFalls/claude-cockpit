@@ -1,6 +1,6 @@
 /**
  * Tests for the paste handler logic in TerminalPane.
- * (web/frontend/src/components/TerminalPane.jsx, lines ~231–324)
+ * (web/frontend/src/components/TerminalPane.jsx, lines ~231–400)
  *
  * Strategy:
  *   xterm.js is mocked entirely (vi.mock) so we can exercise the pasteHandler
@@ -14,8 +14,11 @@
  *   3. image_paste_sends_quoted_path_when_spaces — path with spaces is quoted before WS send
  *   4. paste_event_calls_preventDefault_and_stopPropagation
  *   5. ctrl_v_keydown_returns_false             — customKeyEventHandler blocks Ctrl+V
+ *   6. alt_v_with_image_uploads_and_sends_path — Alt+V reads clipboard image, uploads, sends path
+ *   7. alt_v_with_text_only_calls_xterm_paste  — Alt+V with no image falls back to xterm.paste()
+ *   8. alt_v_clipboard_unavailable_shows_toast — Alt+V when clipboard API throws shows error toast
  *
- * Note on test 5: the customKeyEventHandler is registered via
+ * Note on test 5–8: the customKeyEventHandler is registered via
  * term.attachCustomKeyEventHandler().  We capture the registered function
  * and invoke it directly.
  *
@@ -24,7 +27,7 @@
  */
 
 import React from "react";
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, act, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
@@ -33,8 +36,8 @@ import "@testing-library/jest-dom";
 // ---------------------------------------------------------------------------
 
 // ResizeObserver is not in jsdom — mock it globally before any imports
-if (typeof global.ResizeObserver === "undefined") {
-  global.ResizeObserver = class ResizeObserver {
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
     constructor(cb) { this._cb = cb; }
     observe() {}
     unobserve() {}
@@ -43,8 +46,8 @@ if (typeof global.ResizeObserver === "undefined") {
 }
 
 // requestAnimationFrame stub (jsdom has a basic one but let's be safe)
-if (typeof global.requestAnimationFrame === "undefined") {
-  global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+if (typeof globalThis.requestAnimationFrame === "undefined") {
+  globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 }
 
 // WebSocket stub — created fresh per test via global injection
@@ -89,6 +92,14 @@ vi.mock("@xterm/addon-webgl", () => ({
   WebglAddon: vi.fn().mockImplementation(() => ({
     activate: vi.fn(),
     onContextLoss: vi.fn(),
+    clearTextureAtlas: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("@xterm/addon-canvas", () => ({
+  CanvasAddon: vi.fn().mockImplementation(() => ({
+    activate: vi.fn(),
     dispose: vi.fn(),
   })),
 }));
@@ -196,7 +207,7 @@ const SESSION = {
 // renderPane — render TerminalPane with a mock WebSocket
 // ---------------------------------------------------------------------------
 
-async function renderPane() {
+async function renderPane({ toastSpy } = {}) {
   _wsSendSpy = vi.fn();
   _wsInstance = {
     readyState: 1, // WebSocket.OPEN
@@ -212,7 +223,7 @@ async function renderPane() {
   MockWebSocket.CONNECTING = 0;
   MockWebSocket.CLOSING = 2;
   MockWebSocket.CLOSED = 3;
-  global.WebSocket = MockWebSocket;
+  globalThis.WebSocket = MockWebSocket;
 
   const { default: TerminalPane } = await import("../components/TerminalPane.jsx");
 
@@ -227,6 +238,7 @@ async function renderPane() {
         onSwap: vi.fn(),
         onPlace: vi.fn(),
         onDragSourceChange: vi.fn(),
+        toast: toastSpy,
       }),
     );
     unmount = result.unmount;
@@ -264,6 +276,39 @@ function makeImagePasteEvent({ type = "image/png" } = {}) {
       getData: vi.fn().mockReturnValue(""),
       items: [item],
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — build fake navigator.clipboard objects for Alt+V tests
+// ---------------------------------------------------------------------------
+
+function makeClipboardWithImage({ type = "image/png", path = "C:\\uploads\\altv.png" } = {}) {
+  const blob = new Blob(["fake-image-bytes"], { type });
+  const clipboardItem = {
+    types: [type],
+    getType: vi.fn().mockResolvedValue(blob),
+  };
+  return {
+    items: [clipboardItem],
+    read: vi.fn().mockResolvedValue([clipboardItem]),
+    readText: vi.fn().mockResolvedValue(""),
+    _expectedPath: path,
+  };
+}
+
+function makeClipboardTextOnly(text = "alt-v text") {
+  return {
+    items: [],
+    read: vi.fn().mockResolvedValue([]),  // no image items
+    readText: vi.fn().mockResolvedValue(text),
+  };
+}
+
+function makeClipboardUnavailable(errorMessage = "Permission denied") {
+  return {
+    read: vi.fn().mockRejectedValue(new Error(errorMessage)),
+    readText: vi.fn().mockRejectedValue(new Error(errorMessage)),
   };
 }
 
@@ -310,7 +355,7 @@ describe("TerminalPane paste handler", () => {
   it("image_paste_uploads_and_sends_path", async () => {
     const { wsSendSpy, unmount } = await renderPane();
 
-    global.fetch = vi.fn().mockResolvedValue({
+    globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ paths: ["C:\\uploads\\paste.png"] }),
     });
@@ -321,7 +366,7 @@ describe("TerminalPane paste handler", () => {
     });
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith("/api/upload", expect.objectContaining({ method: "POST" }));
+      expect(globalThis.fetch).toHaveBeenCalledWith("/api/upload", expect.objectContaining({ method: "POST" }));
     });
 
     // Give async operations time to settle
@@ -340,7 +385,7 @@ describe("TerminalPane paste handler", () => {
   it("image_paste_sends_quoted_path_when_spaces", async () => {
     const { wsSendSpy, unmount } = await renderPane();
 
-    global.fetch = vi.fn().mockResolvedValue({
+    globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ paths: ["C:\\my uploads\\paste.png"] }),
     });
@@ -396,6 +441,141 @@ describe("TerminalPane paste handler", () => {
     const result = capturedKeyHandler(ctrlVEvent);
     // Handler must return false for Ctrl+V so xterm doesn't send raw \x16
     expect(result).toBe(false);
+
+    unmount();
+  });
+
+  // 6 — Alt+V with image on clipboard: uploads image and sends path via WS
+  it("alt_v_with_image_uploads_and_sends_path", async () => {
+    const toastSpy = vi.fn();
+    const { wsSendSpy, unmount } = await renderPane({ toastSpy });
+
+    await waitFor(() => {
+      expect(capturedKeyHandler).not.toBeNull();
+    });
+
+    const clipboard = makeClipboardWithImage({ path: "C:\\uploads\\altv.png" });
+    globalThis.navigator = {
+      ...globalThis.navigator,
+      clipboard,
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ paths: ["C:\\uploads\\altv.png"] }),
+    });
+
+    const altVEvent = {
+      type: "keydown",
+      altKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      key: "v",
+    };
+
+    // The handler fires handleAltVPaste() asynchronously then returns false
+    const result = capturedKeyHandler(altVEvent);
+    expect(result).toBe(false);
+
+    // Wait for the async upload and WS send to complete
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        "/api/upload",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+
+    await waitFor(() => {
+      expect(wsSendSpy).toHaveBeenCalled();
+    });
+
+    const sent = wsSendSpy.mock.calls[0][0];
+    // Path has no spaces — unquoted
+    expect(sent).toBe("C:\\uploads\\altv.png");
+
+    // Success toast should have been shown
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith("Image pasted", "success");
+    });
+
+    unmount();
+  });
+
+  // 7 — Alt+V with text-only clipboard: falls back to xterm.paste()
+  it("alt_v_with_text_only_calls_xterm_paste", async () => {
+    const { unmount } = await renderPane();
+
+    await waitFor(() => {
+      expect(capturedKeyHandler).not.toBeNull();
+    });
+
+    const clipboard = makeClipboardTextOnly("hello from alt-v");
+    globalThis.navigator = {
+      ...globalThis.navigator,
+      clipboard,
+    };
+
+    const altVEvent = {
+      type: "keydown",
+      altKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      key: "v",
+    };
+
+    const result = capturedKeyHandler(altVEvent);
+    expect(result).toBe(false);
+
+    // xterm.paste() should be called with the clipboard text
+    await waitFor(() => {
+      expect(mockTermPaste).toHaveBeenCalledWith("hello from alt-v");
+    });
+
+    // WS send should NOT be called directly — xterm's onData handler does it
+    expect(_wsSendSpy).not.toHaveBeenCalled();
+
+    unmount();
+  });
+
+  // 8 — Alt+V when clipboard API is unavailable: shows error toast
+  it("alt_v_clipboard_unavailable_shows_toast", async () => {
+    const toastSpy = vi.fn();
+    const { unmount } = await renderPane({ toastSpy });
+
+    await waitFor(() => {
+      expect(capturedKeyHandler).not.toBeNull();
+    });
+
+    const clipboard = makeClipboardUnavailable("NotAllowedError: Permission denied");
+    globalThis.navigator = {
+      ...globalThis.navigator,
+      clipboard,
+    };
+
+    const altVEvent = {
+      type: "keydown",
+      altKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      key: "v",
+    };
+
+    const result = capturedKeyHandler(altVEvent);
+    expect(result).toBe(false);
+
+    // Error toast should be shown — the handler catches and surfaces the error
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Paste failed"),
+        "error"
+      );
+    });
+
+    // Neither upload nor WS send should have occurred
+    expect(_wsSendSpy).not.toHaveBeenCalled();
 
     unmount();
   });

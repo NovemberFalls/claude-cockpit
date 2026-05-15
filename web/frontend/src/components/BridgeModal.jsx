@@ -306,6 +306,18 @@ export default function BridgeModal({
                         </button>
                     </div>
 
+                    {/* Intro */}
+                    <p
+                        className="text-xs mb-4"
+                        style={{ color: "var(--text-muted)", lineHeight: 1.6 }}
+                    >
+                        Send a message from this session to another running session.{" "}
+                        <strong style={{ color: "var(--text-secondary)" }}>Manual</strong>{" "}
+                        relays a single message (your latest reply or a custom prompt).{" "}
+                        <strong style={{ color: "var(--text-secondary)" }}>Auto-relay</strong>{" "}
+                        lets two sessions exchange messages back and forth until a turn cap is reached.
+                    </p>
+
                     {/* Tabs */}
                     <div
                         className="flex gap-0 mb-4 rounded overflow-hidden"
