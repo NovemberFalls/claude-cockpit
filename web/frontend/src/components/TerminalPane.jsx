@@ -65,6 +65,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const writeRafRef = useRef(null);   // rAF handle for batched writes
   const searchRef = useRef(null);       // SearchAddon instance
   const webglRef = useRef(null);        // WebglAddon instance (null after context loss)
+  const atlasSeededRef = useRef(false); // true after first data write triggers atlas rebuild
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
@@ -142,6 +143,12 @@ const TerminalPane = forwardRef(function TerminalPane({
         writeRafRef.current = requestAnimationFrame(() => {
           if (xtermRef.current && pendingDataRef.current) {
             xtermRef.current.write(pendingDataRef.current);
+            // After the first real data populates the atlas, force a rebuild so
+            // glyphs rasterized during the init race are re-drawn correctly.
+            if (!atlasSeededRef.current && webglRef.current) {
+              atlasSeededRef.current = true;
+              setTimeout(() => webglRef.current?.clearTextureAtlas?.(), 150);
+            }
           }
           pendingDataRef.current = "";
           writeRafRef.current = null;
@@ -419,12 +426,22 @@ const TerminalPane = forwardRef(function TerminalPane({
     });
     resizeObserver.current.observe(termRef.current);
 
+    // Rebuild WebGL atlas when the tab regains visibility — GPU contexts may
+    // have been evicted while the tab was backgrounded, leaving stale textures.
+    const onVisibilityChange = () => {
+      if (!document.hidden && webglRef.current) {
+        webglRef.current.clearTextureAtlas?.();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     // Connect to PTY if we have a terminalId
     if (session.terminalId) {
       connectWs(session.terminalId);
     }
 
     return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       termEl.removeEventListener("paste", pasteHandler, { capture: true });
       clearTimeout(resizeTimer.current);
       clearTimeout(reconnectTimer.current);
@@ -436,6 +453,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       fitRef.current = null;
       searchRef.current = null;
       webglRef.current = null;
+      atlasSeededRef.current = false;
       pendingDataRef.current = "";
       writeRafRef.current = null;
     };
@@ -451,10 +469,11 @@ const TerminalPane = forwardRef(function TerminalPane({
     }
   }, [theme]);
 
-  // Update font size when zoom changes
+  // Update font size when zoom changes — clear atlas so glyphs are re-rasterized at the new size
   useEffect(() => {
     if (xtermRef.current) {
       xtermRef.current.options.fontSize = terminalZoom;
+      webglRef.current?.clearTextureAtlas?.();
       requestAnimationFrame(() => safeFit());
     }
   }, [terminalZoom, safeFit]);
