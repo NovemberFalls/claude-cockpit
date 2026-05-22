@@ -70,7 +70,7 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
       document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [onClose, menuRef]);
 
   const itemStyle = {
     padding: "6px 12px",

@@ -162,6 +162,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- toast is stable (useCallback with empty deps); adding it would not cause re-runs but the rule can't verify stability across files
   }, []);
 
 
@@ -299,7 +300,7 @@ export default function App() {
           s.id === localId ? { ...s, terminalId: data.id, status: "running" } : s
         )
       );
-    } catch (err) {
+    } catch (_err) {
       toast("Failed to create session", "error");
       setSessions((prev) =>
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
@@ -1169,7 +1170,6 @@ export default function App() {
                         onClose={() => removeSession(session.id)}
                         paneIndex={idx}
                         onSwap={layout > 1 ? swapPanes : undefined}
-                        onPlace={placeSession}
                         onDragSourceChange={layout > 1 ? setDragSource : undefined}
                         terminalZoom={terminalZoom}
                         toast={toast}

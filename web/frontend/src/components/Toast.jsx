@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { useState, useCallback, useRef } from "react";
 import { CheckCircle, CircleX, Info } from "lucide-react";
 

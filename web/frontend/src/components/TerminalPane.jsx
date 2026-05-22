@@ -43,10 +43,8 @@ function buildXtermTheme(theme) {
 const TerminalPane = forwardRef(function TerminalPane({
   session,       // { id, name, terminalId, model, status, activityState }
   onClose,       // () => void
-  onNameChange,  // (name) => void
   paneIndex,     // number — position in the grid
   onSwap,        // (fromIndex, toIndex) => void
-  onPlace,       // (sessionId, slotIndex) => void — drag from sidebar
   onDragSourceChange, // (paneIndex | null) => void — notify parent of drag start/end
   terminalZoom = 13, // terminal font size (zoom level)
   toast,           // (msg, type) => void — optional toast notification
@@ -112,6 +110,10 @@ const TerminalPane = forwardRef(function TerminalPane({
     }
   }, []);
 
+  // Ref so connectWs can schedule itself recursively without a stale closure.
+  // The ref is assigned immediately after the useCallback declaration below.
+  const connectWsRef = useRef(null);
+
   // Connect terminal to PTY via WebSocket
   const connectWs = useCallback((terminalId) => {
     if (!xtermRef.current) return;
@@ -176,13 +178,17 @@ const TerminalPane = forwardRef(function TerminalPane({
         }
         // After attempt 3, reconnect silently every 10s
       }
-      reconnectTimer.current = setTimeout(() => connectWs(terminalId), delay);
+      // Use the ref to avoid a stale closure on connectWs itself
+      reconnectTimer.current = setTimeout(() => connectWsRef.current?.(terminalId), delay);
     };
 
     ws.onerror = () => {
       // onclose will handle reconnection
     };
-  }, []);
+  }, [safeFit]);
+
+  // Keep ref in sync so the recursive setTimeout always calls the latest version
+  connectWsRef.current = connectWs;
 
   // Initialize xterm.js
   useEffect(() => {
@@ -433,6 +439,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       pendingDataRef.current = "";
       writeRafRef.current = null;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: this effect runs once on mount only; theme/zoom/session changes are handled by dedicated effects below
   }, []); // Only run once on mount
 
   // Update theme when it changes — also flush the WebGL glyph atlas so remapped

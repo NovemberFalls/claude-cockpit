@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 
@@ -73,7 +73,8 @@ export default function OnboardingModal({ onDismiss }) {
     }
   }, [current.target]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- DOM measurement pattern: useLayoutEffect synchronously reads layout and sets position state before paint, which is the correct React pattern for tooltip positioning
     measureTarget();
     // Re-measure on resize/scroll
     window.addEventListener("resize", measureTarget);

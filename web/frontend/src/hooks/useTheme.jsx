@@ -1,5 +1,6 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { THEMES, getTheme, getSavedTheme, saveTheme, applyThemeToDOM, listThemes } from "../themes/themeData";
+import { getTheme, getSavedTheme, saveTheme, applyThemeToDOM, listThemes } from "../themes/themeData";
 
 const ThemeContext = createContext(null);
 

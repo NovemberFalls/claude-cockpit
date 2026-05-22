@@ -146,7 +146,7 @@ export default function BridgeModal({
         if (fromSession) {
             setPrefix(`[From session "${fromSession.name}"]:`);
         }
-    }, [fromSession?.name]);
+    }, [fromSession]);
 
     // ---- focus management ----
     useEffect(() => {

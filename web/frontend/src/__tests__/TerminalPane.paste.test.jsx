@@ -233,10 +233,8 @@ async function renderPane({ toastSpy } = {}) {
       React.createElement(TerminalPane, {
         session: SESSION,
         onClose: vi.fn(),
-        onNameChange: vi.fn(),
         paneIndex: 0,
         onSwap: vi.fn(),
-        onPlace: vi.fn(),
         onDragSourceChange: vi.fn(),
         toast: toastSpy,
       }),
