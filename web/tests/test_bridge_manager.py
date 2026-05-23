@@ -603,3 +603,636 @@ async def test_idle_gate_waits_then_errors_if_busy(bm, monkeypatch, from_session
 
     record = bm._bridges[bid]
     assert record.state == "errored", f"Expected errored, got {record.state}"
+
+
+# ===========================================================================
+# ChannelManager tests (Tests 16–32)
+# ===========================================================================
+
+from bridge_manager import ChannelManager, _ChannelRecord  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for channel tests
+# ---------------------------------------------------------------------------
+
+
+def _make_channel_sessions(lead_id="lead-1", lead_name="Lead Session",
+                            worker_specs=None):
+    """Return (lead_session, list_of_worker_sessions).
+
+    *worker_specs* is a list of (id, name, alive) tuples.
+    Defaults to two alive workers if not supplied.
+    """
+    if worker_specs is None:
+        worker_specs = [("w1", "Worker One", True), ("w2", "Worker Two", True)]
+    lead = _make_mock_session(lead_id, lead_name, alive=True)
+    workers = [_make_mock_session(wid, wname, alive=alive)
+               for wid, wname, alive in worker_specs]
+    return lead, workers
+
+
+def _patch_channel_pty(monkeypatch, sessions_dict, jsonl_map=None):
+    """Monkeypatch pty_manager for channel tests.
+
+    *sessions_dict*: {terminal_id: mock_session}
+    *jsonl_map*: {terminal_id: path_or_None} — defaults to "/tmp/fake.jsonl" for all.
+    Returns write_calls list.
+    """
+    def get_terminal(tid):
+        return sessions_dict.get(tid)
+
+    def get_jsonl_path(session):
+        if jsonl_map is not None:
+            return jsonl_map.get(session.id)
+        return "/tmp/fake.jsonl"
+
+    write_calls: list[tuple[str, str]] = []
+
+    async def fake_write(tid, data):
+        write_calls.append((tid, data))
+        return True
+
+    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", get_terminal)
+    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", get_jsonl_path)
+    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+    return write_calls
+
+
+async def _cancel_channel_tasks(record: _ChannelRecord):
+    """Cancel all tasks on a _ChannelRecord and yield control so they can exit."""
+    record._stop_event.set()
+    for t in record._tasks:
+        if t and not t.done():
+            t.cancel()
+    await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Hanging tail_jsonl stub — prevents relay tasks from spinning
+# ---------------------------------------------------------------------------
+
+
+async def _never_yield(path, from_beginning=False):
+    """Async generator that hangs forever without yielding anything."""
+    await asyncio.sleep(3600)
+    return
+    yield  # make it an async generator
+
+
+# ---------------------------------------------------------------------------
+# Test 16 — start() returns channel_id with correct shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_returns_channel_id(monkeypatch):
+    """start() returns {ok: True, channel_id: <12-char hex>} for a valid topology."""
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "get to work")
+
+    assert result.get("ok") is True, f"Expected ok=True, got: {result}"
+    cid = result.get("channel_id")
+    assert cid is not None
+    assert len(cid) == 12
+    assert re.fullmatch(r"[0-9a-f]{12}", cid), f"channel_id not 12-char hex: {cid!r}"
+
+    record = cm._channels[cid]
+    await _cancel_channel_tasks(record)
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — start() spawns N+1 tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_spawns_n_plus_one_tasks(monkeypatch):
+    """start() with N workers creates exactly N+1 asyncio tasks in record._tasks."""
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    # Case A: 1 lead + 2 workers → 3 tasks
+    cm_a = ChannelManager()
+    lead_a, workers_a = _make_channel_sessions(
+        lead_id="lead-a", worker_specs=[("wa1", "Worker A1", True), ("wa2", "Worker A2", True)]
+    )
+    sessions_a = {lead_a.id: lead_a, **{w.id: w for w in workers_a}}
+    _patch_channel_pty(monkeypatch, sessions_a)
+
+    result_a = await cm_a.start(lead_a.id, [w.id for w in workers_a], "prompt")
+    assert result_a.get("ok") is True
+    record_a = cm_a._channels[result_a["channel_id"]]
+    assert len(record_a._tasks) == 3, f"Expected 3 tasks for 2 workers, got {len(record_a._tasks)}"
+    await _cancel_channel_tasks(record_a)
+
+    # Case B: 1 lead + 3 workers → 4 tasks
+    cm_b = ChannelManager()
+    lead_b, workers_b = _make_channel_sessions(
+        lead_id="lead-b",
+        worker_specs=[("wb1", "Worker B1", True), ("wb2", "Worker B2", True), ("wb3", "Worker B3", True)],
+    )
+    sessions_b = {lead_b.id: lead_b, **{w.id: w for w in workers_b}}
+    _patch_channel_pty(monkeypatch, sessions_b)
+
+    result_b = await cm_b.start(lead_b.id, [w.id for w in workers_b], "prompt")
+    assert result_b.get("ok") is True
+    record_b = cm_b._channels[result_b["channel_id"]]
+    assert len(record_b._tasks) == 4, f"Expected 4 tasks for 3 workers, got {len(record_b._tasks)}"
+    await _cancel_channel_tasks(record_b)
+
+
+# ---------------------------------------------------------------------------
+# Test 18 — start() sends kickoff to lead AND all workers simultaneously
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_sends_kickoff_to_all(monkeypatch):
+    """start() writes one kickoff to lead + one each to all workers; all contain _BP_START.
+
+    Lead kickoff must contain 'LEAD'; each worker kickoff must contain 'WORKER'.
+    """
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()  # 1 lead + 2 workers
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    write_calls = _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "kickoff prompt")
+    assert result.get("ok") is True
+
+    # Allow relay tasks to start (they may trigger additional writes via _inject — but
+    # tail_jsonl hangs, so only the initial kickoff writes should have fired by now)
+    await asyncio.sleep(0)
+
+    # Exactly 3 kickoff writes: lead + 2 workers
+    assert len(write_calls) == 3, f"Expected 3 kickoff writes, got {len(write_calls)}: {[t for t, _ in write_calls]}"
+
+    # All must contain _BP_START
+    for tid, data in write_calls:
+        assert _BP_START in data, f"Missing _BP_START in kickoff to {tid}"
+
+    # Lead kickoff goes to lead.id and contains "LEAD"
+    lead_writes = [(tid, data) for tid, data in write_calls if tid == lead.id]
+    assert len(lead_writes) == 1, f"Expected 1 lead write, got {len(lead_writes)}"
+    assert "LEAD" in lead_writes[0][1], "Lead kickoff must contain 'LEAD'"
+
+    # Worker kickoffs go to worker IDs and each contains "WORKER"
+    for w in workers:
+        worker_writes = [(tid, data) for tid, data in write_calls if tid == w.id]
+        assert len(worker_writes) == 1, f"Expected 1 write for worker {w.id}, got {len(worker_writes)}"
+        assert "WORKER" in worker_writes[0][1], f"Worker kickoff for {w.id} must contain 'WORKER'"
+
+    record = cm._channels[result["channel_id"]]
+    await _cancel_channel_tasks(record)
+
+
+# ---------------------------------------------------------------------------
+# Test 19 — start() rejects empty worker_ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_rejects_empty_workers(monkeypatch):
+    """start() with an empty worker_ids list returns {ok: False, error: ...}."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead")
+    _patch_channel_pty(monkeypatch, {lead.id: lead})
+
+    result = await cm.start(lead.id, [], "prompt")
+
+    assert result.get("ok") is False
+    assert "error" in result
+    assert len(cm._channels) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 20 — start() rejects duplicate IDs (lead appears in worker_ids)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_rejects_duplicate_ids(monkeypatch):
+    """start() returns {ok: False} when the same terminal ID appears as both lead and worker."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead")
+    worker = _make_mock_session("w1", "Worker")
+    _patch_channel_pty(monkeypatch, {lead.id: lead, worker.id: worker})
+
+    # lead.id is duplicated in the worker list
+    result = await cm.start(lead.id, [worker.id, lead.id], "prompt")
+
+    assert result.get("ok") is False
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 21 — start() rejects dead lead session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_rejects_dead_lead(monkeypatch):
+    """start() returns {ok: False} when the lead session is not alive."""
+    cm = ChannelManager()
+    dead_lead = _make_mock_session("lead-1", "Lead", alive=False)
+    worker = _make_mock_session("w1", "Worker")
+    _patch_channel_pty(monkeypatch, {dead_lead.id: dead_lead, worker.id: worker})
+
+    result = await cm.start(dead_lead.id, [worker.id], "prompt")
+
+    assert result.get("ok") is False
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 22 — start() rejects dead worker session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_rejects_dead_worker(monkeypatch):
+    """start() returns {ok: False} when any worker session is not alive."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead", alive=True)
+    alive_worker = _make_mock_session("w1", "Worker One", alive=True)
+    dead_worker = _make_mock_session("w2", "Worker Two", alive=False)
+    sessions = {lead.id: lead, alive_worker.id: alive_worker, dead_worker.id: dead_worker}
+    _patch_channel_pty(monkeypatch, sessions)
+
+    result = await cm.start(lead.id, [alive_worker.id, dead_worker.id], "prompt")
+
+    assert result.get("ok") is False
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 23 — start() rejects when JSONL missing for any member
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_start_rejects_missing_jsonl(monkeypatch):
+    """start() returns {ok: False} when JSONL is unavailable for any member.
+
+    Lead has JSONL, first worker has JSONL, second worker has JSONL=None.
+    """
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead")
+    w1 = _make_mock_session("w1", "Worker One")
+    w2 = _make_mock_session("w2", "Worker Two")
+    sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
+    # w2 has no JSONL
+    jsonl_map = {lead.id: "/tmp/lead.jsonl", w1.id: "/tmp/w1.jsonl", w2.id: None}
+    write_calls = _patch_channel_pty(monkeypatch, sessions, jsonl_map=jsonl_map)
+
+    result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
+
+    assert result.get("ok") is False
+    assert "error" in result
+    # No kickoff writes must have been sent
+    assert len(write_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 24 — stop() transitions state to ended_user
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_stop_transitions_to_ended_user(monkeypatch):
+    """stop() on an active channel returns True and sets state='ended_user'."""
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    await asyncio.sleep(0)
+
+    ok = cm.stop(cid)
+    assert ok is True
+
+    record = cm._channels[cid]
+    assert record.state == "ended_user", f"Expected ended_user, got {record.state}"
+    await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Test 25 — stop() on unknown channel_id returns False
+# ---------------------------------------------------------------------------
+
+
+def test_channel_stop_unknown_returns_false():
+    """stop() with an unrecognised channel_id returns False."""
+    cm = ChannelManager()
+    assert cm.stop("nonexistent_12x") is False
+
+
+# ---------------------------------------------------------------------------
+# Test 26 — stop() is idempotent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_stop_idempotent(monkeypatch):
+    """Calling stop() twice on the same channel both return True."""
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    await asyncio.sleep(0)
+
+    first = cm.stop(cid)
+    second = cm.stop(cid)
+
+    assert first is True
+    assert second is True
+
+
+# ---------------------------------------------------------------------------
+# Test 27 — member_ids() returns lead + all workers for active channels
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_member_ids_includes_all_active(monkeypatch):
+    """member_ids() returns the lead + every worker ID while the channel is active."""
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "prompt")
+    assert result.get("ok") is True
+
+    ids = cm.member_ids()
+    assert lead.id in ids, f"lead.id {lead.id!r} not in member_ids: {ids}"
+    for w in workers:
+        assert w.id in ids, f"worker.id {w.id!r} not in member_ids: {ids}"
+    assert len(ids) == 1 + len(workers)
+
+    cid = result["channel_id"]
+    record = cm._channels[cid]
+    await _cancel_channel_tasks(record)
+
+
+# ---------------------------------------------------------------------------
+# Test 28 — member_ids() excludes ended channels
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_member_ids_excludes_ended(monkeypatch):
+    """member_ids() returns an empty set after the only channel has been stopped."""
+    cm = ChannelManager()
+    lead, workers = _make_channel_sessions()
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
+
+    result = await cm.start(lead.id, [w.id for w in workers], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    await asyncio.sleep(0)
+    cm.stop(cid)
+    await asyncio.sleep(0)
+
+    assert cm.member_ids() == set(), f"Expected empty set after stop, got {cm.member_ids()}"
+
+
+# ---------------------------------------------------------------------------
+# Test 29 — worker relay task sends to LEAD only (not to other workers)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_worker_relay_targets_lead_only(monkeypatch):
+    """A worker's relay task forwards its assistant turn to the lead, not to peer workers."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead Session")
+    w1 = _make_mock_session("w1", "Worker One")
+    w2 = _make_mock_session("w2", "Worker Two")
+    sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
+
+    write_calls = _patch_channel_pty(monkeypatch, sessions)
+
+    # Track which tail_jsonl calls are made by index; first call = w1 relay task,
+    # second = w2 relay task, third = lead relay task (tasks created in worker order
+    # then lead last in ChannelManager.start).
+    call_idx = {"n": 0}
+
+    async def fake_tail(path, from_beginning=False):
+        call_idx["n"] += 1
+        current = call_idx["n"]
+        if current == 1:
+            # First watcher is w1 — yield one assistant entry
+            yield {
+                "type": "assistant",
+                "content": [{"type": "text", "text": "Hello from w1"}],
+            }
+        # All other watchers hang
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
+
+    result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    # Wait for the worker relay to fire
+    for _ in range(30):
+        await asyncio.sleep(0.05)
+        # Relay writes come AFTER the 3 kickoff writes
+        if len(write_calls) > 3:
+            break
+
+    # Collect relay writes (beyond the initial 3 kickoff writes)
+    relay_writes = write_calls[3:]
+    assert len(relay_writes) >= 1, "Expected at least one relay write from w1"
+
+    # All relay write targets must be the lead (not w2)
+    relay_targets = {tid for tid, _ in relay_writes}
+    assert lead.id in relay_targets, f"Lead not among relay targets: {relay_targets}"
+    assert w2.id not in relay_targets, f"w2 should NOT receive w1's relay write, got targets: {relay_targets}"
+
+    record = cm._channels[cid]
+    await _cancel_channel_tasks(record)
+
+
+# ---------------------------------------------------------------------------
+# Test 30 — lead relay task sends to ALL workers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_lead_relay_targets_all_workers(monkeypatch):
+    """The lead's relay task forwards its assistant turn to ALL workers, not back to lead."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead Session")
+    w1 = _make_mock_session("w1", "Worker One")
+    w2 = _make_mock_session("w2", "Worker Two")
+    sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
+
+    write_calls = _patch_channel_pty(monkeypatch, sessions)
+
+    # Tasks are spawned: worker w1 (idx=1), worker w2 (idx=2), lead (idx=3)
+    # We want only the lead task (third call) to yield an entry.
+    call_idx = {"n": 0}
+
+    async def fake_tail(path, from_beginning=False):
+        call_idx["n"] += 1
+        current = call_idx["n"]
+        if current == 3:
+            # Third watcher is the lead relay task
+            yield {
+                "type": "assistant",
+                "content": [{"type": "text", "text": "Lead directive to all workers"}],
+            }
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
+
+    result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    # Wait for the lead relay to write to both workers
+    for _ in range(30):
+        await asyncio.sleep(0.05)
+        if len(write_calls) > 4:  # 3 kickoffs + at least 2 relay writes
+            break
+
+    relay_writes = write_calls[3:]
+    relay_targets = {tid for tid, _ in relay_writes}
+
+    assert w1.id in relay_targets, f"w1 not among relay targets: {relay_targets}"
+    assert w2.id in relay_targets, f"w2 not among relay targets: {relay_targets}"
+    assert lead.id not in relay_targets, f"Lead should NOT receive its own relay, got targets: {relay_targets}"
+
+    record = cm._channels[cid]
+    await _cancel_channel_tasks(record)
+
+
+# ---------------------------------------------------------------------------
+# Test 31 — sentinel from a worker ends the channel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_sentinel_from_worker_ends_channel(monkeypatch):
+    """BRIDGE-DONE in a worker's reply transitions the channel to 'ended_sentinel'."""
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead Session")
+    w1 = _make_mock_session("w1", "Worker One")
+    w2 = _make_mock_session("w2", "Worker Two")
+    sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
+
+    _patch_channel_pty(monkeypatch, sessions)
+
+    call_idx = {"n": 0}
+
+    async def fake_tail(path, from_beginning=False):
+        call_idx["n"] += 1
+        current = call_idx["n"]
+        if current == 1:
+            # First watcher is w1 — yield sentinel
+            yield {
+                "type": "assistant",
+                "content": [{"type": "text", "text": "Task complete. BRIDGE-DONE"}],
+            }
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
+
+    result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    # Wait for state to transition
+    for _ in range(30):
+        await asyncio.sleep(0.05)
+        record = cm._channels[cid]
+        if record.state != "active":
+            break
+
+    record = cm._channels[cid]
+    assert record.state == "ended_sentinel", f"Expected ended_sentinel, got {record.state}"
+    await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Test 32 — turn cap ends the channel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_turn_cap_ends_channel(monkeypatch):
+    """Channel ends with state='ended_capped' when max_turns is reached.
+
+    max_turns=1: after a single relay (worker OR lead relaying once), the
+    turns_used counter hits the cap and the channel ends.
+    """
+    cm = ChannelManager()
+    lead = _make_mock_session("lead-1", "Lead Session")
+    w1 = _make_mock_session("w1", "Worker One")
+    w2 = _make_mock_session("w2", "Worker Two")
+    sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
+
+    _patch_channel_pty(monkeypatch, sessions)
+
+    # Each tail call yields one entry then hangs; any relay that fires first
+    # will increment turns_used to 1 and hit the cap.
+    call_idx = {"n": 0}
+
+    async def fake_tail(path, from_beginning=False):
+        call_idx["n"] += 1
+        yield {
+            "type": "assistant",
+            "content": [{"type": "text", "text": "One relay, no sentinel"}],
+        }
+        # Hang after yielding so the channel ends via cap not generator exhaustion
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
+
+    result = await cm.start(lead.id, [w1.id, w2.id], "prompt", max_turns=1)
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    # Wait for turn cap to trigger
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        record = cm._channels[cid]
+        if record.state != "active":
+            break
+
+    record = cm._channels[cid]
+    assert record.state == "ended_capped", f"Expected ended_capped, got {record.state}"
+    assert record.turns_used >= 1
+    await asyncio.sleep(0)

@@ -31,7 +31,7 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 from pty_manager import pty_manager
-from bridge_manager import bridge_manager
+from bridge_manager import bridge_manager, channel_manager
 
 START_TIME = _time.time()
 
@@ -666,9 +666,10 @@ async def bridge_auto(request: Request):
     # input buffer and produce corrupt, unpredictable output.
     active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
     busy_ids = {b["from_id"] for b in active} | {b["to_id"] for b in active}
+    busy_ids |= channel_manager.member_ids()
     if from_id in busy_ids or to_id in busy_ids:
         return JSONResponse(
-            {"ok": False, "error": "One or both sessions already in an active bridge"},
+            {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
             status_code=409,
         )
     result = await bridge_manager.start_auto(from_id, to_id, kickoff, max_turns)
@@ -689,6 +690,64 @@ async def bridge_stop(bridge_id: str):
 async def bridge_list():
     """List all known bridges (active and recently ended)."""
     return JSONResponse({"bridges": bridge_manager.list_active()})
+
+
+@app.post("/api/bridge/channel")
+async def channel_start(request: Request):
+    """Start an N-session channel: one lead coordinating N workers."""
+    body = await request.json()
+    lead_id = body.get("lead_id", "")
+    worker_ids = body.get("worker_ids", [])
+    kickoff = body.get("kickoff_prompt", "")
+    try:
+        max_turns = int(body.get("max_turns", 6))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "max_turns must be an integer"}, status_code=400)
+
+    # Validation
+    if not lead_id or not worker_ids or not kickoff:
+        return JSONResponse(
+            {"ok": False, "error": "lead_id, worker_ids, kickoff_prompt required"},
+            status_code=400,
+        )
+    if not isinstance(worker_ids, list) or not all(isinstance(w, str) for w in worker_ids):
+        return JSONResponse({"ok": False, "error": "worker_ids must be a list of strings"}, status_code=400)
+    if len(worker_ids) > 7:  # lead + 7 workers = 8 total, matches MAX_SESSIONS default
+        return JSONResponse({"ok": False, "error": "Maximum 7 workers per channel"}, status_code=400)
+    if not 1 <= max_turns <= 20:
+        return JSONResponse({"ok": False, "error": "max_turns must be between 1 and 20"}, status_code=400)
+
+    # Conflict guard: reject if any session is in an active 2-session bridge OR active channel
+    active_bridges = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
+    bridge_busy = {b["from_id"] for b in active_bridges} | {b["to_id"] for b in active_bridges}
+    channel_busy = channel_manager.member_ids()
+    all_busy = bridge_busy | channel_busy
+    all_requested = {lead_id} | set(worker_ids)
+    overlap = all_requested & all_busy
+    if overlap:
+        return JSONResponse(
+            {"ok": False, "error": f"Sessions already in an active bridge or channel: {sorted(overlap)}"},
+            status_code=409,
+        )
+
+    result = await channel_manager.start(lead_id, worker_ids, kickoff, max_turns)
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status)
+
+
+@app.delete("/api/bridge/channel/{channel_id}")
+async def channel_stop(channel_id: str):
+    """Stop an active channel by channel_id."""
+    ok = channel_manager.stop(channel_id)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "Channel not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/bridge/channel")
+async def channel_list():
+    """List all known channels (active and recently ended)."""
+    return JSONResponse({"channels": channel_manager.list_active()})
 
 
 # ── JSONL Message Stream (SSE) ───────────────────────────

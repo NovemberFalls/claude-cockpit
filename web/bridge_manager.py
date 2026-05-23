@@ -129,7 +129,7 @@ def _wrap(text: str) -> str:
 # Helper — idle gate
 # ---------------------------------------------------------------------------
 
-async def _wait_for_idle(terminal_id: str, record: _BridgeRecord) -> bool:
+async def _wait_for_idle(terminal_id: str, record: _BridgeRecord | _ChannelRecord) -> bool:
     """Poll *terminal_id*'s tracker until it reaches 'idle' or timeout.
 
     Returns True if idle was reached, False if the wait timed out, the
@@ -165,7 +165,7 @@ def _session_alive(terminal_id: str) -> bool:
 # Helper — inject message into PTY
 # ---------------------------------------------------------------------------
 
-async def _inject(terminal_id: str, text: str, record: _BridgeRecord) -> bool:
+async def _inject(terminal_id: str, text: str, record: _BridgeRecord | _ChannelRecord) -> bool:
     """Wait for the peer to become idle, then inject *text*.
 
     Returns True on success, False on any error (caller should end the bridge).
@@ -656,3 +656,567 @@ class BridgeManager:
 # ---------------------------------------------------------------------------
 
 bridge_manager = BridgeManager()
+
+
+# ---------------------------------------------------------------------------
+# Channel message templates
+# ---------------------------------------------------------------------------
+
+def _channel_lead_kickoff(worker_names: list[str], prompt: str) -> str:
+    """Kickoff prompt sent to the lead session at channel start."""
+    names_quoted = ", ".join(f'"{n}"' for n in worker_names)
+    n = len(worker_names)
+    return (
+        f"[CHANNEL START — you are the LEAD]\n"
+        f"You are coordinating {n} worker session{'s' if n != 1 else ''}: {names_quoted}.\n"
+        f"You will receive their output. Direct them as needed.\n"
+        f"End your message with BRIDGE-DONE when coordination is complete.\n\n"
+        f"Question/Task: {prompt}\n"
+        f"[/CHANNEL]"
+    )
+
+
+def _channel_worker_kickoff(lead_name: str, prompt: str) -> str:
+    """Kickoff prompt sent to each worker session at channel start."""
+    return (
+        f'[CHANNEL START — you are a WORKER]\n'
+        f'Your lead/coordinator is session "{lead_name}".\n'
+        f"Follow their direction and report your progress.\n"
+        f"End your message with BRIDGE-DONE when your task is complete.\n\n"
+        f"Task: {prompt}\n"
+        f"[/CHANNEL]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal channel record
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ChannelRecord:
+    """Internal state for a single channel (1 lead + N workers)."""
+
+    channel_id: str
+    lead_id: str
+    lead_name: str
+    worker_ids: list[str]           # ordered list of worker terminal IDs
+    worker_names: dict[str, str]    # terminal_id → display name
+    max_turns: int
+
+    state: str = "active"           # active | ended_user | ended_sentinel | ended_capped | errored
+    turns_used: int = 0             # total relays completed across all members
+    _tasks: list = field(default_factory=list, repr=False)
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _ended_at: Optional[float] = field(default=None, repr=False)
+
+    @property
+    def bridge_id(self) -> str:
+        # _inject() logs record.bridge_id — alias channel_id so it works for channels too
+        return self.channel_id
+
+    def to_dict(self) -> dict:
+        return {
+            "channel_id": self.channel_id,
+            "lead_id": self.lead_id,
+            "lead_name": self.lead_name,
+            "worker_ids": list(self.worker_ids),
+            "worker_names": dict(self.worker_names),
+            "turns_used": self.turns_used,
+            "max_turns": self.max_turns,
+            "state": self.state,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Channel end helper
+# ---------------------------------------------------------------------------
+
+def _end_channel(record: _ChannelRecord, new_state: str) -> None:
+    """Transition a channel to a terminal state if it is still active.
+
+    Idempotent — only the first caller wins; subsequent calls are no-ops.
+    Cancels all relay tasks and sets the stop event so all sides wind down.
+    """
+    if record.state != "active":
+        return
+
+    record.state = new_state
+    record._ended_at = time.monotonic()
+    record._stop_event.set()
+
+    for task in record._tasks:
+        if task is not None and not task.done():
+            task.cancel()
+
+    logger.info(
+        "[channel %s] Ended with state=%s (turns=%d/%d, lead=%s, workers=%s)",
+        record.channel_id, new_state, record.turns_used, record.max_turns,
+        record.lead_name, list(record.worker_names.values()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Channel relay tasks
+# ---------------------------------------------------------------------------
+
+async def _worker_relay_task(
+    record: _ChannelRecord,
+    worker_id: str,
+    worker_name: str,
+) -> None:
+    """Tail *worker_id*'s JSONL and relay each new assistant turn to the lead.
+
+    Ends when:
+        - BRIDGE-DONE sentinel is detected in the worker's reply
+        - ``max_turns`` total relays have been completed across all members
+        - The channel stop event is set
+        - A liveness or write error occurs
+    """
+    worker_session = pty_manager.get_terminal(worker_id)
+    if worker_session is None:
+        logger.warning(
+            "[channel %s] Worker session %s not found at task start",
+            record.channel_id, worker_id,
+        )
+        _end_channel(record, "errored")
+        return
+
+    jsonl_path = pty_manager._get_jsonl_path(worker_session)
+    if not jsonl_path:
+        # Wait briefly for the JSONL file to appear after kickoff write.
+        waited = 0.0
+        while waited < 15.0:
+            if record._stop_event.is_set():
+                return
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            worker_session = pty_manager.get_terminal(worker_id)
+            if worker_session is None:
+                _end_channel(record, "errored")
+                return
+            jsonl_path = pty_manager._get_jsonl_path(worker_session)
+            if jsonl_path:
+                break
+
+        if not jsonl_path:
+            logger.warning(
+                "[channel %s] JSONL path not available for worker %s after wait — ending channel",
+                record.channel_id, worker_id,
+            )
+            _end_channel(record, "errored")
+            return
+
+    logger.debug(
+        "[channel %s] Worker relay task starting: watching %s (%s) → lead %s (%s), JSONL: %s",
+        record.channel_id, worker_id, worker_name, record.lead_id, record.lead_name, jsonl_path,
+    )
+
+    try:
+        async for entry in tail_jsonl(jsonl_path, from_beginning=False):
+            if record._stop_event.is_set():
+                logger.debug(
+                    "[channel %s] Stop event set — worker relay task for %s exiting",
+                    record.channel_id, worker_name,
+                )
+                return
+
+            if record.state != "active":
+                return
+
+            text = _extract_text(entry)
+            if not text:
+                continue
+
+            logger.debug(
+                "[channel %s] Relaying from worker %s → lead %s (%d chars)",
+                record.channel_id, worker_name, record.lead_name, len(text),
+            )
+
+            sentinel_detected = "BRIDGE-DONE" in text
+
+            relay_body = _relay_message(worker_name, text)
+            ok = await _inject(record.lead_id, relay_body, record)
+            if not ok:
+                _end_channel(record, "errored")
+                return
+
+            record.turns_used += 1
+
+            if sentinel_detected:
+                logger.info(
+                    "[channel %s] BRIDGE-DONE sentinel detected from worker %s — ending channel",
+                    record.channel_id, worker_name,
+                )
+                _end_channel(record, "ended_sentinel")
+                return
+
+            if record.turns_used >= record.max_turns:
+                logger.info(
+                    "[channel %s] Turn cap %d reached — ending channel",
+                    record.channel_id, record.max_turns,
+                )
+                _end_channel(record, "ended_capped")
+                return
+
+    except asyncio.CancelledError:
+        logger.debug(
+            "[channel %s] Worker relay task for %s cancelled",
+            record.channel_id, worker_name,
+        )
+        raise
+    except Exception:
+        logger.warning(
+            "[channel %s] Worker relay task error watching %s",
+            record.channel_id, worker_id,
+            exc_info=True,
+        )
+        _end_channel(record, "errored")
+
+
+async def _lead_relay_task(record: _ChannelRecord) -> None:
+    """Tail the lead's JSONL and relay each new assistant turn to ALL workers.
+
+    Ends when:
+        - BRIDGE-DONE sentinel is detected in the lead's reply
+        - ``max_turns`` total relays have been completed across all members
+        - The channel stop event is set
+        - A liveness or write error occurs
+    """
+    lead_session = pty_manager.get_terminal(record.lead_id)
+    if lead_session is None:
+        logger.warning(
+            "[channel %s] Lead session %s not found at task start",
+            record.channel_id, record.lead_id,
+        )
+        _end_channel(record, "errored")
+        return
+
+    jsonl_path = pty_manager._get_jsonl_path(lead_session)
+    if not jsonl_path:
+        # Wait briefly for the JSONL file to appear after kickoff write.
+        waited = 0.0
+        while waited < 15.0:
+            if record._stop_event.is_set():
+                return
+            await asyncio.sleep(0.5)
+            waited += 0.5
+            lead_session = pty_manager.get_terminal(record.lead_id)
+            if lead_session is None:
+                _end_channel(record, "errored")
+                return
+            jsonl_path = pty_manager._get_jsonl_path(lead_session)
+            if jsonl_path:
+                break
+
+        if not jsonl_path:
+            logger.warning(
+                "[channel %s] JSONL path not available for lead %s after wait — ending channel",
+                record.channel_id, record.lead_id,
+            )
+            _end_channel(record, "errored")
+            return
+
+    logger.debug(
+        "[channel %s] Lead relay task starting: watching lead %s (%s) → %d worker(s), JSONL: %s",
+        record.channel_id, record.lead_id, record.lead_name, len(record.worker_ids), jsonl_path,
+    )
+
+    try:
+        async for entry in tail_jsonl(jsonl_path, from_beginning=False):
+            if record._stop_event.is_set():
+                logger.debug("[channel %s] Stop event set — lead relay task exiting", record.channel_id)
+                return
+
+            if record.state != "active":
+                return
+
+            text = _extract_text(entry)
+            if not text:
+                continue
+
+            logger.debug(
+                "[channel %s] Relaying from lead %s → %d worker(s) (%d chars)",
+                record.channel_id, record.lead_name, len(record.worker_ids), len(text),
+            )
+
+            sentinel_detected = "BRIDGE-DONE" in text
+
+            relay_body = _relay_message(record.lead_name, text)
+            for worker_id in record.worker_ids:
+                ok = await _inject(worker_id, relay_body, record)
+                if not ok:
+                    _end_channel(record, "errored")
+                    return
+
+            record.turns_used += 1
+
+            if sentinel_detected:
+                logger.info(
+                    "[channel %s] BRIDGE-DONE sentinel detected from lead %s — ending channel",
+                    record.channel_id, record.lead_name,
+                )
+                _end_channel(record, "ended_sentinel")
+                return
+
+            if record.turns_used >= record.max_turns:
+                logger.info(
+                    "[channel %s] Turn cap %d reached — ending channel",
+                    record.channel_id, record.max_turns,
+                )
+                _end_channel(record, "ended_capped")
+                return
+
+    except asyncio.CancelledError:
+        logger.debug("[channel %s] Lead relay task cancelled", record.channel_id)
+        raise
+    except Exception:
+        logger.warning(
+            "[channel %s] Lead relay task error watching lead %s",
+            record.channel_id, record.lead_id,
+            exc_info=True,
+        )
+        _end_channel(record, "errored")
+
+
+# ---------------------------------------------------------------------------
+# ChannelManager
+# ---------------------------------------------------------------------------
+
+class ChannelManager:
+    """Manages multi-session channels: one lead coordinating N workers.
+
+    Thread-safety:
+        ``_channels`` is only accessed from the asyncio event loop (all public
+        methods are async or synchronous but called from the same loop).
+        No additional locking is required.
+
+    GC:
+        ``_gc_task`` is a background asyncio task that wakes every 10 seconds
+        and removes channel records that have been in a terminal state for
+        longer than ``_RECORD_TTL`` seconds.  It is created lazily on the
+        first ``start`` call and lives for the lifetime of the process.
+    """
+
+    def __init__(self) -> None:
+        # Keyed by channel_id (12-char hex string).
+        self._channels: dict[str, _ChannelRecord] = {}
+        self._gc_task: Optional[asyncio.Task] = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def start(
+        self,
+        lead_id: str,
+        worker_ids: list[str],
+        kickoff_prompt: str,
+        max_turns: int = 6,
+    ) -> dict:
+        """Start a channel: one lead coordinating N workers.
+
+        Validates all sessions and JSONL paths up-front, sends kickoff prompts
+        to all participants simultaneously, then spawns N+1 relay tasks.
+
+        Args:
+            lead_id:        Terminal ID of the lead (coordinator) session.
+            worker_ids:     Ordered list of worker terminal IDs (minimum 1).
+            kickoff_prompt: The seed question/task sent to all participants.
+            max_turns:      Maximum total relays before the channel is capped.
+
+        Returns:
+            ``{channel_id: str, ok: True}`` on successful start.
+            ``{ok: False, error: "<reason>"}`` if validation fails.
+        """
+        # Validate minimum topology
+        if not worker_ids:
+            return {"ok": False, "error": "At least one worker_id is required"}
+
+        # Validate no duplicate IDs
+        all_ids = [lead_id] + list(worker_ids)
+        if len(all_ids) != len(set(all_ids)):
+            return {"ok": False, "error": "Duplicate terminal IDs in channel members"}
+
+        # Validate lead
+        lead_session = pty_manager.get_terminal(lead_id)
+        if lead_session is None or not lead_session.alive:
+            return {"ok": False, "error": f"Lead session {lead_id!r} not found or dead"}
+
+        # Validate all workers
+        worker_sessions = {}
+        for wid in worker_ids:
+            ws = pty_manager.get_terminal(wid)
+            if ws is None or not ws.alive:
+                return {"ok": False, "error": f"Worker session {wid!r} not found or dead"}
+            worker_sessions[wid] = ws
+
+        # Fail-fast JSONL checks
+        if pty_manager._get_jsonl_path(lead_session) is None:
+            return {
+                "ok": False,
+                "error": f"JSONL not yet available for lead session {lead_id!r}",
+            }
+        for wid, ws in worker_sessions.items():
+            if pty_manager._get_jsonl_path(ws) is None:
+                return {
+                    "ok": False,
+                    "error": f"JSONL not yet available for worker session {wid!r}",
+                }
+
+        channel_id = uuid.uuid4().hex[:12]
+        worker_names = {wid: worker_sessions[wid].name for wid in worker_ids}
+
+        record = _ChannelRecord(
+            channel_id=channel_id,
+            lead_id=lead_id,
+            lead_name=lead_session.name,
+            worker_ids=list(worker_ids),
+            worker_names=worker_names,
+            max_turns=max_turns,
+        )
+        self._channels[channel_id] = record
+
+        logger.info(
+            "[channel %s] Starting: lead=%s (%s), workers=%s, max_turns=%d",
+            channel_id,
+            lead_id, lead_session.name,
+            [(wid, worker_sessions[wid].name) for wid in worker_ids],
+            max_turns,
+        )
+
+        # Build kickoff messages
+        lead_kickoff = _channel_lead_kickoff(
+            [worker_sessions[wid].name for wid in worker_ids],
+            kickoff_prompt,
+        )
+        worker_kickoffs = {
+            wid: _channel_worker_kickoff(lead_session.name, kickoff_prompt)
+            for wid in worker_ids
+        }
+
+        # Send all kickoffs simultaneously
+        kickoff_coros = [
+            pty_manager.write_pty_async(lead_id, _wrap(lead_kickoff)),
+        ] + [
+            pty_manager.write_pty_async(wid, _wrap(worker_kickoffs[wid]))
+            for wid in worker_ids
+        ]
+        results = await asyncio.gather(*kickoff_coros)
+
+        # Check for any kickoff write failure — index 0 is lead, rest are workers
+        if not results[0]:
+            logger.warning("[channel %s] Kickoff write failed for lead %s — channel aborted", channel_id, lead_id)
+            record.state = "errored"
+            record._ended_at = time.monotonic()
+            return {"ok": False, "error": f"Kickoff write failed for lead {lead_id!r}"}
+        for idx, wid in enumerate(worker_ids):
+            if not results[idx + 1]:
+                logger.warning(
+                    "[channel %s] Kickoff write failed for worker %s — channel aborted",
+                    channel_id, wid,
+                )
+                record.state = "errored"
+                record._ended_at = time.monotonic()
+                return {"ok": False, "error": f"Kickoff write failed for worker {wid!r}"}
+
+        # Spawn N+1 relay tasks: one per worker + one for the lead
+        tasks: list[asyncio.Task] = []
+
+        for wid in worker_ids:
+            t = asyncio.create_task(
+                _worker_relay_task(record, wid, worker_sessions[wid].name),
+                name=f"channel-{channel_id}-worker-{wid}",
+            )
+            tasks.append(t)
+
+        lead_task = asyncio.create_task(
+            _lead_relay_task(record),
+            name=f"channel-{channel_id}-lead",
+        )
+        tasks.append(lead_task)
+
+        record._tasks = tasks
+
+        # Ensure GC is running
+        self._ensure_gc()
+
+        return {"channel_id": channel_id, "ok": True}
+
+    def stop(self, channel_id: str) -> bool:
+        """User-initiated stop of a channel.
+
+        Cancels all relay tasks and sets the channel state to ``ended_user``.
+
+        Returns:
+            True if the channel was found and stopped (or already terminal).
+            False if no channel with *channel_id* exists.
+        """
+        record = self._channels.get(channel_id)
+        if record is None:
+            return False
+
+        if record.state != "active":
+            return True
+
+        logger.info("[channel %s] User stop requested", channel_id)
+        _end_channel(record, "ended_user")
+        return True
+
+    def list_active(self) -> list[dict]:
+        """Return serialisable info for all known channels (active and recently ended).
+
+        Returns:
+            List of dicts with keys:
+            ``channel_id``, ``lead_id``, ``lead_name``, ``worker_ids``,
+            ``worker_names``, ``turns_used``, ``max_turns``, ``state``.
+        """
+        return [r.to_dict() for r in self._channels.values()]
+
+    def member_ids(self) -> set[str]:
+        """Return the set of all terminal IDs currently enrolled in any active channel.
+
+        Used by server.py as a conflict guard — callers should check this before
+        allowing a new channel or bridge to include a session that is already
+        participating in an active channel.
+        """
+        ids: set[str] = set()
+        for record in self._channels.values():
+            if record.state == "active":
+                ids.add(record.lead_id)
+                ids.update(record.worker_ids)
+        return ids
+
+    # ------------------------------------------------------------------
+    # GC
+    # ------------------------------------------------------------------
+
+    def _ensure_gc(self) -> None:
+        """Start the GC background task if it is not already running."""
+        if self._gc_task is None or self._gc_task.done():
+            self._gc_task = asyncio.create_task(
+                self._gc_loop(), name="channel-gc"
+            )
+
+    async def _gc_loop(self) -> None:
+        """Background task: remove expired channel records every 10s."""
+        while True:
+            try:
+                await asyncio.sleep(10.0)
+                now = time.monotonic()
+                expired = [
+                    cid
+                    for cid, rec in self._channels.items()
+                    if rec.state != "active"
+                    and rec._ended_at is not None
+                    and (now - rec._ended_at) > _RECORD_TTL
+                ]
+                for cid in expired:
+                    del self._channels[cid]
+                    logger.debug("[channel GC] Removed expired record %s", cid)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Channel GC loop error", exc_info=True)
+
+
+channel_manager = ChannelManager()

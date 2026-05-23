@@ -95,6 +95,7 @@ export default function App() {
   const [broadcastText, setBroadcastText] = useState("");
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
+  const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -621,6 +622,24 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
+  // Poll /api/bridge/channel every 3s to track active channels
+  useEffect(() => {
+    if (!backendReady) return;
+    const fetchChannels = async () => {
+      try {
+        const res = await fetch("/api/bridge/channel");
+        if (!res.ok) return;
+        const data = await res.json();
+        setChannels(data.channels || []);
+      } catch (_) {
+        // soft-fail — stale channel state is not critical
+      }
+    };
+    fetchChannels();
+    const id = setInterval(fetchChannels, 3000);
+    return () => clearInterval(id);
+  }, [backendReady]);
+
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
     setBridgeModal({ open: true, fromSessionId: sessionId });
@@ -706,6 +725,68 @@ export default function App() {
       toast(`Failed to end bridge: ${err.message}`, "error");
     }
   }, [toast]);
+
+  const handleStartChannel = useCallback(async ({ leadId, workerIds, prompt, maxTurns }) => {
+    // leadId and workerIds are local session ids — resolve to terminalIds
+    const leadSession = sessions.find((s) => s.id === leadId);
+    const workerSessions = workerIds.map((id) => sessions.find((s) => s.id === id)).filter(Boolean);
+    if (!leadSession?.terminalId || workerSessions.some((s) => !s.terminalId)) {
+      toast("One or more selected sessions are not running", "error");
+      return "One or more selected sessions are not running";
+    }
+    try {
+      const res = await fetch("/api/bridge/channel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lead_id: leadSession.terminalId,
+          worker_ids: workerSessions.map((s) => s.terminalId),
+          kickoff_prompt: prompt,
+          max_turns: maxTurns,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        toast(`Channel started (${data.channel_id})`, "info");
+        return null; // no error
+      } else {
+        const msg = `Channel failed: ${data.error || "unknown"}`;
+        toast(msg, "error");
+        return msg;
+      }
+    } catch (err) {
+      const msg = `Channel failed: ${err.message}`;
+      toast(msg, "error");
+      return msg;
+    }
+  }, [sessions, toast]);
+
+  const handleEndChannel = useCallback(async (channelId) => {
+    try {
+      await fetch(`/api/bridge/channel/${channelId}`, { method: "DELETE" });
+      toast("Channel ended", "info");
+      // Optimistically remove; next poll will reconcile
+      setChannels((prev) => prev.filter((c) => c.channel_id !== channelId));
+    } catch (err) {
+      toast(`Failed to end channel: ${err.message}`, "error");
+    }
+  }, [toast]);
+
+  /** Given a terminalId, find whether it is in an active channel.
+   *  Returns { channel_id, isLead, turns_used, max_turns } or null. */
+  const getChannelForTerminal = useCallback((terminalId) => {
+    if (!terminalId) return null;
+    for (const ch of channels) {
+      if (ch.state !== "active") continue;
+      if (ch.lead_id === terminalId) {
+        return { channel_id: ch.channel_id, isLead: true, turns_used: ch.turns_used, max_turns: ch.max_turns };
+      }
+      if (ch.worker_ids && ch.worker_ids.includes(terminalId)) {
+        return { channel_id: ch.channel_id, isLead: false, turns_used: ch.turns_used, max_turns: ch.max_turns };
+      }
+    }
+    return null;
+  }, [channels]);
 
   // Fork a session: create a new session in the same workdir with continue
   const forkSession = useCallback((sessionId) => {
@@ -1149,6 +1230,9 @@ export default function App() {
                       ) || null
                     : null;
 
+                  // Find an active channel involving this session's terminalId
+                  const activeChannel = getChannelForTerminal(session.terminalId);
+
                   return (
                     <div
                       key={session.id}
@@ -1178,6 +1262,55 @@ export default function App() {
                         activeBridge={activeBridge}
                         onEndBridge={handleEndBridge}
                       />
+                      {/* Channel overlay — shown when pane is part of an active channel */}
+                      {activeChannel && (
+                        <div
+                          className="channel-active-glow"
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "4px 10px",
+                            backgroundColor: "rgba(255, 140, 0, 0.12)",
+                            borderBottom: "1px solid rgba(255, 140, 0, 0.5)",
+                            zIndex: 5,
+                            pointerEvents: "none",
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontSize: "10px",
+                              fontWeight: 700,
+                              letterSpacing: "0.06em",
+                              color: "#ff8c00",
+                              textShadow: "0 0 8px rgba(255,140,0,0.7)",
+                            }}
+                          >
+                            {activeChannel.isLead ? "CHANNEL LEAD" : "CHANNEL WORKER"} &middot; turn {activeChannel.turns_used}/{activeChannel.max_turns}
+                          </span>
+                          <button
+                            type="button"
+                            style={{
+                              pointerEvents: "all",
+                              fontSize: "10px",
+                              fontWeight: 600,
+                              color: "#ff8c00",
+                              border: "1px solid rgba(255,140,0,0.6)",
+                              borderRadius: 4,
+                              padding: "1px 7px",
+                              backgroundColor: "rgba(255,140,0,0.15)",
+                              cursor: "pointer",
+                            }}
+                            onClick={() => handleEndChannel(activeChannel.channel_id)}
+                          >
+                            Stop
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 }
@@ -1271,6 +1404,7 @@ export default function App() {
               allSessions={sessions}
               onSendManual={handleSendManual}
               onStartAuto={handleStartAuto}
+              onStartChannel={handleStartChannel}
               onClose={handleCloseBridge}
               fetchLatestAssistant={fetchLatestAssistant}
             />
