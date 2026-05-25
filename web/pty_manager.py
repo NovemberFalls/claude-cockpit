@@ -142,6 +142,7 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-clos
 # Allowed model names — prevents command injection via the model parameter.
 _ALLOWED_MODELS = {
     "sonnet", "opus", "haiku",
+    "claude-opus-4-7", "claude-opus-4-7[1m]",
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6[1m]", "claude-opus-4-6[1m]",
     "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",

@@ -15,6 +15,7 @@ const RECENTS_KEY = "cockpit-recent-locations";
 const SESSIONS_KEY = "cockpit-sessions";
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 const WORKSPACES_KEY = "cockpit-workspaces";
+const MODEL_KEY = "cockpit-model";
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -78,7 +79,8 @@ export default function App() {
   });
   const [zoomToast, setZoomToast] = useState(null);
   const zoomToastTimer = useRef(null);
-  const [model, setModel] = useState("sonnet");
+  const [model, setModel] = useState(() => lsLoad(MODEL_KEY, "sonnet"));
+  useEffect(() => { lsSave(MODEL_KEY, model); }, [model]);
   const [layout, setLayout] = useState(4);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);

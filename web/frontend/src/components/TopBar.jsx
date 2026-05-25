@@ -3,9 +3,11 @@ import { PanelLeft, ChevronDown } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const MODELS = [
+  { id: "claude-opus-4-7", label: "Opus 4.7" },
   { id: "sonnet", label: "Sonnet 4.6" },
   { id: "opus", label: "Opus 4.6" },
   { id: "haiku", label: "Haiku 4.5" },
+  { id: "claude-opus-4-7[1m]", label: "Opus 4.7 (1M)" },
   { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
   { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
 ];
