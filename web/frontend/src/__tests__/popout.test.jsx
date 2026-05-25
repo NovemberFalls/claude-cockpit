@@ -458,6 +458,11 @@ describe("App BroadcastChannel CLOSED integration", () => {
 
     const { useState, useEffect } = React;
 
+    // poppedOutIds stores session.terminalId values (backend UUIDs), NOT session.id
+    // (local integer counters). The CLOSED broadcast from PopoutTerminal sends
+    // { terminalId: session.terminalId }, so both sides must use the same key.
+    // Use distinct terminalId values here (matching SESSION.terminalId = "term-pop-1")
+    // to prove the test is actually exercising the correct field.
     function PoppedOutHarness({ initialIds }) {
       const [poppedOutIds, setPoppedOutIds] = useState(new Set(initialIds));
 
@@ -477,53 +482,42 @@ describe("App BroadcastChannel CLOSED integration", () => {
 
       return (
         <div>
-          {poppedOutIds.has("sess-pop-1") && (
-            <div data-testid="placeholder-sess-pop-1">Terminal open in separate window</div>
+          {poppedOutIds.has("term-pop-1") && (
+            <div data-testid="placeholder-term-pop-1">Terminal open in separate window</div>
           )}
-          {poppedOutIds.has("sess-other") && (
-            <div data-testid="placeholder-sess-other">Terminal open in separate window</div>
+          {poppedOutIds.has("term-other") && (
+            <div data-testid="placeholder-term-other">Terminal open in separate window</div>
           )}
         </div>
       );
     }
 
-    // Render with two sessions initially popped out
+    // Seed with terminalId values (what App.jsx stores in poppedOutIds after the fix)
     let result;
     await act(async () => {
       result = render(
         React.createElement(PoppedOutHarness, {
-          initialIds: ["sess-pop-1", "sess-other"],
+          initialIds: ["term-pop-1", "term-other"],
         }),
       );
     });
 
-    // Both placeholders should be visible initially
-    expect(screen.getByTestId("placeholder-sess-pop-1")).toBeInTheDocument();
-    expect(screen.getByTestId("placeholder-sess-other")).toBeInTheDocument();
+    expect(screen.getByTestId("placeholder-term-pop-1")).toBeInTheDocument();
+    expect(screen.getByTestId("placeholder-term-other")).toBeInTheDocument();
 
-    // Simulate a popout window broadcasting CLOSED for sess-pop-1.
-    // We create a separate BC instance (simulating the PopoutTerminal window)
-    // and call postMessage — which the MockBroadcastChannel delivers to
-    // all other open instances on "cockpit-popout".
+    // PopoutTerminal broadcasts CLOSED with session.terminalId ("term-pop-1")
     await act(async () => {
       const senderBc = new BroadcastChannel("cockpit-popout");
-      senderBc.postMessage({ type: "CLOSED", terminalId: "sess-pop-1" });
+      senderBc.postMessage({ type: "CLOSED", terminalId: "term-pop-1" });
       senderBc.close();
     });
 
-    // The CLOSED handler in App deletes by terminalId, not session.id.
-    // Looking at the App.jsx source:
-    //   next.delete(event.data.terminalId);
-    // And poppedOutIds stores session.id values, but App passes session.terminalId
-    // in the postMessage from PopoutTerminal. So the BC receives terminalId.
-    // For our harness test, we seeded with the terminalId directly ("sess-pop-1").
-
     await waitFor(() => {
-      expect(screen.queryByTestId("placeholder-sess-pop-1")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("placeholder-term-pop-1")).not.toBeInTheDocument();
     });
 
     // The other session's placeholder must remain untouched
-    expect(screen.getByTestId("placeholder-sess-other")).toBeInTheDocument();
+    expect(screen.getByTestId("placeholder-term-other")).toBeInTheDocument();
 
     result.unmount();
   });
@@ -533,7 +527,7 @@ describe("App BroadcastChannel CLOSED integration", () => {
     const { useState, useEffect } = React;
 
     function PoppedOutHarness() {
-      const [poppedOutIds, setPoppedOutIds] = useState(new Set(["sess-abc"]));
+      const [poppedOutIds, setPoppedOutIds] = useState(new Set(["term-abc"]));
 
       useEffect(() => {
         const bc = new BroadcastChannel("cockpit-popout");
@@ -551,7 +545,7 @@ describe("App BroadcastChannel CLOSED integration", () => {
 
       return (
         <div>
-          {poppedOutIds.has("sess-abc") && (
+          {poppedOutIds.has("term-abc") && (
             <div data-testid="placeholder-abc">placeholder</div>
           )}
         </div>
@@ -565,14 +559,14 @@ describe("App BroadcastChannel CLOSED integration", () => {
 
     expect(screen.getByTestId("placeholder-abc")).toBeInTheDocument();
 
-    // Send CLOSED for a different terminalId
+    // Send CLOSED for a different terminalId — must not affect term-abc
     await act(async () => {
       const senderBc = new BroadcastChannel("cockpit-popout");
-      senderBc.postMessage({ type: "CLOSED", terminalId: "sess-xyz" });
+      senderBc.postMessage({ type: "CLOSED", terminalId: "term-xyz" });
       senderBc.close();
     });
 
-    // Placeholder for sess-abc must still be present
+    // Placeholder for term-abc must still be present
     expect(screen.getByTestId("placeholder-abc")).toBeInTheDocument();
 
     result.unmount();

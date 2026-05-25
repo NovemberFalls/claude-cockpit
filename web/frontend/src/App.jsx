@@ -810,7 +810,7 @@ export default function App() {
     const terminalId = session.terminalId;
     const url = `/?popout=${encodeURIComponent(terminalId)}&name=${encodeURIComponent(session.name)}&model=${encodeURIComponent(session.model)}`;
 
-    setPoppedOutIds((prev) => new Set([...prev, session.id]));
+    setPoppedOutIds((prev) => new Set([...prev, terminalId]));
 
     if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
       try {
@@ -827,7 +827,7 @@ export default function App() {
           dragDropEnabled: false,
         });
         webview.once("tauri://error", () => {
-          setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.id); return next; });
+          setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(terminalId); return next; });
         });
       } catch {
         window.open(url, `popout-${terminalId}`, "width=900,height=700,menubar=no,toolbar=no,location=no");
@@ -1270,7 +1270,7 @@ export default function App() {
                 );
 
                 if (session) {
-                  const isPopped = poppedOutIds.has(session.id);
+                  const isPopped = poppedOutIds.has(session.terminalId);
 
                   // Find an active bridge involving this session's terminalId
                   const activeBridge = session.terminalId
@@ -1311,7 +1311,7 @@ export default function App() {
                               const bc = new BroadcastChannel("cockpit-popout");
                               bc.postMessage({ type: "RECLAIM", terminalId: session.terminalId });
                               bc.close();
-                              setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.id); return next; });
+                              setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.terminalId); return next; });
                             }}
                           >
                             Reclaim
