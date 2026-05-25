@@ -16,7 +16,7 @@ claude-cockpit/
       src/
         App.jsx        # Root component, all session state, session reconciliation, bridge polling
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog, BridgeModal,
-                       # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon
+                       # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon, PopoutTerminal
         __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)

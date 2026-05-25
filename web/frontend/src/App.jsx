@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { Loader } from "lucide-react";
+import { Loader, ExternalLink } from "lucide-react";
 import HexGrid from "./components/HexGrid";
 import TopBar from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
@@ -98,6 +98,7 @@ export default function App() {
   const [bridgeModal, setBridgeModal] = useState({ open: false, fromSessionId: null });
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
+  const [poppedOutIds, setPoppedOutIds] = useState(new Set()); // session IDs whose terminals are in a separate window
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -790,6 +791,52 @@ export default function App() {
     return null;
   }, [channels]);
 
+  // BroadcastChannel: receive CLOSED from popout windows to clear their placeholder
+  useEffect(() => {
+    const bc = new BroadcastChannel("cockpit-popout");
+    bc.onmessage = (event) => {
+      if (event.data?.type === "CLOSED") {
+        setPoppedOutIds((prev) => {
+          const next = new Set(prev);
+          next.delete(event.data.terminalId);
+          return next;
+        });
+      }
+    };
+    return () => bc.close();
+  }, []);
+
+  const handlePopout = useCallback(async (session) => {
+    const terminalId = session.terminalId;
+    const url = `/?popout=${encodeURIComponent(terminalId)}&name=${encodeURIComponent(session.name)}&model=${encodeURIComponent(session.model)}`;
+
+    setPoppedOutIds((prev) => new Set([...prev, session.id]));
+
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      try {
+        const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        const label = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+        const webview = new WebviewWindow(label, {
+          url,
+          title: `${session.name} — Claude Cockpit`,
+          width: 900,
+          height: 700,
+          minWidth: 600,
+          minHeight: 400,
+          center: true,
+          dragDropEnabled: false,
+        });
+        webview.once("tauri://error", () => {
+          setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.id); return next; });
+        });
+      } catch {
+        window.open(url, `popout-${terminalId}`, "width=900,height=700,menubar=no,toolbar=no,location=no");
+      }
+    } else {
+      window.open(url, `popout-${terminalId}`, "width=900,height=700,menubar=no,toolbar=no,location=no");
+    }
+  }, []);
+
   // Fork a session: create a new session in the same workdir with continue
   const forkSession = useCallback((sessionId) => {
     const session = sessions.find((s) => s.id === sessionId);
@@ -1223,6 +1270,8 @@ export default function App() {
                 );
 
                 if (session) {
+                  const isPopped = poppedOutIds.has(session.id);
+
                   // Find an active bridge involving this session's terminalId
                   const activeBridge = session.terminalId
                     ? activeBridges.find(
@@ -1250,20 +1299,41 @@ export default function App() {
                       {...dndHandlers}
                     >
                       {dropOverlay}
-                      <TerminalPane
-                        ref={(el) => { paneRefs.current[idx] = el; }}
-                        session={session}
-                        onClose={() => removeSession(session.id)}
-                        paneIndex={idx}
-                        onSwap={layout > 1 ? swapPanes : undefined}
-                        onDragSourceChange={layout > 1 ? setDragSource : undefined}
-                        terminalZoom={terminalZoom}
-                        toast={toast}
-                        onFork={() => forkSession(session.id)}
-                        onOpenBridge={() => handleOpenBridge(session.id)}
-                        activeBridge={activeBridge}
-                        onEndBridge={handleEndBridge}
-                      />
+                      {isPopped ? (
+                        <div className="popout-placeholder">
+                          <ExternalLink size={20} style={{ color: "var(--text-muted)" }} />
+                          <span className="popout-placeholder-name">{session.name}</span>
+                          <span className="popout-placeholder-label">Terminal open in separate window</span>
+                          <button
+                            type="button"
+                            className="popout-reclaim-btn"
+                            onClick={() => {
+                              const bc = new BroadcastChannel("cockpit-popout");
+                              bc.postMessage({ type: "RECLAIM", terminalId: session.terminalId });
+                              bc.close();
+                              setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.id); return next; });
+                            }}
+                          >
+                            Reclaim
+                          </button>
+                        </div>
+                      ) : (
+                        <TerminalPane
+                          ref={(el) => { paneRefs.current[idx] = el; }}
+                          session={session}
+                          onClose={() => removeSession(session.id)}
+                          paneIndex={idx}
+                          onSwap={layout > 1 ? swapPanes : undefined}
+                          onDragSourceChange={layout > 1 ? setDragSource : undefined}
+                          terminalZoom={terminalZoom}
+                          toast={toast}
+                          onFork={() => forkSession(session.id)}
+                          onOpenBridge={() => handleOpenBridge(session.id)}
+                          activeBridge={activeBridge}
+                          onEndBridge={handleEndBridge}
+                          onPopout={session.terminalId ? handlePopout : undefined}
+                        />
+                      )}
                       {/* Channel overlay — shown when pane is part of an active channel */}
                       {activeChannel && (
                         <div

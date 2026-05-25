@@ -151,4 +151,45 @@ body {
   50% { box-shadow: 0 0 25px rgba(122, 162, 247, 0.35), inset 0 0 25px rgba(122, 162, 247, 0.08); }
 }
 
+/* ── Popout placeholder ───────────────────────────── */
+.popout-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  background: var(--bg-base);
+  color: var(--text-muted);
+}
+
+.popout-placeholder-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.popout-placeholder-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.popout-reclaim-btn {
+  margin-top: 8px;
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.popout-reclaim-btn:hover {
+  background: var(--accent);
+  color: var(--bg-base);
+}
+
 

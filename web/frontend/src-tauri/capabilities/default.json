@@ -1,12 +1,16 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Claude Cockpit",
-  "windows": ["main"],
+  "windows": ["main", "popout-*"],
   "remote": {
     "urls": ["http://localhost:8420/*"]
   },
   "permissions": [
     "core:default",
+    "core:webview:create-webview-window",
+    "core:window:default",
+    "core:window:allow-set-title",
+    "core:window:allow-close",
     "shell:allow-execute",
     "shell:allow-spawn",
     "shell:allow-open",

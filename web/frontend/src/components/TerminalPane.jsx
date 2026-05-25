@@ -5,7 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, GripVertical, GitFork, Search, Link2 } from "lucide-react";
+import { X, GripVertical, GitFork, Search, Link2, ExternalLink } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import "@xterm/xterm/css/xterm.css";
@@ -52,6 +52,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onOpenBridge,    // () => void — open the bridge modal pre-selected to this pane
   activeBridge,    // null | { bridge_id, from_name, to_name, turns_used, max_turns } — active bridge involving this pane
   onEndBridge,     // (bridgeId: string) => void — terminate an active bridge
+  onPopout,        // (session) => void — open terminal in separate window
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -617,6 +618,18 @@ const TerminalPane = forwardRef(function TerminalPane({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {onPopout && (
+            <button
+              type="button"
+              onClick={() => onPopout(session)}
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+              style={{ color: "var(--text-muted)" }}
+              data-tooltip="Pop out"
+              aria-label="Open terminal in separate window"
+            >
+              <ExternalLink size={13} />
+            </button>
+          )}
           {onFork && (
             <button
               type="button"

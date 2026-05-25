@@ -64,12 +64,16 @@ class TestPtyManager:
         assert self.mgr.get_terminal("nope") is None
 
     def test_max_sessions_limit(self):
-        # Fill up to limit
-        for i in range(3):
-            self.mgr.sessions[f"s{i}"] = make_mock_session(f"s{i}")
-
-        with pytest.raises(RuntimeError, match="Maximum session limit"):
-            self.mgr.create_terminal(name="overflow", workdir="C:\\Code")
+        import pty_manager as _pm
+        original = _pm.MAX_SESSIONS
+        try:
+            _pm.MAX_SESSIONS = 3
+            for i in range(3):
+                self.mgr.sessions[f"s{i}"] = make_mock_session(f"s{i}")
+            with pytest.raises(RuntimeError, match="Maximum session limit"):
+                self.mgr.create_terminal(name="overflow", workdir="C:\\Code")
+        finally:
+            _pm.MAX_SESSIONS = original
 
     def test_write_pty_dead_session(self):
         session = make_mock_session("dead", alive=False)
