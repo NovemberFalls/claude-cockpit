@@ -2,7 +2,9 @@
 
 A clean, focused multi-session [Claude Code](https://docs.anthropic.com/en/docs/claude-code) manager. Run up to 8 Claude Code terminals side by side in a single window, organized by project, with a native desktop app and 20 themes.
 
-![Claude Cockpit](screenshot.svg)
+[![Claude Cockpit — click to watch demo](screenshot.svg)](https://github.com/NovemberFalls/claude-cockpit/releases/download/v1.3.3/demo.mp4)
+
+> ▶ [Watch the demo video](https://github.com/NovemberFalls/claude-cockpit/releases/download/v1.3.3/demo.mp4)
 
 ---
 
