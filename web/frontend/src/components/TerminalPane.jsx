@@ -149,6 +149,8 @@ const TerminalPane = forwardRef(function TerminalPane({
             if (!atlasSeededRef.current && webglRef.current) {
               atlasSeededRef.current = true;
               setTimeout(() => webglRef.current?.clearTextureAtlas?.(), 150);
+            } else if (webglRef.current && pendingDataRef.current.length >= 2048) {
+              webglRef.current.clearTextureAtlas?.();
             }
           }
           pendingDataRef.current = "";
