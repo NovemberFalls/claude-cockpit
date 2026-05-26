@@ -2,15 +2,31 @@ import { useState } from "react";
 import { PanelLeft, ChevronDown } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
-const MODELS = [
-  { id: "claude-opus-4-7", label: "Opus 4.7" },
-  { id: "sonnet", label: "Sonnet 4.6" },
-  { id: "opus", label: "Opus 4.6" },
-  { id: "haiku", label: "Haiku 4.5" },
-  { id: "claude-opus-4-7[1m]", label: "Opus 4.7 (1M)" },
-  { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
-  { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
+const MODEL_GROUPS = [
+  {
+    label: "Claude 4.7",
+    models: [
+      { id: "claude-opus-4-7", label: "Opus 4.7" },
+      { id: "claude-opus-4-7[1m]", label: "Opus 4.7 (1M)" },
+    ],
+  },
+  {
+    label: "Claude 4.6",
+    models: [
+      { id: "sonnet", label: "Sonnet 4.6" },
+      { id: "claude-sonnet-4-6[1m]", label: "Sonnet 4.6 (1M)" },
+      { id: "opus", label: "Opus 4.6" },
+      { id: "claude-opus-4-6[1m]", label: "Opus 4.6 (1M)" },
+    ],
+  },
+  {
+    label: "Claude 4.5",
+    models: [
+      { id: "haiku", label: "Haiku 4.5" },
+    ],
+  },
 ];
+const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
 
 export default function TopBar({
   model,
@@ -114,18 +130,31 @@ export default function TopBar({
                     boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                   }}
                 >
-                  {MODELS.map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => { setModel(m.id); setModelOpen(false); }}
-                      className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
-                      style={{
-                        color: m.id === model ? "var(--accent)" : "var(--text-secondary)",
-                        fontWeight: m.id === model ? 600 : 400,
-                      }}
-                    >
-                      {m.label}
-                    </button>
+                  {MODEL_GROUPS.map((group, gi) => (
+                    <div key={group.label}>
+                      {gi > 0 && (
+                        <div style={{ height: 1, backgroundColor: "var(--border-color)", margin: "2px 0" }} />
+                      )}
+                      <div
+                        className="text-[10px] uppercase tracking-wider px-3 pt-1.5 pb-0.5"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {group.label}
+                      </div>
+                      {group.models.map((m) => (
+                        <button
+                          key={m.id}
+                          onClick={() => { setModel(m.id); setModelOpen(false); }}
+                          className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                          style={{
+                            color: m.id === model ? "var(--accent)" : "var(--text-secondary)",
+                            fontWeight: m.id === model ? 600 : 400,
+                          }}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
                   ))}
                 </div>
               </>

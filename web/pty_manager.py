@@ -133,6 +133,11 @@ class TerminalSession:
     alive: bool = True
     tracker: SessionStateTracker = field(default_factory=SessionStateTracker)
     output_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=200))
+    # Monotonically-incrementing counter. Each new WS connection bumps this and captures
+    # its own value as my_generation. Only the forwarder whose my_generation matches
+    # active_consumer is allowed to drain output_queue — "latest connection wins".
+    # Mutated only from the asyncio event loop (single-threaded), so no lock is needed.
+    active_consumer: int = 0
     context_percent: Optional[int] = None  # last seen context window fill % (from tracker)
 
 

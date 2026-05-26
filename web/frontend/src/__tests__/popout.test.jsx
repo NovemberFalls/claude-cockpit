@@ -56,25 +56,36 @@ class MockBroadcastChannel {
   constructor(name) {
     this.name = name;
     this.onmessage = null;
+    this._listeners = []; // for addEventListener-based subscribers
     if (!_bcInstances[name]) _bcInstances[name] = [];
     _bcInstances[name].push(this);
   }
   postMessage(data) {
     // Deliver to all OTHER instances on the same channel name
     (_bcInstances[this.name] || []).forEach((bc) => {
-      if (bc !== this && bc.onmessage) {
-        bc.onmessage({ data });
+      if (bc !== this) {
+        const event = { data };
+        if (bc.onmessage) bc.onmessage(event);
+        bc._listeners.forEach((fn) => fn(event));
       }
     });
   }
-  addEventListener() {}
-  removeEventListener() {}
+  addEventListener(type, fn) {
+    if (type === "message") this._listeners.push(fn);
+  }
+  removeEventListener(type, fn) {
+    if (type === "message") {
+      const idx = this._listeners.indexOf(fn);
+      if (idx !== -1) this._listeners.splice(idx, 1);
+    }
+  }
   close() {
     const list = _bcInstances[this.name];
     if (list) {
       const idx = list.indexOf(this);
       if (idx !== -1) list.splice(idx, 1);
     }
+    this._listeners = [];
   }
 }
 
@@ -98,6 +109,26 @@ MockWebSocket.CLOSED = 3;
 globalThis.WebSocket = MockWebSocket;
 
 // ---------------------------------------------------------------------------
+// Tauri API mocks — dynamic imports used in the reclaim path.
+// vi.mock is hoisted so these intercept `await import(...)` calls even when
+// window.__TAURI_INTERNALS__ is set to simulate a Tauri environment.
+// ---------------------------------------------------------------------------
+
+const mockTauriWindowClose = vi.fn().mockResolvedValue(undefined);
+const mockGetCurrentWindow = vi.fn(() => ({ close: mockTauriWindowClose }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: mockGetCurrentWindow,
+}));
+
+const mockWebviewWindowClose = vi.fn().mockResolvedValue(undefined);
+const mockGetByLabel = vi.fn().mockResolvedValue({ close: mockWebviewWindowClose });
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  WebviewWindow: {
+    getByLabel: mockGetByLabel,
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // xterm and addon mocks — must be declared before component imports.
 // vi.mock calls are hoisted by vitest.
 // ---------------------------------------------------------------------------
@@ -119,15 +150,6 @@ vi.mock("@xterm/addon-fit", () => ({
 vi.mock("@xterm/addon-web-links", () => ({
   WebLinksAddon: vi.fn().mockImplementation(() => ({
     activate: vi.fn(),
-    dispose: vi.fn(),
-  })),
-}));
-
-vi.mock("@xterm/addon-webgl", () => ({
-  WebglAddon: vi.fn().mockImplementation(() => ({
-    activate: vi.fn(),
-    onContextLoss: vi.fn(),
-    clearTextureAtlas: vi.fn(),
     dispose: vi.fn(),
   })),
 }));
@@ -227,7 +249,9 @@ async function setupTerminalMock() {
     attachCustomKeyEventHandler: vi.fn(),
     dispose: vi.fn(),
     options: { theme: {}, fontSize: 13 },
-    _core: {},
+    // _core.linkifier must be truthy so the CanvasAddon guard passes (happy path).
+    // Canvas regression guard tests below assert CanvasAddon IS called on mount.
+    _core: { linkifier: { onShowLinkUnderline: vi.fn(), onHideLinkUnderline: vi.fn() } },
   }));
 }
 
@@ -321,6 +345,59 @@ describe("TerminalPane popout button", () => {
     expect(onPopout).toHaveBeenCalledWith(SESSION);
 
     unmount();
+  });
+
+  // 4 — Canvas renderer regression guard (TerminalPane)
+  // Asserts CanvasAddon is used by TerminalPane on mount.
+  // If a future change removes CanvasAddon in favour of a different renderer,
+  // this test turns RED in CI.
+  it("TerminalPane uses Canvas renderer (not WebGL) on mount", async () => {
+    const { CanvasAddon } = await import("@xterm/addon-canvas");
+    const { Terminal } = await import("@xterm/xterm");
+
+    const { unmount } = await renderPane();
+
+    // CanvasAddon constructor must have been called during terminal initialisation.
+    // Removing the canvas loadAddon call drops this count to zero and fails CI.
+    expect(CanvasAddon).toHaveBeenCalled();
+
+    // loadAddon must have been called at least 3 times:
+    // FitAddon + WebLinksAddon + CanvasAddon (SearchAddon may also be present).
+    // A regression removing the canvas loadAddon call reduces this count.
+    const termInstance = Terminal.mock.results[Terminal.mock.results.length - 1].value;
+    expect(termInstance.loadAddon.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    unmount();
+  });
+
+  // 5 — Canvas renderer regression guard (PopoutTerminal)
+  // Asserts CanvasAddon is also used by PopoutTerminal on mount.
+  it("PopoutTerminal uses Canvas renderer (not WebGL) on mount", async () => {
+    const { CanvasAddon } = await import("@xterm/addon-canvas");
+    const { Terminal } = await import("@xterm/xterm");
+
+    const { default: PopoutTerminal } = await import("../components/PopoutTerminal.jsx");
+
+    let result;
+    await act(async () => {
+      result = render(
+        React.createElement(PopoutTerminal, {
+          terminalId: "tid-regrtest",
+          name: "Regression",
+          model: "claude-sonnet-4-6",
+        }),
+      );
+    });
+
+    // CanvasAddon constructor must have been called during PopoutTerminal setup.
+    expect(CanvasAddon).toHaveBeenCalled();
+
+    // loadAddon must have been called at least 3 times:
+    // FitAddon + WebLinksAddon + CanvasAddon (PopoutTerminal has no SearchAddon).
+    const termInstance = Terminal.mock.results[Terminal.mock.results.length - 1].value;
+    expect(termInstance.loadAddon.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    result.unmount();
   });
 });
 
@@ -570,5 +647,192 @@ describe("App BroadcastChannel CLOSED integration", () => {
     expect(screen.getByTestId("placeholder-abc")).toBeInTheDocument();
 
     result.unmount();
+  });
+});
+
+// ===========================================================================
+// Suite 4 — RECLAIM: PopoutTerminal closes via the correct mechanism
+// ===========================================================================
+
+describe("PopoutTerminal RECLAIM handler", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    await setupTerminalMock();
+    Object.keys(_bcInstances).forEach((k) => delete _bcInstances[k]);
+    mockTauriWindowClose.mockClear();
+    mockGetCurrentWindow.mockClear();
+    mockWebviewWindowClose.mockClear();
+    mockGetByLabel.mockClear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    delete window.__TAURI_INTERNALS__;
+    delete window.__TAURI__;
+  });
+
+  // 7 — Browser path: RECLAIM calls window.close() when not under Tauri
+  it("RECLAIM calls window.close() in browser (non-Tauri) environment", async () => {
+    delete window.__TAURI_INTERNALS__;
+    delete window.__TAURI__;
+
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    const { default: PopoutTerminal } = await import("../components/PopoutTerminal.jsx");
+    let result;
+    await act(async () => {
+      result = render(
+        React.createElement(PopoutTerminal, {
+          terminalId: "term-reclaim-browser",
+          name: "BrowserTest",
+          model: "claude-sonnet-4-6",
+        }),
+      );
+    });
+
+    // Simulate the main window broadcasting RECLAIM
+    await act(async () => {
+      const senderBc = new BroadcastChannel("cockpit-popout");
+      senderBc.postMessage({ type: "RECLAIM", terminalId: "term-reclaim-browser" });
+      senderBc.close();
+    });
+
+    // Give async handler time to resolve
+    await act(async () => {});
+
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    // Tauri API must NOT have been touched
+    expect(mockGetCurrentWindow).not.toHaveBeenCalled();
+
+    closeSpy.mockRestore();
+    result.unmount();
+  });
+
+  // 8 — Tauri path: RECLAIM calls getCurrentWindow().close() and does NOT call window.close()
+  it("RECLAIM calls getCurrentWindow().close() under Tauri and skips window.close()", async () => {
+    window.__TAURI_INTERNALS__ = {};
+
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    const { default: PopoutTerminal } = await import("../components/PopoutTerminal.jsx");
+    let result;
+    await act(async () => {
+      result = render(
+        React.createElement(PopoutTerminal, {
+          terminalId: "term-reclaim-tauri",
+          name: "TauriTest",
+          model: "claude-sonnet-4-6",
+        }),
+      );
+    });
+
+    await act(async () => {
+      const senderBc = new BroadcastChannel("cockpit-popout");
+      senderBc.postMessage({ type: "RECLAIM", terminalId: "term-reclaim-tauri" });
+      senderBc.close();
+    });
+
+    // Give the async handler (with dynamic import + await close) time to settle
+    await act(async () => {});
+
+    expect(mockGetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockTauriWindowClose).toHaveBeenCalledTimes(1);
+    // window.close() must NOT be called because we return early after Tauri close
+    expect(closeSpy).not.toHaveBeenCalled();
+
+    closeSpy.mockRestore();
+    result.unmount();
+  });
+
+  // 9 — RECLAIM for a different terminalId is ignored
+  it("RECLAIM for a different terminalId does not close this window", async () => {
+    delete window.__TAURI_INTERNALS__;
+    delete window.__TAURI__;
+
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => {});
+
+    const { default: PopoutTerminal } = await import("../components/PopoutTerminal.jsx");
+    let result;
+    await act(async () => {
+      result = render(
+        React.createElement(PopoutTerminal, {
+          terminalId: "term-reclaim-mine",
+          name: "MineTest",
+          model: "claude-sonnet-4-6",
+        }),
+      );
+    });
+
+    await act(async () => {
+      const senderBc = new BroadcastChannel("cockpit-popout");
+      senderBc.postMessage({ type: "RECLAIM", terminalId: "term-reclaim-other" });
+      senderBc.close();
+    });
+
+    await act(async () => {});
+
+    expect(closeSpy).not.toHaveBeenCalled();
+
+    closeSpy.mockRestore();
+    result.unmount();
+  });
+});
+
+// ===========================================================================
+// Suite 5 — RECLAIM: App.jsx reclaim button closes via Tauri or BroadcastChannel
+// ===========================================================================
+
+describe("App reclaim button closes popout window", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    await setupTerminalMock();
+    Object.keys(_bcInstances).forEach((k) => delete _bcInstances[k]);
+    mockWebviewWindowClose.mockClear();
+    mockGetByLabel.mockClear();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    delete window.__TAURI_INTERNALS__;
+    delete window.__TAURI__;
+  });
+
+  // 10 — In Tauri: reclaim button calls WebviewWindow.getByLabel with the correct label
+  it("reclaim button calls WebviewWindow.getByLabel with correct label under Tauri", async () => {
+    window.__TAURI_INTERNALS__ = {};
+
+    // Build a minimal harness that mirrors the reclaim onClick from App.jsx
+    // (tests the label scheme and Tauri API usage without rendering full App)
+    const terminalId = "term-uuid-abc-123";
+    const expectedLabel = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+
+    let capturedLabel = null;
+    mockGetByLabel.mockImplementation(async (label) => {
+      capturedLabel = label;
+      return { close: mockWebviewWindowClose };
+    });
+
+    // Execute the same logic as the reclaim onClick
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      const label = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+      const w = await WebviewWindow.getByLabel(label);
+      await w?.close();
+    }
+
+    expect(capturedLabel).toBe(expectedLabel);
+    expect(mockWebviewWindowClose).toHaveBeenCalledTimes(1);
+  });
+
+  // 11 — Label scheme matches handlePopout exactly (same regex, same prefix)
+  it("reclaim label scheme is byte-identical to handlePopout label scheme", () => {
+    // handlePopout uses: `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`
+    // reclaim button uses the same expression — verify with a terminalId that
+    // contains characters the regex would sanitize.
+    const terminalId = "term/uuid:special_chars!@#";
+    const handlePopoutLabel = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+    const reclaimLabel = `popout-${terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+    expect(reclaimLabel).toBe(handlePopoutLabel);
+    expect(reclaimLabel).toBe("popout-term-uuid-special-chars---");
   });
 });

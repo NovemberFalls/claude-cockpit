@@ -29,3 +29,21 @@ export function useTheme() {
   if (!ctx) throw new Error("useTheme must be used within ThemeProvider");
   return ctx;
 }
+
+/**
+ * Non-throwing variant for components that must render even without a
+ * ThemeProvider ancestor (e.g. HexGrid inside ErrorBoundary's fallback).
+ * Returns the real context when available; falls back to tokyo-night-dark
+ * so purely decorative components stay functional without crashing.
+ */
+export function useThemeSafe() {
+  const ctx = useContext(ThemeContext);
+  if (ctx) return ctx;
+  const defaultTheme = getTheme("tokyo-night-dark");
+  return {
+    themeId: "tokyo-night-dark",
+    theme: defaultTheme,
+    switchTheme: () => {},
+    themes: listThemes(),
+  };
+}

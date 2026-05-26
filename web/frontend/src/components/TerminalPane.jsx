@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHand
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
 import { X, GripVertical, GitFork, Search, Link2, ExternalLink } from "lucide-react";
@@ -57,6 +56,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
   const fitRef = useRef(null);        // FitAddon instance
+  const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);         // WebSocket
   const resizeObserver = useRef(null);
   const resizeTimer = useRef(null);
@@ -65,8 +65,6 @@ const TerminalPane = forwardRef(function TerminalPane({
   const pendingDataRef = useRef("");  // Batched WS data for xterm
   const writeRafRef = useRef(null);   // rAF handle for batched writes
   const searchRef = useRef(null);       // SearchAddon instance
-  const webglRef = useRef(null);        // WebglAddon instance (null after context loss)
-  const atlasSeededRef = useRef(false); // true after first data write triggers atlas rebuild
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
@@ -144,14 +142,6 @@ const TerminalPane = forwardRef(function TerminalPane({
         writeRafRef.current = requestAnimationFrame(() => {
           if (xtermRef.current && pendingDataRef.current) {
             xtermRef.current.write(pendingDataRef.current);
-            // After the first real data populates the atlas, force a rebuild so
-            // glyphs rasterized during the init race are re-drawn correctly.
-            if (!atlasSeededRef.current && webglRef.current) {
-              atlasSeededRef.current = true;
-              setTimeout(() => webglRef.current?.clearTextureAtlas?.(), 150);
-            } else if (webglRef.current && pendingDataRef.current.length >= 2048) {
-              webglRef.current.clearTextureAtlas?.();
-            }
           }
           pendingDataRef.current = "";
           writeRafRef.current = null;
@@ -223,31 +213,29 @@ const TerminalPane = forwardRef(function TerminalPane({
     term.loadAddon(webLinksAddon);
     term.open(termRef.current);
 
-    // GPU-accelerated rendering — WebGL primary, CanvasAddon fallback.
-    // clearTextureAtlas() after open forces an immediate atlas build, preventing
-    // the glyph corruption (backslash→pipe, letters→%/&) that occurs when the
-    // atlas is lazily populated across multiple competing WebGL contexts.
-    const loadCanvasFallback = () => {
-      try {
-        term.loadAddon(new CanvasAddon());
-      } catch {
-        // Canvas also unavailable — DOM renderer is the final fallback
-      }
-    };
+    // Canvas renderer — no GPU texture atlas, so it is immune to the
+    // multi-context glyph-atlas desync that corrupted WebGL output across
+    // many panes. DOM renderer is the implicit final fallback.
+    //
+    // Guard: CanvasAddon.activate() reads core.linkifier to build LinkRenderLayer.
+    // linkifier is undefined until late in open() AND becomes undefined again on
+    // dispose (MutableDisposable clears its value). Meanwhile term.element is set
+    // earlier (line ~417) and is NOT cleared the same way — so there is a window
+    // where element is truthy but linkifier is undefined. CanvasAddon does not
+    // guard for that, producing the "Cannot read properties of undefined (reading
+    // 'onShowLinkUnderline')" crash that surfaces on popout re-mount timing.
+    // Checking linkifier here (right after open()) is safe: open() sets it before
+    // returning, so Canvas still loads in the normal case.
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-        webglRef.current = null;
-        loadCanvasFallback();
-      });
-      term.loadAddon(webgl);
-      webglRef.current = webgl;
-      // Flush atlas immediately after load to prevent stale glyph mappings
-      webgl.clearTextureAtlas?.();
+      const core = term._core; // private but stable; same accessor CanvasAddon uses internally
+      if (core && core.linkifier) {
+        const canvas = new CanvasAddon();
+        term.loadAddon(canvas);
+        canvasAddonRef.current = canvas;
+      }
+      // else: xterm's default DOM renderer (created during open()) stays active — correct, safe fallback.
     } catch {
-      // WebGL not available — fall back to canvas renderer
-      loadCanvasFallback();
+      // DOM renderer remains active.
     }
 
     const searchAddon = new SearchAddon();
@@ -429,54 +417,53 @@ const TerminalPane = forwardRef(function TerminalPane({
     });
     resizeObserver.current.observe(termRef.current);
 
-    // Rebuild WebGL atlas when the tab regains visibility — GPU contexts may
-    // have been evicted while the tab was backgrounded, leaving stale textures.
-    const onVisibilityChange = () => {
-      if (!document.hidden && webglRef.current) {
-        webglRef.current.clearTextureAtlas?.();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
     // Connect to PTY if we have a terminalId
     if (session.terminalId) {
       connectWs(session.terminalId);
     }
 
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
       termEl.removeEventListener("paste", pasteHandler, { capture: true });
       clearTimeout(resizeTimer.current);
       clearTimeout(reconnectTimer.current);
       cancelAnimationFrame(writeRafRef.current);
       resizeObserver.current?.disconnect();
       wsRef.current?.close();
-      term.dispose();
+      // Dispose CanvasAddon explicitly BEFORE term.dispose() so its internal
+      // renderer-recreation runs while the linkifier is still alive. If we let
+      // term.dispose() drive it, xterm tears down the linkifier MutableDisposable
+      // first, leaving it undefined when CanvasAddon's dispose handler calls
+      // _createRenderer() → DomRenderer constructor → linkifier.onShowLinkUnderline
+      // → TypeError. Disposing here prevents that path.
+      try { canvasAddonRef.current?.dispose(); } catch { /* renderer-recreation race on teardown */ }
+      canvasAddonRef.current = null;
+      // Safety net: even if some other xterm teardown path throws (e.g. a future
+      // xterm release changes dispose order), it must NOT escape to the React
+      // ErrorBoundary and blank the main window. The terminal and WS are already
+      // being torn down — swallowing teardown errors is safe here.
+      try {
+        term.dispose();
+      } catch { /* teardown race; safe to ignore */ }
       xtermRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
-      webglRef.current = null;
-      atlasSeededRef.current = false;
       pendingDataRef.current = "";
       writeRafRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: this effect runs once on mount only; theme/zoom/session changes are handled by dedicated effects below
   }, []); // Only run once on mount
 
-  // Update theme when it changes — also flush the WebGL glyph atlas so remapped
-  // color values don't produce corrupted character substitutions in the new theme.
+  // Update theme when it changes — Canvas re-rasterizes automatically.
   useEffect(() => {
     if (xtermRef.current) {
       xtermRef.current.options.theme = buildXtermTheme(theme);
-      webglRef.current?.clearTextureAtlas?.();
     }
   }, [theme]);
 
-  // Update font size when zoom changes — clear atlas so glyphs are re-rasterized at the new size
+  // Update font size when zoom changes — Canvas re-rasterizes automatically.
   useEffect(() => {
     if (xtermRef.current) {
       xtermRef.current.options.fontSize = terminalZoom;
-      webglRef.current?.clearTextureAtlas?.();
       requestAnimationFrame(() => safeFit());
     }
   }, [terminalZoom, safeFit]);

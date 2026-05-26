@@ -5,7 +5,7 @@
   "windows": ["main", "popout-*"],
   "permissions": [
     "core:default",
-    "core:webview:create-webview-window",
+    "core:webview:allow-create-webview-window",
     "core:window:default",
     "core:window:allow-set-title",
     "core:window:allow-close",

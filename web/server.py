@@ -487,14 +487,39 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
         await websocket.close(code=4004, reason="Terminal not found")
         return
 
+    # Bump the generation counter and capture this connection's generation value.
+    # If another WS connects to the same terminal later it will bump again, making
+    # this forwarder's my_generation stale — the check in pty_to_ws() will stop it.
+    # Safe without a lock: all WS handlers run on the single asyncio event loop.
+    session.active_consumer += 1
+    my_generation = session.active_consumer
+
     async def pty_to_ws():
-        """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY)."""
-        while session.alive:
+        """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY).
+
+        Only the forwarder whose my_generation matches session.active_consumer is the active
+        consumer. If a newer WS connects, active_consumer is bumped and this forwarder stops
+        draining — "latest connection wins" — preventing split-stream corruption.
+        """
+        while session.alive and session.active_consumer == my_generation:
             try:
                 try:
                     data = await asyncio.wait_for(session.output_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
+                # Re-check generation after get() returns — another WS may have connected
+                # in the brief window between the get() call and now. If superseded, do NOT
+                # send: put the item back so the new consumer receives it intact.
+                if session.active_consumer != my_generation:
+                    try:
+                        session.output_queue.put_nowait(data)
+                    except asyncio.QueueFull:
+                        pass  # Queue full: one item lost is acceptable on supersession
+                    logger.debug(
+                        "PTY->WS forwarder for terminal %s superseded (gen %d → %d); stopping.",
+                        terminal_id, my_generation, session.active_consumer,
+                    )
+                    break
                 await websocket.send_text(data)
                 await asyncio.sleep(0)
             except (WebSocketDisconnect, RuntimeError, ConnectionError):
@@ -503,18 +528,22 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 logger.debug("PTY->WS forward error: %s", e)
                 await asyncio.sleep(0.05)
 
-        # Drain any buffered data before the "Session ended" banner
-        while not session.output_queue.empty():
-            try:
-                data = session.output_queue.get_nowait()
-                await websocket.send_text(data)
-            except Exception:
-                break
+        # Only send the drain + "[Session ended]" banner when the session actually died.
+        # A superseded forwarder (session still alive, just displaced) must NOT send the
+        # banner — that would falsely signal session death to an active popout window.
+        if not session.alive:
+            # Drain any buffered data before the "Session ended" banner
+            while not session.output_queue.empty():
+                try:
+                    data = session.output_queue.get_nowait()
+                    await websocket.send_text(data)
+                except Exception:
+                    break
 
-        try:
-            await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
-        except Exception:
-            pass
+            try:
+                await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
+            except Exception:
+                pass
 
     async def heartbeat():
         """Send periodic ping to keep the connection alive."""

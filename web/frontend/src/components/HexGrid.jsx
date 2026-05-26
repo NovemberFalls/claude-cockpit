@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useTheme } from "../hooks/useTheme";
+import { useThemeSafe } from "../hooks/useTheme";
 
 const HEX_RADIUS = 28;
 const GLOW_RADIUS = 150;
@@ -17,7 +17,7 @@ function hexToRgb(hex) {
 
 export default function HexGrid() {
   const canvasRef = useRef(null);
-  const { theme } = useTheme();
+  const { theme } = useThemeSafe();
   const stateRef = useRef({
     mouseX: -9999, mouseY: -9999,
     hexes: [],

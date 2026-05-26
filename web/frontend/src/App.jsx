@@ -1307,11 +1307,25 @@ export default function App() {
                           <button
                             type="button"
                             className="popout-reclaim-btn"
-                            onClick={() => {
+                            onClick={async () => {
+                              // Post RECLAIM so the popout window can self-close (browser path)
                               const bc = new BroadcastChannel("cockpit-popout");
                               bc.postMessage({ type: "RECLAIM", terminalId: session.terminalId });
                               bc.close();
+                              // Optimistically clear the placeholder immediately
                               setPoppedOutIds((prev) => { const next = new Set(prev); next.delete(session.terminalId); return next; });
+                              // Under Tauri, window.close() in a WebviewWindow has no effect —
+                              // close the popout window directly via the Tauri window API.
+                              if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+                                try {
+                                  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+                                  const label = `popout-${session.terminalId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+                                  const w = await WebviewWindow.getByLabel(label);
+                                  await w?.close();
+                                } catch {
+                                  // fall back: BroadcastChannel RECLAIM already posted above
+                                }
+                              }
                             }}
                           >
                             Reclaim
