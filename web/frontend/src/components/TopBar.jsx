@@ -4,6 +4,13 @@ import { useTheme } from "../hooks/useTheme";
 
 const MODEL_GROUPS = [
   {
+    label: "Claude 4.8",
+    models: [
+      { id: "claude-opus-4-8", label: "Opus 4.8" },
+      { id: "claude-opus-4-8[1m]", label: "Opus 4.8 (1M)" },
+    ],
+  },
+  {
     label: "Claude 4.7",
     models: [
       { id: "claude-opus-4-7", label: "Opus 4.7" },

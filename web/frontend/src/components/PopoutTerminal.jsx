@@ -164,7 +164,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
               const data = await res.json();
               if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
                 const p = data.paths[0];
-                wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+                xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
               }
             } catch {
               // upload failed — silent in popout (no toast system)
@@ -215,7 +215,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
           const data = await res.json();
           if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
             const p = data.paths[0];
-            wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+            xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
           }
         } catch {
           // upload failed — silent in popout (no toast system)

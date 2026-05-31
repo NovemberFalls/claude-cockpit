@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -62,9 +64,33 @@ _SUBMIT = "\r"
 _IDLE_WAIT_MAX = 10.0
 _IDLE_POLL_INTERVAL = 0.5
 
+# Bridge typing-quiet window — bridge injection waits this long after the
+# user's last keystroke before grabbing the PTY. Prevents stutter where the
+# bridge's bracketed-paste chunks interleave with user typing.
+_TYPING_QUIET_WINDOW = 1.0
+
 # Grace period (seconds) to keep a terminated bridge record in memory so
 # frontend pollers can read the final state.
 _RECORD_TTL = 60.0
+
+# ---------------------------------------------------------------------------
+# File-handoff constants and relay directory
+# ---------------------------------------------------------------------------
+
+# Messages larger than this byte threshold are written to a relay file instead
+# of being injected inline. ConPTY's input pipe buffer drops bytes under a fast
+# burst, so keeping the bracketed-paste payload small is critical for
+# correctness on the desktop (Tauri/ConPTY) build.
+_RELAY_INLINE_MAX = 2048
+
+# One-time relay scratch directory. Created at import time (mirrors the
+# UPLOAD_DIR pattern from server.py). The directory is never explicitly removed
+# on exit — the OS cleans temp dirs on reboot, which is fine for relay files.
+_RELAY_DIR = pathlib.Path(tempfile.mkdtemp(prefix="cockpit_relays_"))
+
+# Relay files older than this (seconds) are deleted opportunistically when a
+# new relay file is written (10 minutes — bounds secrets-at-rest exposure).
+_RELAY_FILE_MAX_AGE = 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +152,104 @@ def _wrap(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper — idle gate
+# Helper — file handoff for large relay payloads
+# ---------------------------------------------------------------------------
+
+def _maybe_file_handoff(full_text: str, peer_name: str | None) -> str:
+    """If *full_text* exceeds the inline threshold, persist it to a relay file
+    and return a compact reference prompt instead.  Otherwise return *full_text*
+    unchanged.
+
+    The compact prompt names the relay file on its own line so Claude Code's
+    Read tool can open it without any path mangling.
+
+    Also opportunistically deletes relay files in ``_RELAY_DIR`` that are older
+    than ``_RELAY_FILE_MAX_AGE`` seconds (best-effort; never raises).
+    """
+    encoded = full_text.encode("utf-8")
+    if len(encoded) <= _RELAY_INLINE_MAX:
+        return full_text
+
+    # Opportunistic cleanup of old relay files — best-effort, never raise.
+    try:
+        now = time.time()
+        for old_file in _RELAY_DIR.iterdir():
+            try:
+                age = now - old_file.stat().st_mtime
+                if age > _RELAY_FILE_MAX_AGE:
+                    old_file.unlink(missing_ok=True)
+                    logger.debug("Deleted stale relay file: %s (age=%.0fs)", old_file, age)
+            except Exception:
+                logger.debug("Could not check/delete relay file %s", old_file, exc_info=True)
+    except Exception:
+        logger.debug("Relay dir cleanup failed", exc_info=True)
+
+    # Write to a new relay file.
+    relay_path = _RELAY_DIR / f"{uuid.uuid4().hex[:8]}_relay.txt"
+    relay_path.write_text(full_text, encoding="utf-8")
+
+    logger.info(
+        "File handoff: relay payload too large (%d bytes, peer=%r) — saved to %s",
+        len(encoded),
+        peer_name,
+        relay_path,
+    )
+
+    if peer_name:
+        return (
+            f'[PEER REPLY from session "{peer_name}"]\n'
+            f"The full message was large, so it was saved to:\n"
+            f"{relay_path}\n"
+            f"Read that file to see the complete message, then respond."
+        )
+    else:
+        return (
+            f"A large message was saved to:\n"
+            f"{relay_path}\n"
+            f"Read that file to see the complete content, then respond."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Relay directory cleanup — called on graceful shutdown
+# ---------------------------------------------------------------------------
+
+def cleanup_relay_dir() -> None:
+    """Remove the relay scratch directory and its contents (called on shutdown)."""
+    import shutil
+    shutil.rmtree(_RELAY_DIR, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Helper — idle gate (simple, no bridge record required)
+# ---------------------------------------------------------------------------
+
+async def _wait_for_idle_simple(terminal_id: str, timeout: float = _IDLE_WAIT_MAX) -> bool:
+    """Poll *terminal_id*'s tracker until it reaches 'idle' or *timeout* elapses.
+
+    Returns True if idle was reached; False if the wait timed out or the
+    session died.  Does NOT require a bridge record.
+
+    Used by ``start_manual`` which has no persistent bridge record.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        session = pty_manager.get_terminal(terminal_id)
+        if session is None or not session.alive:
+            return False
+        # Typing-quiet gate: don't inject while the user is actively typing.
+        # Prevents bridge bracketed-paste chunks from interleaving with keystrokes.
+        if (time.monotonic() - session.last_user_input_time) < _TYPING_QUIET_WINDOW:
+            await asyncio.sleep(_IDLE_POLL_INTERVAL)
+            continue
+        if session.tracker.state == "idle":
+            return True
+        await asyncio.sleep(_IDLE_POLL_INTERVAL)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Helper — idle gate (requires a bridge/channel record for stop-event support)
 # ---------------------------------------------------------------------------
 
 async def _wait_for_idle(terminal_id: str, record: _BridgeRecord | _ChannelRecord) -> bool:
@@ -145,6 +268,11 @@ async def _wait_for_idle(terminal_id: str, record: _BridgeRecord | _ChannelRecor
         session = pty_manager.get_terminal(terminal_id)
         if session is None or not session.alive:
             return False
+        # Typing-quiet gate: don't inject while the user is actively typing.
+        # Prevents bridge bracketed-paste chunks from interleaving with keystrokes.
+        if (time.monotonic() - session.last_user_input_time) < _TYPING_QUIET_WINDOW:
+            await asyncio.sleep(_IDLE_POLL_INTERVAL)
+            continue
         if session.tracker.state == "idle":
             return True
         await asyncio.sleep(_IDLE_POLL_INTERVAL)
@@ -185,7 +313,14 @@ async def _inject(terminal_id: str, text: str, record: _BridgeRecord | _ChannelR
         )
         return False
 
-    ok = await pty_manager.write_pty_async(terminal_id, _wrap(text))
+    # Apply file-handoff AFTER the idle gate so the compact prompt is the only
+    # thing that enters the PTY pipe.  peer_name=None because the framing
+    # (e.g. [PEER REPLY from "X"]) is already embedded inside *text* by the
+    # caller (_relay_message / _channel_*_kickoff); the handoff prompt omits
+    # a redundant attribution header.
+    inject_text = _maybe_file_handoff(text, peer_name=None)
+
+    ok = await pty_manager.write_pty_async(terminal_id, _wrap(inject_text))
     if not ok:
         logger.warning(
             "[bridge %s] write_pty_async returned False for %s",
@@ -457,7 +592,24 @@ class BridgeManager:
             len(full_text),
         )
 
-        ok = await pty_manager.write_pty_async(to_terminal_id, _wrap(full_text))
+        # Fix A: wait for the target to become idle before injecting.
+        # Injecting while the session is mid-render causes truncation/corruption
+        # on ConPTY because the input pipe buffer can overflow before claude.exe
+        # drains it.
+        idle = await _wait_for_idle_simple(to_terminal_id)
+        if not idle:
+            logger.warning(
+                "Manual relay: target %s (%s) did not reach idle within %.1fs — aborting",
+                to_terminal_id, to_session.name, _IDLE_WAIT_MAX,
+            )
+            return {"ok": False, "error": "Target session is busy — try again when it is idle"}
+
+        # Fix B: apply file-handoff so large payloads never overwhelm the PTY
+        # pipe.  Pass the source session name so the compact inline prompt keeps
+        # sender attribution even when the full body lives in the relay file.
+        inject_text = _maybe_file_handoff(full_text, peer_name=from_session.name)
+
+        ok = await pty_manager.write_pty_async(to_terminal_id, _wrap(inject_text))
         if not ok:
             return {"ok": False, "error": "PTY write failed for target session"}
         return {"ok": True}

@@ -4,9 +4,10 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, GripVertical, GitFork, Search, Link2, ExternalLink } from "lucide-react";
+import { X, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
+import WorkflowsPanel from "./WorkflowsPanel";
 import "@xterm/xterm/css/xterm.css";
 
 /**
@@ -52,6 +53,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   activeBridge,    // null | { bridge_id, from_name, to_name, turns_used, max_turns } — active bridge involving this pane
   onEndBridge,     // (bridgeId: string) => void — terminate an active bridge
   onPopout,        // (session) => void — open terminal in separate window
+  workflowSummary, // { count: number, inProgressCount: number, items: array } | null — recent workflows
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -67,6 +69,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const searchRef = useRef(null);       // SearchAddon instance
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [workflowsOpen, setWorkflowsOpen] = useState(false);
   const searchInputRef = useRef(null);
   const { theme } = useTheme();
 
@@ -275,7 +278,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           const data = await res.json();
           if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
             const p = data.paths[0];
-            wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+            xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
             toast?.("Image pasted", "success");
           } else if (data.errors?.length) {
             toast?.(`Image paste failed: ${data.errors[0]}`, "error");
@@ -320,7 +323,7 @@ const TerminalPane = forwardRef(function TerminalPane({
               const data = await res.json();
               if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
                 const p = data.paths[0];
-                wsRef.current.send(p.includes(" ") ? `"${p}"` : p);
+                xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
                 toast?.("Image pasted", "success");
               } else if (data.errors?.length) {
                 toast?.(`Image paste failed: ${data.errors[0]}`, "error");
@@ -512,7 +515,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         const pathStr = data.paths
           .map((p) => (p.includes(" ") ? `"${p}"` : p))
           .join(" ");
-        wsRef.current.send(pathStr);
+        xtermRef.current.paste(pathStr);
         toast?.(`Dropped ${data.paths.length} file${data.paths.length > 1 ? "s" : ""}`, "success");
       } else if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         toast?.("Session not connected — cannot drop files", "error");
@@ -630,6 +633,59 @@ const TerminalPane = forwardRef(function TerminalPane({
             >
               <GitFork size={13} />
             </button>
+          )}
+          {workflowSummary && workflowSummary.count > 0 && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setWorkflowsOpen((o) => !o)}
+                className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+                style={{ color: "var(--text-muted)", position: "relative" }}
+                data-tooltip="Workflows"
+                aria-label={
+                  workflowSummary.inProgressCount > 0
+                    ? `${workflowSummary.inProgressCount} workflow(s) in progress`
+                    : `${workflowSummary.count} recent workflow(s)`
+                }
+                title={
+                  workflowSummary.inProgressCount > 0
+                    ? `${workflowSummary.inProgressCount} workflow(s) in progress`
+                    : `${workflowSummary.count} recent workflow(s)`
+                }
+              >
+                <Workflow size={13} />
+                {workflowSummary.inProgressCount > 0 && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: -2,
+                      right: -2,
+                      minWidth: 10,
+                      height: 10,
+                      borderRadius: "50%",
+                      backgroundColor: "var(--accent)",
+                      fontSize: 8,
+                      fontWeight: 700,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "var(--bg-base)",
+                      lineHeight: 1,
+                      pointerEvents: "none",
+                    }}
+                    aria-hidden="true"
+                  >
+                    {workflowSummary.inProgressCount}
+                  </span>
+                )}
+              </button>
+              {workflowsOpen && (
+                <WorkflowsPanel
+                  workflows={workflowSummary?.items || []}
+                  onClose={() => setWorkflowsOpen(false)}
+                />
+              )}
+            </div>
           )}
           {onOpenBridge && (
             <button

@@ -321,7 +321,7 @@ describe("PopoutTerminal paste handler", () => {
     unmount();
   });
 
-  // 2 — image paste: fetch("/api/upload") is called, path sent via ws.send
+  // 2 — image paste: fetch("/api/upload") is called, path injected via xterm.paste()
   it("image_paste_uploads_and_sends_path", async () => {
     const { wsSendSpy, unmount } = await renderPopout();
 
@@ -342,13 +342,16 @@ describe("PopoutTerminal paste handler", () => {
       );
     });
 
+    // Image path is now injected via xterm.paste() (bracketed-paste-aware), NOT ws.send
     await waitFor(() => {
-      expect(wsSendSpy).toHaveBeenCalled();
+      expect(mockTermPaste).toHaveBeenCalled();
     });
 
-    const sent = wsSendSpy.mock.calls[0][0];
+    const sent = mockTermPaste.mock.calls[0][0];
     // Path has no spaces — must NOT be quoted
     expect(sent).toBe("C:\\uploads\\paste.png");
+    // ws.send must NOT be called directly for image paths
+    expect(wsSendSpy).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -367,13 +370,16 @@ describe("PopoutTerminal paste handler", () => {
       await capturedPasteHandler(ev);
     });
 
+    // Image path is now injected via xterm.paste() (bracketed-paste-aware), NOT ws.send
     await waitFor(() => {
-      expect(wsSendSpy).toHaveBeenCalled();
+      expect(mockTermPaste).toHaveBeenCalled();
     });
 
-    const sent = wsSendSpy.mock.calls[0][0];
+    const sent = mockTermPaste.mock.calls[0][0];
     // Path contains a space → must be wrapped in double quotes
     expect(sent).toBe('"C:\\my uploads\\paste.png"');
+    // ws.send must NOT be called directly for image paths
+    expect(wsSendSpy).not.toHaveBeenCalled();
 
     unmount();
   });
@@ -416,7 +422,7 @@ describe("PopoutTerminal paste handler", () => {
     unmount();
   });
 
-  // 6 — Alt+V with image on clipboard: uploads image and sends path via WS
+  // 6 — Alt+V with image on clipboard: uploads image and injects path via xterm.paste()
   it("alt_v_with_image_uploads_and_sends_path", async () => {
     const { wsSendSpy, unmount } = await renderPopout();
 
@@ -448,7 +454,7 @@ describe("PopoutTerminal paste handler", () => {
     const result = capturedKeyHandler(altVEvent);
     expect(result).toBe(false);
 
-    // Wait for the async upload and WS send to complete
+    // Wait for the async upload to complete
     await waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalledWith(
         "/api/upload",
@@ -456,13 +462,16 @@ describe("PopoutTerminal paste handler", () => {
       );
     });
 
+    // Image path is now injected via xterm.paste() (bracketed-paste-aware), NOT ws.send
     await waitFor(() => {
-      expect(wsSendSpy).toHaveBeenCalled();
+      expect(mockTermPaste).toHaveBeenCalled();
     });
 
-    const sent = wsSendSpy.mock.calls[0][0];
+    const sent = mockTermPaste.mock.calls[0][0];
     // Path has no spaces — unquoted
     expect(sent).toBe("C:\\uploads\\altv.png");
+    // ws.send must NOT be called directly for image paths
+    expect(wsSendSpy).not.toHaveBeenCalled();
 
     unmount();
   });

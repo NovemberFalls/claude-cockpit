@@ -21,6 +21,13 @@ from typing import Any, Optional
 
 logger = logging.getLogger("cockpit.pty")
 
+# Inter-chunk delay for large PTY writes.  ConPTY's input pipe buffer is
+# shallower than winpty's; a 3 ms pause between 400-byte chunks gives the
+# pseudoconsole host (claude.exe) enough time to drain the pipe before the
+# next chunk arrives.  sleep(0) was enough for winpty but caused silent byte
+# drops on the desktop (Tauri/ConPTY) build with large bracketed-paste blocks.
+_INTER_CHUNK_DELAY = 0.003
+
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
 # Patterns for state detection
@@ -139,6 +146,8 @@ class TerminalSession:
     # Mutated only from the asyncio event loop (single-threaded), so no lock is needed.
     active_consumer: int = 0
     context_percent: Optional[int] = None  # last seen context window fill % (from tracker)
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_user_input_time: float = 0.0  # monotonic timestamp of last user keystroke (bridge typing-quiet gate)
 
 
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
@@ -148,6 +157,7 @@ IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "0"))  # 0 = disabled (no auto-clos
 _ALLOWED_MODELS = {
     "sonnet", "opus", "haiku",
     "claude-opus-4-7", "claude-opus-4-7[1m]",
+    "claude-opus-4-8", "claude-opus-4-8[1m]",
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6[1m]", "claude-opus-4-6[1m]",
     "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
@@ -680,62 +690,65 @@ class PtyManager:
         session = self.sessions.get(terminal_id)
         if not session or not session.alive:
             return False
-        loop = asyncio.get_event_loop()
+        async with session.write_lock:
+            loop = asyncio.get_event_loop()
 
-        # Scale timeout: 5s base + 1s per 32KB of data
-        data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
-        timeout = max(5.0, 5.0 + (data_len / 32768))
+            # Scale timeout: 5s base + 1s per 32KB of data
+            data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
+            timeout = max(5.0, 5.0 + (data_len / 32768))
 
-        # Small payloads: single write (fast path).
-        # Threshold is 400 bytes — winpty (used in dev mode) has a ~512-byte
-        # pipe write limit; staying well under it prevents paste truncation.
-        if data_len <= 400:
-            try:
-                return await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._pty_executor, self._write_pty_sync, terminal_id, data
-                    ),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
-                session.alive = False
-                return False
-            except Exception:
-                logger.debug("PTY async write error for %s", terminal_id)
-                return False
-
-        # Larger payloads: chunk with async yields to let the pipe drain.
-        # 400-byte chunks keep each write under winpty's pipe limit.
-        chunk_size = 400
-        offset = 0
-        while offset < len(data):
-            chunk = data[offset:offset + chunk_size]
-            try:
-                ok = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._pty_executor, self._write_pty_sync, terminal_id, chunk
-                    ),
-                    timeout=10.0,
-                )
-                if not ok:
+            # Small payloads: single write (fast path).
+            # Threshold is 400 bytes — winpty (used in dev mode) has a ~512-byte
+            # pipe write limit; staying well under it prevents paste truncation.
+            if data_len <= 400:
+                try:
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self._pty_executor, self._write_pty_sync, terminal_id, data
+                        ),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("PTY write timed out for %s — marking session dead", terminal_id)
+                    session.alive = False
                     return False
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "PTY write timed out for %s at offset %d/%d",
-                    terminal_id, offset, len(data),
-                )
-                session.alive = False
-                return False
-            except Exception:
-                logger.debug("PTY async write error for %s", terminal_id)
-                return False
-            offset += chunk_size
-            # Yield to event loop between chunks so heartbeats stay responsive.
-            # sleep(0) is enough — no actual delay needed, winpty drains fast.
-            if offset < len(data):
-                await asyncio.sleep(0)
-        return True
+                except Exception:
+                    logger.debug("PTY async write error for %s", terminal_id)
+                    return False
+
+            # Larger payloads: chunk with async yields to let the pipe drain.
+            # 400-byte chunks keep each write under winpty's pipe limit.
+            chunk_size = 400
+            offset = 0
+            while offset < len(data):
+                chunk = data[offset:offset + chunk_size]
+                try:
+                    ok = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self._pty_executor, self._write_pty_sync, terminal_id, chunk
+                        ),
+                        timeout=10.0,
+                    )
+                    if not ok:
+                        return False
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "PTY write timed out for %s at offset %d/%d",
+                        terminal_id, offset, len(data),
+                    )
+                    session.alive = False
+                    return False
+                except Exception:
+                    logger.debug("PTY async write error for %s", terminal_id)
+                    return False
+                offset += chunk_size
+                # Yield to event loop between chunks so the ConPTY pipe can drain
+                # and heartbeats stay responsive.  A real delay (not just sleep(0))
+                # is required for ConPTY — the pseudoconsole input buffer drops
+                # bytes when chunks arrive faster than claude.exe can consume them.
+                if offset < len(data):
+                    await asyncio.sleep(_INTER_CHUNK_DELAY)
+            return True
 
     def _write_pty_sync(self, terminal_id: str, data: str) -> bool:
         """Executor-safe PTY write (avoids isalive() kernel call on event loop)."""

@@ -99,6 +99,7 @@ export default function App() {
   const [activeBridges, setActiveBridges] = useState([]); // array of bridge dicts from /api/bridge
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
   const [poppedOutIds, setPoppedOutIds] = useState(new Set()); // session IDs whose terminals are in a separate window
+  const [workflowsByTerminal, setWorkflowsByTerminal] = useState({}); // { [terminalId]: { count, inProgressCount, items } }
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -641,6 +642,43 @@ export default function App() {
     fetchChannels();
     const id = setInterval(fetchChannels, 3000);
     return () => clearInterval(id);
+  }, [backendReady]);
+
+  // Poll /api/terminals/{id}/workflows every 3s — best-effort background polling
+  const sessionsForWorkflows = useRef(sessions);
+  sessionsForWorkflows.current = sessions;
+  useEffect(() => {
+    if (!backendReady) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const fetchWorkflows = async () => {
+      const activeSessions = sessionsForWorkflows.current.filter((s) => s.terminalId);
+      await Promise.all(
+        activeSessions.map(async (s) => {
+          try {
+            const res = await fetch(`/api/terminals/${s.terminalId}/workflows`, { signal });
+            if (!res.ok) return;
+            const data = await res.json();
+            const items = data.workflows || [];
+            const inProgressCount = items.filter((w) => w.status === "in_progress").length;
+            setWorkflowsByTerminal((prev) => {
+              const next = { ...prev, [s.terminalId]: { count: items.length, inProgressCount, items } };
+              return next;
+            });
+          } catch (_) {
+            // silently swallow — workflow polling is best-effort
+          }
+        })
+      );
+    };
+
+    fetchWorkflows();
+    const id = setInterval(fetchWorkflows, 3000);
+    return () => {
+      clearInterval(id);
+      controller.abort();
+    };
   }, [backendReady]);
 
   // Bridge modal handlers
@@ -1346,6 +1384,7 @@ export default function App() {
                           activeBridge={activeBridge}
                           onEndBridge={handleEndBridge}
                           onPopout={session.terminalId ? handlePopout : undefined}
+                          workflowSummary={workflowsByTerminal[session.terminalId] || null}
                         />
                       )}
                       {/* Channel overlay — shown when pane is part of an active channel */}

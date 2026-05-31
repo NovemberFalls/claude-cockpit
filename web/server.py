@@ -31,7 +31,7 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 from pty_manager import pty_manager
-from bridge_manager import bridge_manager, channel_manager
+from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir
 
 START_TIME = _time.time()
 
@@ -580,10 +580,16 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                             continue
                     except json.JSONDecodeError:
                         pass
+                session = pty_manager.get_terminal(terminal_id)
+                if session is not None:
+                    session.last_user_input_time = _time.monotonic()
                 await pty_manager.write_pty_async(terminal_id, text)
 
             data = msg.get("bytes")
             if data:
+                session = pty_manager.get_terminal(terminal_id)
+                if session is not None:
+                    session.last_user_input_time = _time.monotonic()
                 await pty_manager.write_pty_async(terminal_id, data.decode("utf-8", errors="replace"))
 
     except WebSocketDisconnect:
@@ -636,6 +642,69 @@ async def get_latest_assistant(terminal_id: str):
                 "timestamp": entry.get("timestamp"),
             })
     return JSONResponse({"text": None, "reason": "no assistant message found"})
+
+
+@app.get("/api/terminals/{terminal_id}/workflows")
+def get_workflows(terminal_id: str):
+    """Return recent Workflow tool invocations from this session's JSONL.
+
+    For each `tool_use` whose name is "Workflow", pairs it with its matching
+    `tool_result` (if present) and reports `status` as "in_progress" or "completed".
+    Used by the per-pane WorkflowsPanel in the frontend.
+    """
+    from jsonl_watcher import read_all_messages
+
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    jsonl_path = pty_manager._get_jsonl_path(session)
+    if not jsonl_path:
+        return {"workflows": []}
+
+    messages = read_all_messages(jsonl_path)
+    # Build map of tool_use_id -> tool_result entry for status pairing
+    tool_results: dict[str, dict] = {}
+    for m in messages:
+        if m.get("type") == "tool_result":
+            for block in m.get("content", []):
+                tuid = block.get("tool_use_id")
+                if tuid:
+                    tool_results[tuid] = {
+                        "completed_at": m.get("timestamp"),
+                        "is_error": block.get("is_error", False),
+                    }
+
+    workflows: list[dict] = []
+    for m in messages:
+        if m.get("type") != "assistant":
+            continue
+        for block in m.get("content", []):
+            if block.get("type") != "tool_use":
+                continue
+            if block.get("tool_name") != "Workflow":
+                continue
+            tool_id = block.get("tool_id", "")
+            inp = block.get("input", {}) or {}
+            # `script` may be huge — _summarize_tool_input already truncates to 200 chars.
+            # We only surface the script meta-fields; the raw script body is not shown.
+            result = tool_results.get(tool_id)
+            workflows.append({
+                "tool_id": tool_id,
+                "name": inp.get("name") or inp.get("title") or "workflow",
+                "description": inp.get("description") or "",
+                "args": inp.get("args"),
+                "script_preview": (inp.get("script") if isinstance(inp.get("script"), str) else None),
+                "script_path": inp.get("scriptPath"),
+                "started_at": m.get("timestamp"),
+                "completed_at": result["completed_at"] if result else None,
+                "is_error": result["is_error"] if result else False,
+                "status": "completed" if result else "in_progress",
+            })
+
+    # Most recent first
+    workflows.sort(key=lambda w: w.get("started_at") or "", reverse=True)
+    # Cap to 20 most recent — keeps the response small for polling
+    return {"workflows": workflows[:20]}
 
 
 @app.post("/api/bridge/manual")
@@ -1375,6 +1444,8 @@ async def shutdown_event():
     pty_manager.shutdown()
     logger.info("Shutdown: cleaning upload dir...")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    logger.info("Shutdown: cleaning relay dir...")
+    cleanup_relay_dir()
     PID_FILE.unlink(missing_ok=True)
     logger.info("Shutdown complete")
 

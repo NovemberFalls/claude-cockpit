@@ -14,9 +14,11 @@ pty_manager and tail_jsonl are replaced by monkeypatched stubs for each test.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import re
 import sys
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -46,6 +48,7 @@ def _make_mock_session(terminal_id="term-123", name="Test Session", alive=True, 
     s.tracker.state = tracker_state
     s.claude_session_id = "claude-abc"
     s.working_dir = "/tmp"
+    s.last_user_input_time = 0.0
     return s
 
 
@@ -1236,3 +1239,292 @@ async def test_channel_turn_cap_ends_channel(monkeypatch):
     assert record.state == "ended_capped", f"Expected ended_capped, got {record.state}"
     assert record.turns_used >= 1
     await asyncio.sleep(0)
+
+
+# ===========================================================================
+# File-handoff + idle-gate tests (Tests 33–36)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Test 33 — large manual relay: file-handoff writes relay file, compact prompt sent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_manual_large_payload_uses_file_handoff(bm, patch_pty, from_session, to_session):
+    """start_manual with a payload > 2048 bytes writes the full text to a relay
+    file in _RELAY_DIR and injects a compact reference prompt instead.
+
+    Assertions:
+      - result is {ok: True}
+      - the PTY write payload does NOT contain the full 3000-char body
+      - the payload DOES contain a path inside _RELAY_DIR and the
+        '[PEER REPLY from session "..."]' attribution
+      - the relay file exists and its content equals the full injected text
+        (prefix + message)
+    """
+    big_message = "A" * 3000  # 3000 bytes UTF-8, well over the 2048 threshold
+    prefix = '[From session "From Session"]:'
+    full_text = f"{prefix}\n{big_message}"
+
+    result = await bm.start_manual(
+        from_session.id,
+        to_session.id,
+        big_message,
+        prefix=prefix,
+    )
+
+    assert result == {"ok": True}
+    assert len(patch_pty) == 1
+    _tid, data = patch_pty[0]
+    assert _tid == to_session.id
+
+    # The PTY payload must NOT contain the full body (3000 A's)
+    assert big_message not in data, (
+        "Full large body should NOT appear inline in the PTY write when file-handoff is active"
+    )
+
+    # The payload must reference a path inside _RELAY_DIR
+    relay_dir_str = str(bm_module._RELAY_DIR)
+    assert relay_dir_str in data, (
+        f"Compact prompt should contain a relay file path inside _RELAY_DIR={relay_dir_str!r}"
+    )
+
+    # The compact prompt includes attribution
+    assert '[PEER REPLY from session "From Session"]' in data, (
+        "Compact prompt must include '[PEER REPLY from session \"From Session\"]' attribution"
+    )
+
+    # Extract the relay file path from the payload and verify the file
+    # Look for any substring of data that starts with relay_dir_str and ends before a newline
+    match = re.search(
+        rf'{re.escape(relay_dir_str)}[^\n]+_relay\.txt', data
+    )
+    assert match is not None, f"Could not find relay file path in payload:\n{data!r}"
+    relay_path = pathlib.Path(match.group(0))
+
+    try:
+        assert relay_path.exists(), f"Relay file {relay_path} was not created"
+        content = relay_path.read_text(encoding="utf-8")
+        assert content == full_text, (
+            f"Relay file content mismatch.\n"
+            f"Expected: {full_text[:80]!r}...\n"
+            f"Got:      {content[:80]!r}..."
+        )
+    finally:
+        relay_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Test 34 — small manual relay: inline, no relay file created
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_manual_small_payload_stays_inline(bm, patch_pty, from_session, to_session):
+    """start_manual with a payload < 2048 bytes injects the full message inline.
+
+    No relay file must appear in _RELAY_DIR as a result of this call.
+    """
+    small_message = "Short message for testing"
+    prefix = '[From session "From Session"]:'
+
+    # Snapshot _RELAY_DIR contents before the call
+    relay_dir = bm_module._RELAY_DIR
+    files_before = set(relay_dir.iterdir()) if relay_dir.exists() else set()
+
+    result = await bm.start_manual(
+        from_session.id,
+        to_session.id,
+        small_message,
+        prefix=prefix,
+    )
+
+    assert result == {"ok": True}
+    assert len(patch_pty) == 1
+    _tid, data = patch_pty[0]
+    assert _tid == to_session.id
+
+    # Full message must appear inline in the payload
+    assert small_message in data, (
+        "Small message must appear verbatim (inline) in the PTY write"
+    )
+    # Prefix must also be present inline
+    assert "[From session" in data, (
+        "Prefix must appear inline for small payloads"
+    )
+
+    # No new relay file must have been created
+    files_after = set(relay_dir.iterdir()) if relay_dir.exists() else set()
+    new_files = files_after - files_before
+    relay_files = [f for f in new_files if f.name.endswith("_relay.txt")]
+    assert len(relay_files) == 0, (
+        f"Small payload should not create relay files, but found: {relay_files}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 35 — idle-gate timeout on busy target in start_manual
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_manual_busy_target_returns_error(bm, monkeypatch, from_session):
+    """start_manual returns {ok: False, error: '...busy...'} when the target
+    session never reaches idle within the timeout.
+
+    The idle gate is accelerated via patching _IDLE_WAIT_MAX and
+    _IDLE_POLL_INTERVAL so the test completes in < 200 ms.
+    No PTY write must occur.
+    """
+    busy_target = _make_mock_session("to-busy", "Busy Target", alive=True, tracker_state="busy")
+    sessions = {from_session.id: from_session, busy_target.id: busy_target}
+    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
+
+    write_calls: list = []
+
+    async def fake_write(tid, data):
+        write_calls.append((tid, data))
+        return True
+
+    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+
+    # Speed up the idle gate so the test doesn't take 10 seconds
+    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.05)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.01)
+
+    result = await bm.start_manual(from_session.id, busy_target.id, "hello")
+
+    assert result.get("ok") is False, f"Expected ok=False for busy target, got: {result}"
+    assert "error" in result
+    assert "busy" in result["error"].lower(), (
+        f"Error message should mention 'busy', got: {result['error']!r}"
+    )
+
+    # No PTY write must have been issued
+    assert len(write_calls) == 0, (
+        f"No PTY write should occur when target is busy, but got {len(write_calls)} write(s)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 36 — _inject applies file-handoff for large auto/channel relay text
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inject_large_payload_uses_file_handoff(monkeypatch, from_session, to_session):
+    """_inject() with a text > 2048 bytes writes a relay file and sends only a
+    compact reference prompt to the PTY (never the full body).
+
+    This covers the auto-bridge and channel relay code path (both call _inject).
+    """
+    sessions = {from_session.id: from_session, to_session.id: to_session}
+    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
+
+    write_calls: list[tuple[str, str]] = []
+
+    async def fake_write(tid, data):
+        write_calls.append((tid, data))
+        return True
+
+    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+
+    # Build a minimal _BridgeRecord so _inject can reference record.bridge_id
+    # and check record._stop_event.
+    from bridge_manager import _BridgeRecord
+    record = _BridgeRecord(
+        bridge_id="test000000aa",
+        from_id=from_session.id,
+        to_id=to_session.id,
+        from_name=from_session.name,
+        to_name=to_session.name,
+        max_turns=4,
+    )
+
+    big_text = "B" * 3000  # > 2048 bytes
+
+    # Snapshot relay dir before call
+    relay_dir = bm_module._RELAY_DIR
+    files_before = set(relay_dir.iterdir()) if relay_dir.exists() else set()
+
+    ok = await bm_module._inject(to_session.id, big_text, record)
+
+    assert ok is True, "_inject should return True on success"
+    assert len(write_calls) == 1
+
+    _tid, data = write_calls[0]
+    assert _tid == to_session.id
+
+    # Full large body must NOT be in the PTY write
+    assert big_text not in data, (
+        "Full large body should NOT appear inline in _inject output when file-handoff is active"
+    )
+
+    # Relay dir path must appear in the compact prompt
+    relay_dir_str = str(relay_dir)
+    assert relay_dir_str in data, (
+        "Compact prompt from _inject must reference a relay file path"
+    )
+
+    # Verify relay file was actually created and cleaned up
+    files_after = set(relay_dir.iterdir()) if relay_dir.exists() else set()
+    new_files = files_after - files_before
+    relay_files = [f for f in new_files if f.name.endswith("_relay.txt")]
+    assert len(relay_files) == 1, f"Expected exactly 1 relay file, found: {relay_files}"
+
+    # Relay file content should be the original text
+    relay_content = relay_files[0].read_text(encoding="utf-8")
+    assert relay_content == big_text
+
+    # Cleanup
+    relay_files[0].unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Test 37 — relay-file GC deletes stale files (regression for monotonic/wall bug)
+# ---------------------------------------------------------------------------
+
+
+def test_relay_file_gc_deletes_stale_files():
+    """_maybe_file_handoff's opportunistic GC deletes files whose mtime is older
+    than _RELAY_FILE_MAX_AGE seconds.
+
+    Regression test: the original code compared time.monotonic() to st_mtime
+    (wall-clock epoch seconds), making the age check always False so stale files
+    were never deleted.  The fix uses time.time() so both sides of the comparison
+    are in wall-clock seconds.
+
+    This test MUST fail against the old buggy time.monotonic() code because
+    time.monotonic() is a small uptime-relative value (e.g. a few thousand
+    seconds), while st_mtime is a large Unix timestamp (> 1_700_000_000), so
+    `now - st_mtime` is deeply negative and never exceeds _RELAY_FILE_MAX_AGE.
+    With time.time(), the backdated mtime produces a positive age well above
+    the TTL, and the file is correctly deleted.
+    """
+    # Plant a stale file directly in the module-level relay dir.
+    stale = bm_module._RELAY_DIR / "stale_relay.txt"
+    stale.write_text("old content")
+
+    # Backdate its mtime well beyond the TTL using wall-clock time.
+    old_ts = time.time() - (bm_module._RELAY_FILE_MAX_AGE + 120)
+    os.utime(stale, (old_ts, old_ts))
+
+    # Trigger the opportunistic GC by calling _maybe_file_handoff with a
+    # payload that exceeds the inline threshold (> 2048 bytes).
+    bm_module._maybe_file_handoff("A" * 3000, peer_name=None)
+
+    # The stale file must have been deleted.
+    assert not stale.exists(), (
+        "Stale relay file was not deleted — GC likely compared time.monotonic() "
+        "to st_mtime (wall-clock) so the age check was always False."
+    )
+
+    # Clean up any relay files created by the _maybe_file_handoff call above
+    # so as not to pollute other tests or leave secrets-at-rest behind.
+    for f in bm_module._RELAY_DIR.glob("*_relay.txt"):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass

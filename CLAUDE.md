@@ -14,9 +14,10 @@ claude-cockpit/
     tests/             # Python test suite (pytest + pytest-asyncio)
     frontend/
       src/
-        App.jsx        # Root component, all session state, session reconciliation, bridge polling
+        App.jsx        # Root component, all session state, session reconciliation, bridge + workflows polling
         components/    # Sidebar, TerminalPane, TopBar, StatusBar, NewSessionDialog, BridgeModal,
-                       # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon, PopoutTerminal
+                       # ErrorBoundary, Toast, HexGrid, OnboardingModal, StateIcon, PopoutTerminal,
+                       # WorkflowsPanel
         __tests__/     # Frontend tests (vitest)
         hooks/         # useTheme (active)
         themes/        # themeData.js (20 themes: 10 palettes x dark/light)
@@ -94,8 +95,9 @@ Two independent DnD systems share the same drop targets — be careful not to le
 - **Max 8 sessions:** Default concurrent session limit is 8, configurable via `MAX_SESSIONS` env var.
 - **No idle timeout:** Idle timeout is disabled by default (`IDLE_TIMEOUT=0`). Dead sessions (process exited) are still purged after 30s.
 - **PTY timeout protection:** Writes timeout after 5s, reads after 10s — prevents session lockups from zombie processes.
+- **Per-session write serialization:** Every `TerminalSession` carries its own `asyncio.Lock`. The entire body of `write_pty_async` runs under `async with session.write_lock:`, so user keystrokes (from the WS handler) and bridge/channel injection (bracketed-paste chunks) never interleave their bytes inside the ConPTY pipe. Different sessions remain fully parallel.
 - **Ctrl+C handling:** `TerminalPane.jsx` has a `customKeyEventHandler` — Ctrl+C copies when text is selected, sends `\x03` only when no selection.
-- **Ctrl+V / paste handling:** A capture-phase `paste` DOM listener on the terminal container handles paste BEFORE xterm's own listener fires (avoiding double-paste / auto-submit). Image items in `clipboardData.items` are uploaded via `/api/upload` and the path is injected. Plain text uses `xterm.paste(text)` so xterm wraps it in bracketed-paste sequences when the PTY is in that mode (Claude Code is, by default). The `customKeyEventHandler` just returns `false` for Ctrl+V to suppress xterm sending the raw `\x16` character.
+- **Ctrl+V / paste handling:** A capture-phase `paste` DOM listener on the terminal container handles paste BEFORE xterm's own listener fires (avoiding double-paste / auto-submit). Image items in `clipboardData.items` are uploaded via `/api/upload` and the returned path is injected via `xterm.paste(path)` (NOT raw `ws.send`) so it is bracketed-paste wrapped — raw injection clobbers in-progress input in interactive prompts. Plain text likewise uses `xterm.paste(text)` so xterm wraps it in bracketed-paste sequences when the PTY is in that mode (Claude Code is, by default). The same image-paste path applies in `PopoutTerminal.jsx`. The `customKeyEventHandler` just returns `false` for Ctrl+V to suppress xterm sending the raw `\x16` character.
 
 ## Build & Release
 
@@ -112,12 +114,23 @@ Two independent DnD systems share the same drop targets — be careful not to le
 
 Two running cockpit sessions can exchange messages via `bridge_manager.py`:
 
-- **Manual relay (V1):** one-shot. The Bridge icon in any pane header opens `BridgeModal`. Pick another running session, choose "Relay my latest reply" (auto-fetches via `GET /api/terminals/{id}/latest-assistant`) or a custom message + preset chips, click Send. Backend wraps in bracketed paste and injects to the peer's PTY with a `[From session "<name>"]:` prefix.
+- **Manual relay (V1):** one-shot. The Bridge icon in any pane header opens `BridgeModal`. Pick another running session, choose "Relay my latest reply" (auto-fetches via `GET /api/terminals/{id}/latest-assistant`) or a custom message + preset chips, click Send. Backend waits for the target to be idle (`_wait_for_idle_simple`; returns `{ok: False, "...busy..."}` if it never settles), then wraps in bracketed paste and injects to the peer's PTY with a `[From session "<name>"]:` prefix.
+- **Typing-quiet gate:** both `_wait_for_idle` (V2 / V3) and `_wait_for_idle_simple` (V1) additionally block injection while the target session's user is actively typing. The WS handler stamps `session.last_user_input_time = time.monotonic()` on every keystroke; the gate refuses to advance until at least `_TYPING_QUIET_WINDOW` (1.0s) of typing-quiet has elapsed. Combined with the per-session write lock, this prevents the "bridge stutter" failure mode where bracketed-paste chunks fragment user input mid-burst.
+- **Large-message file handoff:** all relay modes route through size-aware injection. Messages larger than `_RELAY_INLINE_MAX` (2048 bytes) are NOT pasted inline — ConPTY's input pipe drops bytes under a large fast burst, truncating the message. Instead `_maybe_file_handoff` writes the full text to a temp relay file (`_RELAY_DIR`, created via `tempfile.mkdtemp(prefix="cockpit_relays_")`) and injects a compact prompt naming the file path; the receiving session reads it. Relay files are GC'd opportunistically after `_RELAY_FILE_MAX_AGE` (10 min) on each new handoff and the whole dir is removed by `cleanup_relay_dir()` on graceful shutdown.
 - **Autonomous relay (V2):** the Auto tab in `BridgeModal` labels the initiating session "Lead" and the receiving session "Worker". Shows a neon-red warning panel + a confirm-twice gate. On confirm, both sessions get a framed kickoff prompt, and `bridge_manager` watches each side's JSONL via `tail_jsonl`. Each new assistant turn is auto-relayed to the peer (idle-gated, bracketed-paste wrapped). Bridge ends on: turn cap (`max_turns`, default 4), `BRIDGE-DONE` sentinel in any reply, user clicks Stop, either session dies, or PTY write fails.
 - **Channel (V3):** the Channel tab in `BridgeModal` enables hub-topology N-session coordination (1 lead + N workers). User picks a lead (radio) and workers (checkboxes) then provides a kickoff prompt. The lead receives all worker output; the lead's output is broadcast to all workers. `channel_manager` (singleton in `bridge_manager.py`) manages `_ChannelRecord` instances and spawns N+1 relay tasks. Channel ends on: turn cap (`max_turns`, default 6), `BRIDGE-DONE` sentinel from any participant, user Stop, session death, or write failure. Lead pane shows "CHANNEL LEAD · turn X/Y · Stop" overlay (orange glow via `@keyframes channel-active-glow`); worker panes show "CHANNEL WORKER · turn X/Y · Stop".
 - **Conflict guard:** `/api/bridge/auto` and `/api/bridge/channel` both return 409 if any requested session is already in an active bridge or active channel (`channel_manager.member_ids()`).
 - **Active indicators:** App.jsx polls `GET /api/bridge` and `GET /api/bridge/channel` every 3s. Bridge panes show pulsing red glow; channel panes show pulsing orange glow.
 - **Routes:** `GET /api/terminals/{id}/latest-assistant`, `POST /api/bridge/manual`, `POST /api/bridge/auto`, `DELETE /api/bridge/{id}`, `GET /api/bridge`, `POST /api/bridge/channel`, `DELETE /api/bridge/channel/{channel_id}`, `GET /api/bridge/channel`.
+
+## Workflow Status Panel
+
+Cockpit surfaces a per-session view of in-flight Claude Code `Workflow` tool invocations (the harness's dynamic multi-agent runtime). The panel is read-only — Cockpit does not orchestrate workflows; it just observes what's running inside each session.
+
+- **Data source:** `GET /api/terminals/{id}/workflows` reads the session's JSONL via `jsonl_watcher.read_all_messages`, extracts `tool_use` entries whose `tool_name == "Workflow"`, pairs each with its matching `tool_result` (by `tool_use_id`), and returns the 20 most recent — sorted newest first.
+- **Response shape (per workflow):** `{tool_id, name, description, args, script_preview, script_path, started_at, completed_at|null, is_error, status: "in_progress"|"completed"}`. The `script_preview` is truncated by `_summarize_tool_input` (max ~200 chars) and is intentionally NOT surfaced in the UI — workflow scripts can carry sensitive prompts.
+- **UI:** `WorkflowsPanel.jsx` renders a popover with one row per workflow: status dot (pulsing accent = in progress, green = completed clean, red = completed with error), name, description, and relative time. The popover is opened by a `Workflow` icon in the `TerminalPane` header that is conditionally rendered when `workflowSummary.count > 0`; an inline badge shows `inProgressCount` when nonzero.
+- **Polling:** `App.jsx` runs a single shared `setInterval` (3s) that fans out one `fetch` per active session and stores summaries in `workflowsByTerminal`. Errors are silently swallowed — workflow polling is best-effort background work.
 
 ## Quick Resume Undo
 
