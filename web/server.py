@@ -355,6 +355,9 @@ async def create_terminal(request: Request):
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
+    permission_mode = body.get("permissionMode", "default")
+    effort = body.get("effort", "")
+    fast = body.get("fast", False)
     cols = body.get("cols", 120)
     rows = body.get("rows", 30)
 
@@ -366,10 +369,15 @@ async def create_terminal(request: Request):
             resume_session_id=resume_id,
             continue_last=continue_last,
             bypass_permissions=bypass_permissions,
+            permission_mode=permission_mode,
+            effort=effort,
+            fast=fast,
             cols=cols,
             rows=rows,
         )
         # Post-spawn health check: give Claude CLI time to initialize Node.js.
+        # The 1.5s wait also ensures the fast-mode --settings file has been read
+        # by the process before we clean it up below.
         await asyncio.sleep(1.5)
         if not session.pty.isalive():
             exit_code = getattr(session.pty, "exitstatus", "?")
@@ -380,6 +388,16 @@ async def create_terminal(request: Request):
                           "Ensure 'claude' CLI is installed and authenticated."},
                 status_code=500,
             )
+
+        # Clean up the fast-mode temp settings file now that the process has had
+        # 1.5s to read it on startup.  Best-effort: failure is non-fatal.
+        fast_settings_path = getattr(session, "_fast_settings_path", None)
+        if fast_settings_path:
+            try:
+                os.unlink(fast_settings_path)
+            except Exception:
+                logger.debug("Fast mode: failed to remove temp settings file %s", fast_settings_path, exc_info=True)
+
         logger.info("Session %s alive after spawn", session.id)
         asyncio.create_task(_session_reader(session.id))
         return JSONResponse({

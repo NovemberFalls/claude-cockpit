@@ -16,6 +16,9 @@ const SESSIONS_KEY = "cockpit-sessions";
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 const WORKSPACES_KEY = "cockpit-workspaces";
 const MODEL_KEY = "cockpit-model";
+const PERMISSION_MODE_KEY = "cockpit-permission-mode";
+const EFFORT_KEY = "cockpit-effort";
+const FAST_KEY = "cockpit-fast";
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -81,6 +84,12 @@ export default function App() {
   const zoomToastTimer = useRef(null);
   const [model, setModel] = useState(() => lsLoad(MODEL_KEY, "sonnet"));
   useEffect(() => { lsSave(MODEL_KEY, model); }, [model]);
+  const [permissionMode, setPermissionMode] = useState(() => lsLoad(PERMISSION_MODE_KEY, "default"));
+  useEffect(() => { lsSave(PERMISSION_MODE_KEY, permissionMode); }, [permissionMode]);
+  const [effort, setEffort] = useState(() => lsLoad(EFFORT_KEY, ""));
+  useEffect(() => { lsSave(EFFORT_KEY, effort); }, [effort]);
+  const [fast, setFast] = useState(() => lsLoad(FAST_KEY, false));
+  useEffect(() => { lsSave(FAST_KEY, fast); }, [fast]);
   const [layout, setLayout] = useState(4);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
@@ -274,12 +283,23 @@ export default function App() {
     });
 
     try {
+      const isOpus = (
+        useModel === "opus" ||
+        useModel === "claude-opus-4-6[1m]" ||
+        useModel === "claude-opus-4-7" ||
+        useModel === "claude-opus-4-7[1m]" ||
+        useModel === "claude-opus-4-8" ||
+        useModel === "claude-opus-4-8[1m]"
+      );
       const body = {
         name: sessionName,
         model: useModel,
         workdir: dir,
         cols: 120,
         rows: 30,
+        permissionMode,
+        effort,
+        fast: isOpus && fast,
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
         ...(options.resumeSessionId ? { resume_session_id: options.resumeSessionId } : {}),
@@ -311,7 +331,7 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, layout, addLocations, toast]);
+  }, [model, permissionMode, effort, fast, layout, addLocations, toast]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
   // Undo resumes via claude_session_id (exact session) if available, or
@@ -1127,6 +1147,12 @@ export default function App() {
           <TopBar
             model={model}
             setModel={setModel}
+            permissionMode={permissionMode}
+            setPermissionMode={setPermissionMode}
+            effort={effort}
+            setEffort={setEffort}
+            fast={fast}
+            setFast={setFast}
             sidebarOpen={sidebarOpen}
             setSidebarOpen={setSidebarOpen}
             user={user}

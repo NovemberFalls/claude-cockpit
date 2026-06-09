@@ -135,6 +135,9 @@ class TerminalSession:
     working_dir: str = ""
     claude_session_id: Optional[str] = None  # for --resume
     bypass_permissions: bool = False
+    permission_mode: str = "default"
+    effort: str = ""
+    fast: bool = False
     cols: int = 120
     rows: int = 30
     alive: bool = True
@@ -162,6 +165,17 @@ _ALLOWED_MODELS = {
     "claude-sonnet-4-6[1m]", "claude-opus-4-6[1m]",
     "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
 }
+
+# Allowed permission modes — full CLI set so future UI additions don't require a backend change.
+# Maps directly to --permission-mode <mode> choices in claude --help.
+_ALLOWED_PERMISSION_MODES = {
+    "default", "plan", "acceptEdits", "bypassPermissions", "auto", "dontAsk",
+}
+
+# Allowed effort levels — empty string means "unset" (model default, no flag appended).
+# Non-empty values map directly to --effort <level>.
+_ALLOWED_EFFORT_LEVELS = {"", "low", "medium", "high", "xhigh", "max"}
+
 # Claude session ID format: hex or UUID-style
 _SESSION_ID_RE = re.compile(r"^[a-f0-9\-]{8,64}$", re.IGNORECASE)
 
@@ -353,6 +367,9 @@ class PtyManager:
         resume_session_id: str = "",
         continue_last: bool = False,
         bypass_permissions: bool = False,
+        permission_mode: str = "default",
+        effort: str = "",
+        fast: bool = False,
         cols: int = 120,
         rows: int = 30,
     ) -> TerminalSession:
@@ -363,6 +380,14 @@ class PtyManager:
         # Validate model to prevent command injection (e.g. "sonnet --dangerously-skip-permissions")
         if model not in _ALLOWED_MODELS:
             raise ValueError(f"Invalid model: {model!r}")
+
+        # Validate permission_mode against allowlist — value is interpolated into the cmd string.
+        if permission_mode not in _ALLOWED_PERMISSION_MODES:
+            raise ValueError(f"Invalid permission_mode: {permission_mode!r}")
+
+        # Validate effort against allowlist — value is interpolated into the cmd string.
+        if effort not in _ALLOWED_EFFORT_LEVELS:
+            raise ValueError(f"Invalid effort: {effort!r}")
 
         # Validate resume_session_id if provided (must be hex/UUID, no shell metacharacters)
         if resume_session_id and not _SESSION_ID_RE.match(resume_session_id):
@@ -448,16 +473,68 @@ class PtyManager:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
             cmd += " --continue"
-        if bypass_permissions:
+
+        # Permission mode logic:
+        # bypass_permissions (legacy boolean) or permission_mode == "bypassPermissions"
+        # both map to --dangerously-skip-permissions; bypass wins and we do NOT
+        # also append --permission-mode to avoid duplicate/conflicting flags.
+        effective_bypass = bypass_permissions or (permission_mode == "bypassPermissions")
+        if effective_bypass:
             cmd += " --dangerously-skip-permissions"
+        elif permission_mode and permission_mode != "default":
+            # All values in _ALLOWED_PERMISSION_MODES are allowlist-validated above.
+            cmd += f" --permission-mode {permission_mode}"
+
+        # Effort level: empty string means "use model default" (no flag appended).
+        if effort:
+            # Value is allowlist-validated above — safe to interpolate.
+            cmd += f" --effort {effort}"
+
+        # Fast mode (Opus-only): implemented via --settings <path> with {"fastMode":true}.
+        # Verified empirically: `claude --settings '{"fastMode":true}' -p "hi" --output-format json`
+        # returns "fast_mode_state":"on" with zero stderr and no unknown-key warnings (2026-06-01).
+        # We write a temp JSON file (not inline JSON) because the cmd is spawned through
+        # ConPTY/winpty where inline braces/quotes are mangled by the shell.
+        # Gate: fast mode is only available for Opus models. The /fast toggle in the TUI
+        # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
+        _fast_settings_path: Optional[str] = None
+        if fast and "opus" in model.lower():
+            import json as _json
+            import tempfile as _tempfile
+            try:
+                fd, _fast_settings_path = _tempfile.mkstemp(
+                    suffix=".json", prefix="cockpit_fast_", text=True
+                )
+                with os.fdopen(fd, "w") as _fh:
+                    _json.dump({"fastMode": True}, _fh)
+                # Quote the path: %TEMP% can legitimately contain a space (e.g. a
+                # Windows username "First Last" → C:\Users\First Last\...\Temp\...).
+                # The cmd string is shlex-tokenized by every backend (never shell=True),
+                # so an unquoted path with a space splits into two argv tokens and
+                # breaks --settings parsing. Double-quoting keeps it one token: the
+                # ConPTY backend strips the quotes and list2cmdline re-adds them; the
+                # POSIX backend's shlex(posix=True) consumes them. The path comes from
+                # mkstemp() (not user input) and can never contain a literal quote, so
+                # this is purely a correctness/robustness guard, not injection defense.
+                cmd += f' --settings "{_fast_settings_path}"'
+                logger.info("Fast mode: enabled via --settings %s", _fast_settings_path)
+            except Exception:
+                logger.warning("Fast mode: failed to write settings file — skipping", exc_info=True)
+                _fast_settings_path = None
+        elif fast:
+            logger.info("Fast mode: requested but model %r is not Opus — ignoring", model)
 
         claude_path = shutil.which("claude", path=current_path)
         logger.info("Spawning: %s", cmd)
         logger.info("Claude found at: %s", claude_path)
         logger.info("CWD: %s", workdir)
         logger.debug("Bundled: %s", bool(meipass))
-        if bypass_permissions:
+        if effective_bypass:
             logger.warning("Permissions: BYPASSED")
+        if permission_mode and permission_mode != "default" and not effective_bypass:
+            logger.info("Permission mode: %s", permission_mode)
+        if effort:
+            logger.info("Effort level: %s", effort)
 
         # Select the appropriate PTY backend for this environment.
         # The backend abstraction (pty_backend.py) makes cross-platform support
@@ -465,12 +542,29 @@ class PtyManager:
         from pty_backend import get_backend
         backend = get_backend()
         logger.info("PTY backend: %s", backend.__name__)
-        pty_process = backend.spawn(
-            cmd,
-            dimensions=(rows, cols),
-            cwd=workdir,
-            env=env,
-        )
+        try:
+            pty_process = backend.spawn(
+                cmd,
+                dimensions=(rows, cols),
+                cwd=workdir,
+                env=env,
+            )
+        except BaseException:
+            # Spawn failed after the fast-mode settings file was written. The
+            # success-path cleanup in server.py never runs on this branch (it keys
+            # off session._fast_settings_path, and no session is created here), so
+            # remove the orphaned temp file now to avoid leaking it into %TEMP% on
+            # every failed Opus fast-mode spawn. Re-raise so the caller still sees
+            # the original spawn error.
+            if _fast_settings_path:
+                try:
+                    os.unlink(_fast_settings_path)
+                except OSError:
+                    logger.debug(
+                        "Fast mode: failed to remove temp settings file after spawn failure: %s",
+                        _fast_settings_path, exc_info=True,
+                    )
+            raise
         # Post-spawn health check is deferred to the async caller (server.py)
         # so it can use asyncio.sleep() without blocking the event loop.
 
@@ -482,12 +576,20 @@ class PtyManager:
             model=model,
             working_dir=workdir,
             claude_session_id=resume_session_id or None,
-            bypass_permissions=bypass_permissions,
+            bypass_permissions=effective_bypass,
+            permission_mode=permission_mode,
+            effort=effort,
+            fast=fast,
             cols=cols,
             rows=rows,
         )
         # Store pre-spawn file snapshot for JSONL discovery
         session._pre_spawn_files = pre_spawn_files
+        # Store the fast-mode settings file path so server.py can delete it after
+        # the post-spawn health check (1.5s).  The file must survive until the
+        # claude process has read its config on startup.  Deleting it here (before
+        # Node.js has a chance to parse it) risks a race on a loaded system.
+        session._fast_settings_path = _fast_settings_path
         self.sessions[terminal_id] = session
 
         # Track child PID for crash-recovery cleanup
