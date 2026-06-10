@@ -210,7 +210,13 @@ const TerminalPane = forwardRef(function TerminalPane({
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      fetch("/api/open-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: uri }),
+      }).catch(() => window.open(uri, "_blank"));
+    });
 
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);

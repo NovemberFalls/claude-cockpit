@@ -32,6 +32,10 @@ const MODEL_GROUPS = [
       { id: "haiku", label: "Haiku 4.5" },
     ],
   },
+  {
+    label: "Fable",
+    models: [{ id: "claude-fable-5", label: "Fable 5" }],
+  },
 ];
 const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
 

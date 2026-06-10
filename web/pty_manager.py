@@ -22,11 +22,13 @@ from typing import Any, Optional
 logger = logging.getLogger("cockpit.pty")
 
 # Inter-chunk delay for large PTY writes.  ConPTY's input pipe buffer is
-# shallower than winpty's; a 3 ms pause between 400-byte chunks gives the
+# shallower than winpty's; a 10 ms pause between 200-byte chunks gives the
 # pseudoconsole host (claude.exe) enough time to drain the pipe before the
 # next chunk arrives.  sleep(0) was enough for winpty but caused silent byte
 # drops on the desktop (Tauri/ConPTY) build with large bracketed-paste blocks.
-_INTER_CHUNK_DELAY = 0.003
+# Halved chunk size + tripled delay compared to earlier defaults to address
+# paste fragmentation on ~400-byte pastes where ConPTY silently drops bytes.
+_INTER_CHUNK_DELAY = 0.010
 
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
@@ -164,6 +166,7 @@ _ALLOWED_MODELS = {
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6[1m]", "claude-opus-4-6[1m]",
     "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
+    "claude-fable-5",
 }
 
 # Allowed permission modes — full CLI set so future UI additions don't require a backend change.
@@ -800,9 +803,10 @@ class PtyManager:
             timeout = max(5.0, 5.0 + (data_len / 32768))
 
             # Small payloads: single write (fast path).
-            # Threshold is 400 bytes — winpty (used in dev mode) has a ~512-byte
-            # pipe write limit; staying well under it prevents paste truncation.
-            if data_len <= 400:
+            # Threshold is 200 bytes — lowered from 400 to match the new chunk
+            # size so that any paste that would have been chunked still goes
+            # through the slower path with inter-chunk delays.
+            if data_len <= 200:
                 try:
                     return await asyncio.wait_for(
                         loop.run_in_executor(
@@ -819,8 +823,8 @@ class PtyManager:
                     return False
 
             # Larger payloads: chunk with async yields to let the pipe drain.
-            # 400-byte chunks keep each write under winpty's pipe limit.
-            chunk_size = 400
+            # 200-byte chunks keep each write well under ConPTY's pipe limit.
+            chunk_size = 200
             offset = 0
             while offset < len(data):
                 chunk = data[offset:offset + chunk_size]
