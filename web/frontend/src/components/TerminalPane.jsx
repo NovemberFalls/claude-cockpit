@@ -215,7 +215,9 @@ const TerminalPane = forwardRef(function TerminalPane({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: uri }),
-      }).catch(() => window.open(uri, "_blank"));
+      })
+        .then((r) => { if (!r.ok) throw new Error(r.status); })
+        .catch(() => window.open(uri, "_blank"));
     });
 
     term.loadAddon(fitAddon);

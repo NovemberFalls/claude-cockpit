@@ -1050,8 +1050,8 @@ async def open_url(request: Request):
     """Open a URL in the system's default browser."""
     body = await request.json()
     url = body.get("url", "")
-    if not url.startswith("https://"):
-        return JSONResponse({"error": "Only HTTPS URLs allowed"}, 400)
+    if not (url.startswith("https://") or url.startswith("http://")):
+        return JSONResponse({"error": "Only HTTP/HTTPS URLs allowed"}, 400)
     try:
         webbrowser.open(url)
         return JSONResponse({"ok": True})
