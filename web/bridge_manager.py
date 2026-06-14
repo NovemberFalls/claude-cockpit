@@ -60,9 +60,19 @@ _BP_END = "\x1b[201~"
 # Carriage-return used to submit the pasted block once bracketed-paste ends.
 _SUBMIT = "\r"
 
-# Maximum wait (seconds) for a peer session to reach idle before injection.
-_IDLE_WAIT_MAX = 10.0
 _IDLE_POLL_INTERVAL = 0.5
+
+# How long _wait_for_idle will wait for a *live* peer to become idle before
+# giving up with a non-fatal "timeout" result.  Real Claude turns routinely
+# exceed 10 seconds, so we give each relay injection up to 5 minutes of
+# patience before skipping (not killing) the bridge.
+_BUSY_WAIT_MAX = 300.0
+
+# Timeout for the V1 one-shot manual relay idle gate.  V1 is user-triggered
+# and returns an HTTP response, so we keep this moderate (60s) rather than
+# the full 5-minute V2/V3 cap.  A normal 15–30s Claude turn should always
+# clear within this window without the user seeing a spurious "busy" error.
+_MANUAL_WAIT_MAX = 60.0
 
 # Bridge typing-quiet window — bridge injection waits this long after the
 # user's last keystroke before grabbing the PTY. Prevents stutter where the
@@ -224,14 +234,21 @@ def cleanup_relay_dir() -> None:
 # Helper — idle gate (simple, no bridge record required)
 # ---------------------------------------------------------------------------
 
-async def _wait_for_idle_simple(terminal_id: str, timeout: float = _IDLE_WAIT_MAX) -> bool:
+async def _wait_for_idle_simple(terminal_id: str, timeout: float | None = None) -> bool:
     """Poll *terminal_id*'s tracker until it reaches 'idle' or *timeout* elapses.
 
     Returns True if idle was reached; False if the wait timed out or the
     session died.  Does NOT require a bridge record.
 
-    Used by ``start_manual`` which has no persistent bridge record.
+    Used by ``start_manual`` which has no persistent bridge record.  The
+    default timeout is ``_MANUAL_WAIT_MAX`` (60s) — generous enough that a
+    normal 15–30s Claude turn does not spuriously fail a one-shot manual
+    relay, while still being finite so the HTTP handler eventually returns.
+    The timeout parameter is read from the module constant at call time so
+    tests can monkeypatch it without the default-arg early-binding issue.
     """
+    if timeout is None:
+        timeout = _MANUAL_WAIT_MAX
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         session = pty_manager.get_terminal(terminal_id)
@@ -252,31 +269,41 @@ async def _wait_for_idle_simple(terminal_id: str, timeout: float = _IDLE_WAIT_MA
 # Helper — idle gate (requires a bridge/channel record for stop-event support)
 # ---------------------------------------------------------------------------
 
-async def _wait_for_idle(terminal_id: str, record: _BridgeRecord | _ChannelRecord) -> bool:
-    """Poll *terminal_id*'s tracker until it reaches 'idle' or timeout.
+async def _wait_for_idle(
+    terminal_id: str, record: _BridgeRecord | _ChannelRecord
+) -> str:
+    """Poll *terminal_id*'s tracker until it reaches 'idle' or a terminal condition.
 
-    Returns True if idle was reached, False if the wait timed out, the
-    session died, or the bridge stop event was set.
+    Returns one of four string sentinels so callers can distinguish fatal from
+    transient outcomes without using exceptions:
 
-    This function intentionally does NOT raise — callers handle the False
-    return as an error condition.
+        "idle"    — session became idle; safe to inject.
+        "dead"    — session not found or process has exited (FATAL — end bridge).
+        "stopped" — the bridge/channel stop event was set (teardown in progress).
+        "timeout" — session is alive but did not reach idle within _BUSY_WAIT_MAX
+                    (NON-FATAL — skip this relay turn, keep bridge alive).
+
+    The inner loop polls every _IDLE_POLL_INTERVAL seconds.  The total patience
+    is _BUSY_WAIT_MAX (300s / 5 min) so that slow-but-running Claude turns never
+    prematurely kill the bridge.  Fatal conditions (dead session, stop event) are
+    checked on every iteration so teardown is still prompt.
     """
-    deadline = time.monotonic() + _IDLE_WAIT_MAX
+    deadline = time.monotonic() + _BUSY_WAIT_MAX
     while time.monotonic() < deadline:
         if record._stop_event.is_set():
-            return False
+            return "stopped"
         session = pty_manager.get_terminal(terminal_id)
         if session is None or not session.alive:
-            return False
+            return "dead"
         # Typing-quiet gate: don't inject while the user is actively typing.
         # Prevents bridge bracketed-paste chunks from interleaving with keystrokes.
         if (time.monotonic() - session.last_user_input_time) < _TYPING_QUIET_WINDOW:
             await asyncio.sleep(_IDLE_POLL_INTERVAL)
             continue
         if session.tracker.state == "idle":
-            return True
+            return "idle"
         await asyncio.sleep(_IDLE_POLL_INTERVAL)
-    return False
+    return "timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -293,26 +320,52 @@ def _session_alive(terminal_id: str) -> bool:
 # Helper — inject message into PTY
 # ---------------------------------------------------------------------------
 
-async def _inject(terminal_id: str, text: str, record: _BridgeRecord | _ChannelRecord) -> bool:
+async def _inject(
+    terminal_id: str, text: str, record: _BridgeRecord | _ChannelRecord
+) -> str:
     """Wait for the peer to become idle, then inject *text*.
 
-    Returns True on success, False on any error (caller should end the bridge).
+    Returns one of three string sentinels that callers must handle:
+
+        "ok"      — injection succeeded; relay turn delivered.
+        "skip"    — non-fatal; peer was alive but timed out (_BUSY_WAIT_MAX)
+                    or the stop event was set.  Caller should NOT end the bridge.
+        "fatal"   — peer died or PTY write failed.  Caller MUST end the bridge.
+
+    Design note: "skip" on stop-event is safe because the relay task's outer
+    loop checks record.state != "active" on every iteration; once the stop
+    event fires the task exits cleanly on the next loop iteration rather than
+    needing _inject to do the teardown.
     """
     if not _session_alive(terminal_id):
         logger.warning(
             "[bridge %s] Peer %s is not alive before injection",
             record.bridge_id, terminal_id,
         )
-        return False
+        return "fatal"
 
-    idle = await _wait_for_idle(terminal_id, record)
-    if not idle:
+    gate_result = await _wait_for_idle(terminal_id, record)
+
+    if gate_result == "dead":
         logger.warning(
-            "[bridge %s] Peer %s did not reach idle within %.1fs — aborting relay",
-            record.bridge_id, terminal_id, _IDLE_WAIT_MAX,
+            "[bridge %s] Peer %s died while waiting to become idle",
+            record.bridge_id, terminal_id,
         )
-        return False
+        return "fatal"
 
+    if gate_result == "stopped":
+        # Stop event fires — teardown is already underway; caller just returns.
+        return "skip"
+
+    if gate_result == "timeout":
+        # Peer is alive but slow — skip this relay turn without killing the bridge.
+        logger.warning(
+            "[bridge %s] Peer %s alive but did not reach idle within %.0fs — skipping relay turn",
+            record.bridge_id, terminal_id, _BUSY_WAIT_MAX,
+        )
+        return "skip"
+
+    # gate_result == "idle" — safe to inject.
     # Apply file-handoff AFTER the idle gate so the compact prompt is the only
     # thing that enters the PTY pipe.  peer_name=None because the framing
     # (e.g. [PEER REPLY from "X"]) is already embedded inside *text* by the
@@ -326,7 +379,8 @@ async def _inject(terminal_id: str, text: str, record: _BridgeRecord | _ChannelR
             "[bridge %s] write_pty_async returned False for %s",
             record.bridge_id, terminal_id,
         )
-    return ok
+        return "fatal"
+    return "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -454,12 +508,17 @@ async def _relay_task(
             sentinel_detected = "BRIDGE-DONE" in text
 
             relay_body = _relay_message(watch_name, text)
-            ok = await _inject(target_id, relay_body, record)
-            if not ok:
+            inject_result = await _inject(target_id, relay_body, record)
+            if inject_result == "fatal":
                 _end_bridge(record, "errored")
                 return
+            if inject_result == "skip":
+                # Non-fatal: stop event or peer alive-but-slow timeout.
+                # The outer loop will detect the stop event on the next
+                # iteration if teardown is in progress; otherwise continue.
+                continue
 
-            # Increment per-side counter and recalculate round-trips
+            # inject_result == "ok" — increment per-side counter and recalculate round-trips
             if side == "from":
                 record._relays_from += 1
             else:
@@ -600,7 +659,7 @@ class BridgeManager:
         if not idle:
             logger.warning(
                 "Manual relay: target %s (%s) did not reach idle within %.1fs — aborting",
-                to_terminal_id, to_session.name, _IDLE_WAIT_MAX,
+                to_terminal_id, to_session.name, _MANUAL_WAIT_MAX,
             )
             return {"ok": False, "error": "Target session is busy — try again when it is idle"}
 
@@ -987,11 +1046,15 @@ async def _worker_relay_task(
             sentinel_detected = "BRIDGE-DONE" in text
 
             relay_body = _relay_message(worker_name, text)
-            ok = await _inject(record.lead_id, relay_body, record)
-            if not ok:
+            inject_result = await _inject(record.lead_id, relay_body, record)
+            if inject_result == "fatal":
                 _end_channel(record, "errored")
                 return
+            if inject_result == "skip":
+                # Non-fatal: stop event or lead alive-but-slow timeout.
+                continue
 
+            # inject_result == "ok"
             record.turns_used += 1
 
             if sentinel_detected:
@@ -1094,11 +1157,40 @@ async def _lead_relay_task(record: _ChannelRecord) -> None:
             sentinel_detected = "BRIDGE-DONE" in text
 
             relay_body = _relay_message(record.lead_name, text)
+            any_fatal = False
+            delivered_any = False
             for worker_id in record.worker_ids:
-                ok = await _inject(worker_id, relay_body, record)
-                if not ok:
-                    _end_channel(record, "errored")
-                    return
+                inject_result = await _inject(worker_id, relay_body, record)
+                if inject_result == "fatal":
+                    # A worker died or its PTY write failed — end the whole channel.
+                    any_fatal = True
+                    break
+                if inject_result == "skip":
+                    # Worker alive-but-slow timeout, or stop event.  Skip this
+                    # worker's delivery for this turn; keep going for other workers.
+                    logger.warning(
+                        "[channel %s] Skipping relay to slow/stopped worker %s for this turn",
+                        record.channel_id, worker_id,
+                    )
+                    continue
+                # inject_result == "ok" — delivered successfully
+                delivered_any = True
+
+            if any_fatal:
+                _end_channel(record, "errored")
+                return
+
+            # Stop event may have been set during the worker loop above.
+            if record._stop_event.is_set() or record.state != "active":
+                return
+
+            # If every worker was skipped (all alive-but-slow), nothing was
+            # delivered this turn — do NOT burn a turn against max_turns, and
+            # do not act on the sentinel/cap.  Tail for the next lead turn.
+            # This mirrors the skip→continue (before counting) behaviour of
+            # _relay_task and _worker_relay_task.
+            if not delivered_any:
+                continue
 
             record.turns_used += 1
 

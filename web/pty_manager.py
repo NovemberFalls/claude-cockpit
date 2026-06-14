@@ -101,7 +101,12 @@ class SessionStateTracker:
         if elapsed < 1.0:
             return self.state  # Still receiving output, stay busy
 
-        # Check the tail of the buffer for patterns
+        # Check the tail of the buffer for patterns.
+        # NOTE: feed() runs on the PTY read thread and tick() on the event loop;
+        # this read is intentionally lock-free. It is safe only because feed()
+        # mutates self.buffer via whole-string reassignment, which is atomic
+        # under the CPython GIL — tick() always sees a consistent old-or-new
+        # string, never a torn one. Do not change feed() to mutate in place.
         tail = self.buffer[-200:] if self.buffer else ""
 
         # Check waiting patterns first (higher priority)
@@ -190,10 +195,16 @@ class PtyManager:
     # Only these PIDs are killed during orphan cleanup — never random Claude sessions.
     _PID_TRACK_FILE = os.path.join(os.path.dirname(__file__), ".cockpit-child-pids")
 
+    # Interval (seconds) at which the background state ticker calls tick() on
+    # every live session.  1 second is fine-grained enough that the bridge idle
+    # gate sees a fresh state within one poll cycle without significant overhead.
+    _STATE_TICKER_INTERVAL = 1.0
+
     def __init__(self):
         self.sessions: dict[str, TerminalSession] = {}
         self._lock = threading.Lock()  # Protects sessions dict and PID file
         self._pty_executor = ThreadPoolExecutor(max_workers=64)
+        self._state_ticker_task: Optional[asyncio.Task] = None
 
     def _load_child_pids(self) -> set[int]:
         """Load previously tracked child PIDs."""
@@ -911,6 +922,67 @@ class PtyManager:
             logger.debug("PTY write error for %s", terminal_id, exc_info=True)
             session.alive = False
             return False
+
+    def start_state_ticker(self) -> None:
+        """Start the background asyncio task that calls tick() on every live session.
+
+        Must be called from the asyncio event loop (e.g. the FastAPI startup
+        handler) so that asyncio.create_task() has a running loop available.
+        Idempotent — if the task is already running this is a no-op.
+        """
+        if self._state_ticker_task is not None and not self._state_ticker_task.done():
+            return
+        self._state_ticker_task = asyncio.create_task(
+            self._state_ticker_loop(), name="pty-state-ticker"
+        )
+        logger.info("State ticker started (interval=%.1fs)", self._STATE_TICKER_INTERVAL)
+
+    async def stop_state_ticker(self) -> None:
+        """Cancel the background state ticker and wait for it to exit.
+
+        Called from the FastAPI shutdown handler alongside other cleanup tasks.
+        Safe to call even if the ticker was never started.
+        """
+        task = self._state_ticker_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        logger.info("State ticker stopped")
+
+    async def _state_ticker_loop(self) -> None:
+        """Background loop: call tick() on every live session every second.
+
+        This makes SessionStateTracker.state authoritative independently of
+        frontend polling (/api/terminals), which was the only previous tick()
+        call site.  Without this, the bridge idle gate could read a stale
+        'busy' state long after the session had actually become idle, causing
+        spurious bridge terminations.
+
+        Error handling: a bad session's tick() must never kill the loop.
+        Exceptions per session are caught and logged; the loop continues.
+        CancelledError propagates cleanly to allow graceful shutdown.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._STATE_TICKER_INTERVAL)
+                # Snapshot sessions to avoid mutation during iteration.
+                for session in list(self.sessions.values()):
+                    if not session.alive:
+                        continue
+                    try:
+                        session.tracker.tick()
+                    except Exception:
+                        logger.warning(
+                            "State ticker: tick() failed for session %s",
+                            session.id,
+                            exc_info=True,
+                        )
+        except asyncio.CancelledError:
+            raise
 
     def shutdown(self):
         """Kill all sessions and clean up resources."""

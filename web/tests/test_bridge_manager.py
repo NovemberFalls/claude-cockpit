@@ -472,7 +472,6 @@ async def test_sentinel_in_relay_text_ends_bridge(bm, monkeypatch, from_session,
             return
 
     # Patch the module-level _wait_for_idle so we don't actually wait
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
@@ -532,7 +531,6 @@ async def test_turn_cap_ends_bridge(bm, monkeypatch, from_session, to_session):
         await asyncio.sleep(5)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await bm.start_auto(from_session.id, to_session.id, "kickoff", max_turns=1)
@@ -552,18 +550,87 @@ async def test_turn_cap_ends_bridge(bm, monkeypatch, from_session, to_session):
 
 
 # ---------------------------------------------------------------------------
-# Test 15 — idle gate times out and ends bridge with errored
+# Test 15 — idle gate: dead peer causes bridge to error; busy-alive peer is skipped
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_idle_gate_waits_then_errors_if_busy(bm, monkeypatch, from_session, to_session):
-    """Bridge ends with state='errored' when peer never becomes idle within the timeout.
+async def test_idle_gate_dead_peer_errors_bridge(bm, monkeypatch, from_session, to_session):
+    """Bridge ends with state='errored' when the target peer session dies mid-wait.
 
-    We patch _IDLE_WAIT_MAX=0.1 and _IDLE_POLL_INTERVAL=0.05 so the test is fast.
-    The peer session's tracker.state is permanently 'busy'.
+    _wait_for_idle returns 'dead' (fatal) when the session is None/not-alive.
+    _inject translates 'dead' → 'fatal' → _relay_task calls _end_bridge('errored').
+
+    Previously the test was named 'test_idle_gate_waits_then_errors_if_busy' and
+    expected that a *busy-but-alive* peer would also end the bridge with 'errored'.
+    That contract changed: a busy-but-alive peer now produces a non-fatal 'timeout'
+    result (the relay is skipped for that turn and the bridge stays active).  Only
+    a dead session or a PTY write failure is a fatal error.
     """
-    # Make the 'to' session permanently busy
+    # 'to' session starts alive so the JSONL check passes, but will vanish
+    # (return None from get_terminal) once the relay task fires — simulating
+    # session death mid-relay.
+    call_idx = {"get": 0, "tail": 0}
+
+    def get_terminal_side_effect(tid):
+        if tid == from_session.id:
+            return from_session
+        # to_session is alive for the first two lookups (JSONL check + initial
+        # liveness check inside _inject), then gone.
+        call_idx["get"] += 1
+        if call_idx["get"] <= 2:
+            return to_session
+        return None  # session vanished — simulate death
+
+    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", get_terminal_side_effect)
+    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: "/tmp/fake.jsonl")
+
+    write_calls: list = []
+
+    async def fake_write(tid, data):
+        write_calls.append((tid, data))
+        return True
+
+    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+
+    # from_session tails one entry, triggering an inject into the (soon-dead) peer
+    async def fake_tail(path, from_beginning=False):
+        call_idx["tail"] += 1
+        if call_idx["tail"] == 1:
+            yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_BUSY_WAIT_MAX", 0.3)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
+
+    result = await bm.start_auto(from_session.id, to_session.id, "kickoff")
+    assert result.get("ok") is True
+    bid = result["bridge_id"]
+
+    # Wait for the dead-peer detection to propagate and bridge to errored
+    for _ in range(30):
+        await asyncio.sleep(0.05)
+        record = bm._bridges[bid]
+        if record.state != "active":
+            break
+
+    record = bm._bridges[bid]
+    assert record.state == "errored", f"Expected errored for dead peer, got {record.state}"
+
+
+@pytest.mark.asyncio
+async def test_idle_gate_busy_alive_peer_is_skipped_not_errored(bm, monkeypatch, from_session, to_session):
+    """Bridge stays alive when the target peer is permanently busy-but-alive.
+
+    A busy-but-alive peer used to kill the bridge ('errored').  After the fix,
+    _wait_for_idle returns 'timeout' (non-fatal) → _inject returns 'skip' →
+    _relay_task continues rather than ending the bridge.
+
+    We verify by patching _BUSY_WAIT_MAX to a very short value so the timeout
+    fires quickly, then checking that the bridge remains in 'active' state (not
+    'errored') after the timeout window elapses.
+    """
     busy_to = _make_mock_session(to_session.id, to_session.name, alive=True, tracker_state="busy")
     sessions = {from_session.id: from_session, busy_to.id: busy_to}
     monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
@@ -577,35 +644,36 @@ async def test_idle_gate_waits_then_errors_if_busy(bm, monkeypatch, from_session
 
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
 
-    # from_session tails one entry, triggering an inject into the busy peer
     call_idx = {"n": 0}
 
     async def fake_tail(path, from_beginning=False):
         call_idx["n"] += 1
         if call_idx["n"] == 1:
-            # This is the 'from' watcher — yield one message
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
-        # Hang
         await asyncio.sleep(10)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    # Shorten timeout so the test doesn't take 10 seconds
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.2)
+    # Very short busy-wait so the test doesn't take 300s
+    monkeypatch.setattr(bm_module, "_BUSY_WAIT_MAX", 0.15)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await bm.start_auto(from_session.id, to_session.id, "kickoff")
     assert result.get("ok") is True
     bid = result["bridge_id"]
 
-    # Wait for idle gate to time out and bridge to errored
-    for _ in range(30):
-        await asyncio.sleep(0.1)
-        record = bm._bridges[bid]
-        if record.state != "active":
-            break
+    # Wait enough time for the timeout to fire and the skip path to execute
+    for _ in range(10):
+        await asyncio.sleep(0.05)
 
     record = bm._bridges[bid]
-    assert record.state == "errored", f"Expected errored, got {record.state}"
+    # Bridge must NOT have errored — busy-but-alive peer is a non-fatal skip
+    assert record.state == "active", (
+        f"Expected bridge to stay 'active' when peer is busy-but-alive, got {record.state!r}"
+    )
+
+    # Cleanup
+    bm.stop(bid)
+    await asyncio.sleep(0)
 
 
 # ===========================================================================
@@ -1055,7 +1123,6 @@ async def test_channel_worker_relay_targets_lead_only(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
@@ -1114,7 +1181,6 @@ async def test_channel_lead_relay_targets_all_workers(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
@@ -1168,7 +1234,6 @@ async def test_channel_sentinel_from_worker_ends_channel(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
@@ -1221,7 +1286,6 @@ async def test_channel_turn_cap_ends_channel(monkeypatch):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.1)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.05)
 
     result = await cm.start(lead.id, [w1.id, w2.id], "prompt", max_turns=1)
@@ -1374,7 +1438,7 @@ async def test_start_manual_busy_target_returns_error(bm, monkeypatch, from_sess
     """start_manual returns {ok: False, error: '...busy...'} when the target
     session never reaches idle within the timeout.
 
-    The idle gate is accelerated via patching _IDLE_WAIT_MAX and
+    The idle gate is accelerated via patching _MANUAL_WAIT_MAX and
     _IDLE_POLL_INTERVAL so the test completes in < 200 ms.
     No PTY write must occur.
     """
@@ -1390,8 +1454,9 @@ async def test_start_manual_busy_target_returns_error(bm, monkeypatch, from_sess
 
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
 
-    # Speed up the idle gate so the test doesn't take 10 seconds
-    monkeypatch.setattr(bm_module, "_IDLE_WAIT_MAX", 0.05)
+    # Speed up the idle gate so the test doesn't take 60 seconds.
+    # _wait_for_idle_simple uses _MANUAL_WAIT_MAX as its default timeout.
+    monkeypatch.setattr(bm_module, "_MANUAL_WAIT_MAX", 0.05)
     monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.01)
 
     result = await bm.start_manual(from_session.id, busy_target.id, "hello")
@@ -1449,9 +1514,10 @@ async def test_inject_large_payload_uses_file_handoff(monkeypatch, from_session,
     relay_dir = bm_module._RELAY_DIR
     files_before = set(relay_dir.iterdir()) if relay_dir.exists() else set()
 
-    ok = await bm_module._inject(to_session.id, big_text, record)
+    inject_result = await bm_module._inject(to_session.id, big_text, record)
 
-    assert ok is True, "_inject should return True on success"
+    # _inject now returns a string sentinel: "ok" | "skip" | "fatal"
+    assert inject_result == "ok", f"_inject should return 'ok' on success, got {inject_result!r}"
     assert len(write_calls) == 1
 
     _tid, data = write_calls[0]

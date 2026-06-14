@@ -1435,6 +1435,11 @@ async def startup_event():
             pass
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
+    # 4. Start background state ticker — calls tick() on every live session
+    # every ~1s so SessionStateTracker.state is authoritative independent of
+    # frontend polling.  The bridge idle gate depends on this for correctness.
+    pty_manager.start_state_ticker()
+
     logger.info("Startup complete (PID %d)", os.getpid())
 
 
@@ -1457,6 +1462,9 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             pass
+
+    # Stop the background state ticker
+    await pty_manager.stop_state_ticker()
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
