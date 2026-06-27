@@ -426,6 +426,17 @@ class PtyManager:
                 continue
             env[k] = v
 
+        # Force Claude Code's classic (inline) renderer instead of its v2.1.89+
+        # fullscreen TUI, which draws into the terminal's ALTERNATE SCREEN BUFFER
+        # (ESC[?1049h, like vim/htop). The alternate buffer has no scrollback, so
+        # inside cockpit's embedded xterm.js it makes the conversation impossible
+        # to scroll up — history appears "truncated" (Claude Code issue #42670).
+        # This env var (Claude Code v2.1.132+) forces the classic renderer
+        # regardless of the user's global `tui` setting, restoring xterm's
+        # 10000-line scrollback. It affects only cockpit-spawned sessions; the
+        # user's native-terminal TUI preference is left untouched.
+        env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+
         import sys as _sys
         meipass = getattr(_sys, "_MEIPASS", None)
         current_path = env.get("PATH", env.get("Path", ""))
