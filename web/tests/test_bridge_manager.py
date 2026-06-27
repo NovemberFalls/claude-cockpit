@@ -241,34 +241,88 @@ async def test_start_auto_returns_bridge_id(bm, patch_pty, from_session, to_sess
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — start_auto with missing JSONL returns error and doesn't start tasks
+# Test 6 — start_auto with JSONL=None for both sessions still starts (ok: True)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_start_auto_no_jsonl_returns_error_not_started(bm, monkeypatch, from_session, to_session):
-    """start_auto returns {ok: False} when JSONL path is unavailable for a session."""
+async def test_start_auto_no_jsonl_still_starts(bm, monkeypatch, from_session, to_session):
+    """start_auto returns {ok: True} even when JSONL is unavailable for both sessions.
+
+    Brand-new sessions have no JSONL yet (Claude Code only creates it on the first
+    message).  The bridge's kickoff prompt IS that first message, so the relay tasks
+    must handle the missing file — not the pre-flight validation.  Previously, the
+    pre-flight returned {ok: False, error: 'JSONL not yet available...'}, which
+    prevented bridging any session that hadn't spoken before.
+    """
     sessions = {from_session.id: from_session, to_session.id: to_session}
     monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
-    # JSONL only available for 'from', not 'to'
-    monkeypatch.setattr(
-        bm_module.pty_manager,
-        "_get_jsonl_path",
-        lambda s: "/tmp/fake.jsonl" if s.id == from_session.id else None,
-    )
+    # JSONL is not available for either session (simulates brand-new sessions)
+    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: None)
 
     write_calls = []
+
     async def fake_write(tid, data):
         write_calls.append((tid, data))
         return True
+
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+
+    # Stub tail_jsonl so relay tasks don't spin forever waiting for JSONL
+    async def never_yield(path, from_beginning=False):
+        await asyncio.sleep(3600)
+        return
+        yield
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", never_yield)
 
     result = await bm.start_auto(from_session.id, to_session.id, "kickoff")
 
-    assert result.get("ok") is False
+    assert result.get("ok") is True, f"Expected ok=True for no-JSONL sessions, got: {result}"
+    assert "bridge_id" in result
+    # Kickoff writes must still have been sent to both sides
+    assert len(write_calls) == 2, f"Expected 2 kickoff writes, got {len(write_calls)}"
+
+    # Cleanup
+    bid = result["bridge_id"]
+    record = bm._bridges[bid]
+    record._stop_event.set()
+    for task in (record._task_from, record._task_to):
+        if task and not task.done():
+            task.cancel()
+    await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Test 6b — start_auto with a dead/missing session still returns ok:False
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_auto_dead_session_returns_error(bm, monkeypatch, from_session):
+    """start_auto returns {ok: False, error: '...not found or dead...'} when either
+    session is dead, even after the JSONL pre-flight check was removed.
+
+    This confirms the alive/exists guard was NOT removed as part of the fix.
+    """
+    dead_to = _make_mock_session("to-dead", "Dead Target", alive=False)
+    sessions = {from_session.id: from_session, dead_to.id: dead_to}
+    monkeypatch.setattr(bm_module.pty_manager, "get_terminal", lambda tid: sessions.get(tid))
+    monkeypatch.setattr(bm_module.pty_manager, "_get_jsonl_path", lambda s: None)
+
+    write_calls = []
+
+    async def fake_write(tid, data):
+        write_calls.append((tid, data))
+        return True
+
+    monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
+
+    result = await bm.start_auto(from_session.id, dead_to.id, "kickoff")
+
+    assert result.get("ok") is False, f"Expected ok=False for dead session, got: {result}"
     assert "error" in result
-    # No kickoff writes should have been sent
-    assert len(write_calls) == 0
+    assert len(write_calls) == 0, "No kickoff writes should occur when a session is dead"
 
 
 # ---------------------------------------------------------------------------
@@ -943,31 +997,39 @@ async def test_channel_start_rejects_dead_worker(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 23 — start() rejects when JSONL missing for any member
+# Test 23 — start() succeeds when JSONL is missing for all members
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_channel_start_rejects_missing_jsonl(monkeypatch):
-    """start() returns {ok: False} when JSONL is unavailable for any member.
+async def test_channel_start_no_jsonl_still_starts(monkeypatch):
+    """start() returns {ok: True} when JSONL is unavailable for ALL members.
 
-    Lead has JSONL, first worker has JSONL, second worker has JSONL=None.
+    Brand-new sessions have no JSONL yet.  The channel kickoff prompt is what
+    triggers the session's first message, so the relay tasks handle the missing
+    file post-kickoff.  Previously the pre-flight returned {ok: False, error:
+    'JSONL not yet available...'} for any session without a JSONL path, blocking
+    channels involving fresh sessions.
     """
     cm = ChannelManager()
     lead = _make_mock_session("lead-1", "Lead")
     w1 = _make_mock_session("w1", "Worker One")
     w2 = _make_mock_session("w2", "Worker Two")
     sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
-    # w2 has no JSONL
-    jsonl_map = {lead.id: "/tmp/lead.jsonl", w1.id: "/tmp/w1.jsonl", w2.id: None}
+    # No JSONL for any session
+    jsonl_map = {lead.id: None, w1.id: None, w2.id: None}
     write_calls = _patch_channel_pty(monkeypatch, sessions, jsonl_map=jsonl_map)
+    monkeypatch.setattr(bm_module, "tail_jsonl", _never_yield)
 
     result = await cm.start(lead.id, [w1.id, w2.id], "prompt")
 
-    assert result.get("ok") is False
-    assert "error" in result
-    # No kickoff writes must have been sent
-    assert len(write_calls) == 0
+    assert result.get("ok") is True, f"Expected ok=True for no-JSONL sessions, got: {result}"
+    assert "channel_id" in result
+    # Kickoff writes must still have been sent to all 3 members (lead + 2 workers)
+    assert len(write_calls) == 3, f"Expected 3 kickoff writes, got {len(write_calls)}"
+
+    record = cm._channels[result["channel_id"]]
+    await _cancel_channel_tasks(record)
 
 
 # ---------------------------------------------------------------------------

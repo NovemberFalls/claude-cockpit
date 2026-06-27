@@ -706,19 +706,11 @@ class BridgeManager:
         if to_session is None or not to_session.alive:
             return {"ok": False, "error": f"Session {to_terminal_id!r} not found or dead"}
 
-        # Resolve JSONL paths now so we can fail fast before any side effects.
-        # The relay tasks will re-check after kickoff in case the file appears
-        # slightly after the kickoff write.
-        if pty_manager._get_jsonl_path(from_session) is None:
-            return {
-                "ok": False,
-                "error": f"JSONL not yet available for session {from_terminal_id!r}",
-            }
-        if pty_manager._get_jsonl_path(to_session) is None:
-            return {
-                "ok": False,
-                "error": f"JSONL not yet available for session {to_terminal_id!r}",
-            }
+        # JSONL availability is NOT checked here. Claude Code creates the JSONL
+        # file on the session's first message, which is the kickoff prompt we are
+        # about to send. For brand-new sessions that have never spoken, the file
+        # does not exist yet — and that is fine. Each relay task waits up to 15s
+        # post-kickoff for the file to appear before declaring an error.
 
         bridge_id = uuid.uuid4().hex[:12]
         record = _BridgeRecord(
@@ -1294,18 +1286,12 @@ class ChannelManager:
                 return {"ok": False, "error": f"Worker session {wid!r} not found or dead"}
             worker_sessions[wid] = ws
 
-        # Fail-fast JSONL checks
-        if pty_manager._get_jsonl_path(lead_session) is None:
-            return {
-                "ok": False,
-                "error": f"JSONL not yet available for lead session {lead_id!r}",
-            }
-        for wid, ws in worker_sessions.items():
-            if pty_manager._get_jsonl_path(ws) is None:
-                return {
-                    "ok": False,
-                    "error": f"JSONL not yet available for worker session {wid!r}",
-                }
+        # JSONL availability is NOT checked here. Claude Code creates the JSONL
+        # file on the session's first message, which is the kickoff prompt we are
+        # about to send. For brand-new sessions that have never spoken, the file
+        # does not exist yet — and that is fine. Each relay task (worker and lead)
+        # waits up to 15s post-kickoff for the file to appear before declaring an
+        # error.
 
         channel_id = uuid.uuid4().hex[:12]
         worker_names = {wid: worker_sessions[wid].name for wid in worker_ids}

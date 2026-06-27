@@ -176,6 +176,24 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     return JSONResponse(result)
 
 
+@app.delete("/api/upload")
+async def clear_upload_dir(keep: int = 10):
+    """Delete old uploads, keeping the *keep* most-recently-modified files."""
+    global _upload_dir_size
+    files = sorted(UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime)
+    to_delete = files[:-keep] if keep > 0 else files
+    deleted = 0
+    async with _upload_lock:
+        for f in to_delete:
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+        _upload_dir_size = sum(f.stat().st_size for f in UPLOAD_DIR.iterdir())
+    return JSONResponse({"deleted": deleted, "kept": len(files) - deleted, "quota_bytes": _upload_dir_size})
+
+
 # ── Directory Browse ─────────────────────────────────────
 
 
