@@ -8,7 +8,7 @@ import pytest
 # Set MAX_SESSIONS before import
 os.environ.setdefault("MAX_SESSIONS", "3")
 
-from pty_manager import PtyManager, TerminalSession, SessionStateTracker
+from pty_manager import PtyManager, TerminalSession
 
 
 def make_mock_session(terminal_id="test1", alive=True):
@@ -190,3 +190,105 @@ class TestWritePtySync:
         # First call: 4 bytes — splits 'é' (b"\xc3\xa9") mid-character
         session.pty.write.side_effect = [4]
         assert self.mgr._write_pty_sync("t1", data) is False
+
+
+class TestSpawnEnvDisablesAutoupdater:
+    """DISABLE_AUTOUPDATER=1 must reach the PTY backend's env for every spawn.
+
+    Claude Code's built-in auto-updater can never win against up to
+    MAX_SESSIONS concurrent cockpit-spawned claude.exe processes all holding
+    a handle on the binary, so every session logs a spurious "Auto-update
+    failed" message. Cockpit disables the updater in the child env instead.
+    """
+
+    def setup_method(self):
+        self.mgr = PtyManager()
+
+    def _make_mock_backend(self):
+        pty = MagicMock()
+        pty.isalive.return_value = True
+        pty.pid = 99999
+        backend_cls = MagicMock()
+        backend_cls.spawn.return_value = pty
+        backend_cls.__name__ = "MockBackend"
+        return backend_cls
+
+    def test_spawn_env_sets_disable_autoupdater(self):
+        """create_terminal() passes env with DISABLE_AUTOUPDATER=1 to backend.spawn()."""
+        backend = self._make_mock_backend()
+        with patch("pty_backend.get_backend", return_value=backend):
+            self.mgr.create_terminal(name="t", workdir="C:\\Code", model="sonnet")
+        backend.spawn.assert_called_once()
+        _, kwargs = backend.spawn.call_args
+        assert kwargs["env"]["DISABLE_AUTOUPDATER"] == "1"
+
+    def test_spawn_env_does_not_mutate_parent_os_environ(self, monkeypatch):
+        """The env override is scoped to the child's env dict, not os.environ.
+
+        The var is removed from the ambient environment first: when the test
+        suite itself runs inside a cockpit-spawned session, the parent already
+        set DISABLE_AUTOUPDATER=1 and the old precondition assert flaked.
+        """
+        monkeypatch.delenv("DISABLE_AUTOUPDATER", raising=False)
+        backend = self._make_mock_backend()
+        with patch("pty_backend.get_backend", return_value=backend):
+            self.mgr.create_terminal(name="t", workdir="C:\\Code", model="sonnet")
+        assert "DISABLE_AUTOUPDATER" not in os.environ
+
+
+class TestKillProcessTree:
+    """Regression tests for PtyManager._kill_process_tree.
+
+    Bug: the original ``except (ImportError, psutil.NoSuchProcess):`` tuple
+    referenced ``psutil.NoSuchProcess`` in the same except-clause that guards
+    the ``import psutil`` statement itself. When the import raises
+    ImportError, ``psutil`` is never bound in that scope — but Python must
+    still evaluate the except tuple to check the match, which raises
+    NameError and masks the original ImportError. That crashes the whole
+    cleanup path instead of degrading gracefully.
+    """
+
+    def test_import_error_degrades_gracefully(self, monkeypatch):
+        """psutil unavailable (ImportError) — must not raise NameError, just return."""
+        import sys
+
+        # sys.modules[name] = None is the standard trick to force the next
+        # `import psutil` statement to raise ImportError without needing the
+        # package to actually be uninstalled.
+        monkeypatch.setitem(sys.modules, "psutil", None)
+
+        # Must return cleanly (None) — no NameError, no other exception.
+        assert PtyManager._kill_process_tree(12345) is None
+
+    def test_parent_process_gone_degrades_gracefully(self):
+        """psutil available but the parent process already exited — no crash."""
+        import psutil
+
+        with patch("psutil.Process", side_effect=psutil.NoSuchProcess(99999)):
+            assert PtyManager._kill_process_tree(99999) is None
+
+    def test_kills_children_when_parent_alive(self):
+        """Normal path: parent found, all children killed."""
+        mock_parent = MagicMock()
+        child1 = MagicMock()
+        child2 = MagicMock()
+        mock_parent.children.return_value = [child1, child2]
+
+        with patch("psutil.Process", return_value=mock_parent):
+            assert PtyManager._kill_process_tree(1) is None
+        child1.kill.assert_called_once()
+        child2.kill.assert_called_once()
+
+    def test_child_already_gone_is_swallowed(self):
+        """A child that vanishes mid-kill (NoSuchProcess) does not abort the loop."""
+        import psutil
+
+        mock_parent = MagicMock()
+        gone_child = MagicMock()
+        gone_child.kill.side_effect = psutil.NoSuchProcess(1)
+        alive_child = MagicMock()
+        mock_parent.children.return_value = [gone_child, alive_child]
+
+        with patch("psutil.Process", return_value=mock_parent):
+            assert PtyManager._kill_process_tree(1) is None
+        alive_child.kill.assert_called_once()

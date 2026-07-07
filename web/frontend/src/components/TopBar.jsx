@@ -1,8 +1,12 @@
-import { useState } from "react";
-import { PanelLeft, ChevronDown } from "lucide-react";
+/* eslint-disable react-refresh/only-export-components -- MODEL_GROUPS/MODELS/isOpusModel
+   are re-exported here so PaneActionsMenu.jsx reuses the exact same model list
+   instead of hardcoding a second copy (see CLAUDE.md model list conventions). */
+import { useState, useEffect } from "react";
+import { PanelLeft, ChevronDown, KeyRound } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
+import OpenRouterModal from "./OpenRouterModal.jsx";
 
-const MODEL_GROUPS = [
+export const MODEL_GROUPS = [
   {
     label: "Claude 4.8",
     models: [
@@ -36,8 +40,16 @@ const MODEL_GROUPS = [
     label: "Fable",
     models: [{ id: "claude-fable-5", label: "Fable 5" }],
   },
+  {
+    label: "OpenRouter",
+    provider: "openrouter",
+    models: [
+      { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "openrouter" },
+      { id: "qwen/qwen3-coder-next", label: "Qwen3 Coder Next", provider: "openrouter" },
+    ],
+  },
 ];
-const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
+export const MODELS = MODEL_GROUPS.flatMap((g) => g.models);
 
 const PERMISSION_MODES = [
   { id: "default", label: "Ask" },
@@ -56,7 +68,7 @@ const EFFORT_OPTIONS = [
 ];
 
 /** Returns true when the given model id is an Opus model (fast toggle eligible). */
-function isOpusModel(modelId) {
+export function isOpusModel(modelId) {
   return (
     modelId === "opus" ||
     modelId === "claude-opus-4-6[1m]" ||
@@ -65,6 +77,16 @@ function isOpusModel(modelId) {
     modelId === "claude-opus-4-8" ||
     modelId === "claude-opus-4-8[1m]"
   );
+}
+
+/**
+ * Returns "openrouter" for model ids that live in the OpenRouter group of
+ * MODEL_GROUPS, "anthropic" for everything else (including unrecognized ids —
+ * absent `provider` on a model entry is treated as anthropic, per convention).
+ */
+export function getModelProvider(modelId) {
+  const entry = MODELS.find((m) => m.id === modelId);
+  return entry?.provider === "openrouter" ? "openrouter" : "anthropic";
 }
 
 export default function TopBar({
@@ -79,17 +101,53 @@ export default function TopBar({
   sidebarOpen,
   setSidebarOpen,
   user,
+  onToast,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const { themeId, switchTheme, themes } = useTheme();
   const [themeOpen, setThemeOpen] = useState(false);
+  const [openRouterOpen, setOpenRouterOpen] = useState(false);
+  // tri-state: null = not yet checked, true/false = last known GET result
+  const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
   const currentModel = MODELS.find((m) => m.id === model) || MODELS[0];
   const currentPermission = PERMISSION_MODES.find((p) => p.id === permissionMode) || PERMISSION_MODES[0];
   const currentEffort = EFFORT_OPTIONS.find((e) => e.id === effort) || EFFORT_OPTIONS[0];
-  const fastEligible = isOpusModel(model);
+  const modelProvider = getModelProvider(model);
+  const isOpenRouterModel = modelProvider === "openrouter";
+  const fastEligible = isOpusModel(model) && !isOpenRouterModel;
+
+  // Check OpenRouter key status on mount, and again every time the
+  // OpenRouterModal closes (the key may have just been saved/removed).
+  useEffect(() => {
+    if (openRouterOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/openrouter");
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled) setOpenRouterConfigured(Boolean(data.configured));
+      } catch (_err) {
+        if (!cancelled) setOpenRouterConfigured(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [openRouterOpen]);
+
+  // If the key gets removed out from under a selected OpenRouter model, fall
+  // back to MODELS[0] and tell the user why (via the toast callback).
+  useEffect(() => {
+    if (openRouterConfigured === false && isOpenRouterModel) {
+      setModel(MODELS[0].id);
+      onToast?.(
+        `OpenRouter key removed — reverted model selection to ${MODELS[0].label}`,
+        "info"
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRouterConfigured, isOpenRouterModel]);
 
   function closeAll() {
     setModelOpen(false);
@@ -122,6 +180,17 @@ export default function TopBar({
 
       {/* Right */}
       <div className="flex items-center gap-2">
+        {/* OpenRouter settings */}
+        <button
+          onClick={() => { closeAll(); setOpenRouterOpen(true); }}
+          className="p-1.5 rounded-md transition-colors hover-bg-surface"
+          style={{ color: "var(--text-secondary)" }}
+          title="OpenRouter settings"
+          aria-label="OpenRouter settings"
+        >
+          <KeyRound size={16} />
+        </button>
+
         {/* Theme picker (works in both modes) */}
         <div className="relative">
           <button
@@ -201,34 +270,54 @@ export default function TopBar({
                   boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
                 }}
               >
-                {MODEL_GROUPS.map((group, gi) => (
-                  <div key={group.label}>
-                    {gi > 0 && (
-                      <div style={{ height: 1, backgroundColor: "var(--border-color)", margin: "2px 0" }} />
-                    )}
-                    <div
-                      className="text-[10px] uppercase tracking-wider px-3 pt-1.5 pb-0.5"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      {group.label}
-                    </div>
-                    {group.models.map((m) => (
-                      <button
-                        key={m.id}
-                        role="option"
-                        aria-selected={m.id === model}
-                        onClick={() => { setModel(m.id); setModelOpen(false); }}
-                        className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
-                        style={{
-                          color: m.id === model ? "var(--accent)" : "var(--text-secondary)",
-                          fontWeight: m.id === model ? 600 : 400,
-                        }}
+                {MODEL_GROUPS.map((group, gi) => {
+                  const isOpenRouterGroup = group.provider === "openrouter";
+                  const groupDisabled = isOpenRouterGroup && !openRouterConfigured;
+                  return (
+                    <div key={group.label}>
+                      {gi > 0 && (
+                        <div style={{ height: 1, backgroundColor: "var(--border-color)", margin: "2px 0" }} />
+                      )}
+                      <div
+                        className="text-[10px] uppercase tracking-wider px-3 pt-1.5 pb-0.5"
+                        style={{ color: "var(--text-muted)" }}
                       >
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
-                ))}
+                        {group.label}
+                      </div>
+                      {groupDisabled && (
+                        <div
+                          className="text-[10px] px-3 pb-1"
+                          style={{ color: "var(--text-muted)", fontStyle: "italic" }}
+                        >
+                          Add a key via the key icon to enable
+                        </div>
+                      )}
+                      {group.models.map((m) => {
+                        const disabled = isOpenRouterGroup && !openRouterConfigured;
+                        return (
+                          <button
+                            key={m.id}
+                            role="option"
+                            aria-selected={m.id === model}
+                            aria-disabled={disabled || undefined}
+                            disabled={disabled}
+                            onClick={() => { if (disabled) return; setModel(m.id); setModelOpen(false); }}
+                            className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                            style={{
+                              color: disabled ? "var(--text-muted)" : m.id === model ? "var(--accent)" : "var(--text-secondary)",
+                              fontWeight: m.id === model ? 600 : 400,
+                              opacity: disabled ? 0.45 : 1,
+                              cursor: disabled ? "not-allowed" : "pointer",
+                            }}
+                            title={disabled ? "Add a key via the key icon to enable" : undefined}
+                          >
+                            {m.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
               </div>
             </>
           )}
@@ -285,25 +374,28 @@ export default function TopBar({
           )}
         </div>
 
-        {/* Effort picker */}
+        {/* Effort picker — not applicable to OpenRouter sessions (backend skips it) */}
         <div className="relative">
           <button
-            onClick={() => { closeAll(); setEffortOpen((v) => !v); }}
+            onClick={() => { if (isOpenRouterModel) return; closeAll(); setEffortOpen((v) => !v); }}
+            disabled={isOpenRouterModel}
             className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
             style={{
               color: "var(--text-secondary)",
               border: "1px solid var(--border-color)",
               backgroundColor: "var(--bg-surface)",
+              opacity: isOpenRouterModel ? 0.45 : 1,
+              cursor: isOpenRouterModel ? "not-allowed" : "pointer",
             }}
             aria-label={`Effort: ${currentEffort.label}`}
             aria-expanded={effortOpen}
             aria-haspopup="listbox"
-            title="Default thinking effort for new sessions"
+            title={isOpenRouterModel ? "Not available for OpenRouter models" : "Default thinking effort for new sessions"}
           >
             {currentEffort.label}
             <ChevronDown size={10} />
           </button>
-          {effortOpen && (
+          {effortOpen && !isOpenRouterModel && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setEffortOpen(false)} aria-hidden="true" />
               <div
@@ -350,7 +442,13 @@ export default function TopBar({
           aria-label={fastEligible ? (fast ? "Fast mode on" : "Fast mode off") : "Fast mode (Opus models only)"}
           aria-pressed={fastEligible && fast}
           disabled={!fastEligible}
-          title={fastEligible ? "Toggle fast mode for new sessions" : "Fast mode is only available for Opus models"}
+          title={
+            isOpenRouterModel
+              ? "Not available for OpenRouter models"
+              : fastEligible
+                ? "Toggle fast mode for new sessions"
+                : "Fast mode is only available for Opus models"
+          }
         >
           Fast
         </button>
@@ -377,6 +475,12 @@ export default function TopBar({
         )}
 
       </div>
+
+      <OpenRouterModal
+        open={openRouterOpen}
+        onClose={() => setOpenRouterOpen(false)}
+        onToast={onToast}
+      />
     </header>
   );
 }

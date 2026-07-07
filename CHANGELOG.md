@@ -23,6 +23,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [1.3.8] - 2026-07-07
+
+### Added
+- **OpenRouter integration.** Sessions can now run through [OpenRouter](https://openrouter.ai) instead of the Anthropic subscription:
+  - Key management UI: a key icon in the top bar opens the OpenRouter settings modal — paste a key, "Save & Test" live-validates it against OpenRouter (showing remaining credits) before saving, "Remove key" falls back to any `OPENROUTER_API_KEY` environment key. Keys are stored server-side in `~/.claude-cockpit/config.json` (UI key takes precedence over the environment) and are only ever returned masked.
+  - New API endpoints: `GET/POST/DELETE /api/settings/openrouter`.
+  - Provider spawn lever: `POST /api/terminals` accepts `provider` (`"anthropic"` default / `"openrouter"`) and `providerModel` (an OpenRouter slug). OpenRouter sessions are spawned with the routing environment (`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`) instead of `--model`; every session object now includes `provider`.
+  - Model picker: a new "OpenRouter" group (DeepSeek V4 Pro, Qwen3 Coder Next), disabled with a hint until a key is configured. Effort and Fast controls are disabled for OpenRouter models (the backend skips them). In-session model switching excludes OpenRouter entries (switching can't change provider).
+- Pane headers now show the model's display label instead of the raw model id (long OpenRouter slugs no longer overflow the pill), in both docked panes and popout windows.
+
+### Fixed
+- Pane rename now applies instantly (optimistic update, rolled back if the server rejects it) instead of the header sitting on the old name for up to 5 seconds while the Claude-side `/rename` sync waited for the session to go idle.
+
+### Security
+- Anthropic-provider sessions now strip any inherited `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` from the child environment, so a machine-global OpenRouter config can never silently reroute a subscription pane.
+- The OpenRouter key never appears unmasked in any API response or log line.
+- `node_modules` build caches and the `web/.cockpit-child-pids` runtime file are no longer tracked by git.
+
+## [1.3.7] - 2026-07-01
+
+### Added
+- Per-session actions in the terminal pane header: a Stop button (appears while the session is busy, sends Esc to interrupt) and a "More actions" menu with Rename, Compact context, Clear conversation (with confirm), Export transcript (Markdown download), live model switch, and Fast mode.
+- Session renaming: double-click the pane header name or use the actions menu; optionally syncs the name into the Claude Code session via `/rename`.
+- New API endpoints: `PATCH /api/terminals/{id}` (rename), `POST /api/terminals/{id}/interrupt`, `POST /api/terminals/{id}/command` (allowlisted slash-command injection, idle-gated), `GET /api/terminals/{id}/export` (Markdown transcript).
+
+### Changed
+- **BREAKING:** The server now binds `127.0.0.1` (localhost) by default instead of `0.0.0.0`. The server has no authentication, so the old default exposed filesystem browsing, file upload, and process spawning to the local network. To restore network access, set `HOST=0.0.0.0` explicitly — a startup warning is logged when binding a non-loopback address.
+- Channel (V3) lead output is now delivered to all workers concurrently; one slow worker no longer delays the others.
+- Large-message relay file handoff no longer blocks the event loop.
+- Migrated FastAPI startup/shutdown from the deprecated `on_event` API to a lifespan handler.
+
+### Added (continued)
+- A toast now announces when a bridge or channel ends, with the reason: turn limit reached (with counts), task completed (BRIDGE-DONE), stopped by user, or failed (error-styled). Previously the pane glow just disappeared silently.
+
+### Fixed
+- `_kill_process_tree` no longer crashes with a NameError when psutil is unavailable — the missing-dependency path now degrades gracefully.
+- Terminal rendering corruption (interleaved/garbled lines in long sessions): the terminal fit calculation no longer overestimates pane size by the container padding, popped-out windows now respect the zoom level instead of a hardcoded font size (and follow live zoom changes from the main window), zoom-triggered refits are hardened against deferred layout, and minimize/restore triggers a refit. Dimension updates are deduplicated before being sent to the PTY.
+- Cockpit-spawned Claude sessions no longer show "Auto-update failed: claude.exe in use" — the auto-updater is disabled per spawned session (`DISABLE_AUTOUPDATER=1`), since it can never win the file replace while multiple sessions share claude.exe. Update Claude Code manually when needed.
+- Autonomous bridge (V2) and channel (V3) no longer stall silently when a session's first reply lands before the JSONL watcher attaches — the watcher now starts from a pre-kickoff offset snapshot.
+- Manual relay (V1) now returns 409 when either session is already in an active bridge or channel, preventing interleaved writes to the same terminal.
+- The Bridge dialog now disables sessions that are already in an active bridge or channel instead of failing after Send.
+- `lucide-react` moved from devDependencies to dependencies (production-only installs previously failed to build).
+
+### Internal
+- Added ruff lint configuration and cleaned up all Python lint findings; silent exception handlers now log per project convention.
+- `npm audit` vulnerabilities resolved (13 → 0, dev-only chains).
+
 ## [1.3.1] - 2026-04-12
 
 ### Changed

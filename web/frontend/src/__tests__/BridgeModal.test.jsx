@@ -73,6 +73,15 @@ const NO_TERMINAL_SESSION = {
   activityState: "idle",
 };
 
+const THIRD_SESSION = {
+  id: "third-5",
+  name: "Zeta",
+  terminalId: "term-zeta",
+  status: "running",
+  model: "sonnet",
+  activityState: "idle",
+};
+
 function defaultProps(overrides = {}) {
   return {
     open: true,
@@ -326,5 +335,102 @@ describe("BridgeModal", () => {
      * The risk of regression is low and caught by code review.
      */
     expect(true).toBe(true);
+  });
+
+  // ---- busy-session awareness (App.jsx-derived busyTerminalIds prop) ----
+
+  // 17
+  it("manual_receiver_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
+    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "bridge"]]);
+    render(<BridgeModal {...defaultProps({ busyTerminalIds })} />);
+
+    const radio = screen.getByRole("radio");
+    expect(radio.textContent).toContain("Beta");
+    expect(radio).toBeDisabled();
+    expect(radio.textContent.toLowerCase()).toContain("in bridge");
+
+    // Clicking a disabled radio must not select it — Send stays disabled.
+    fireEvent.click(radio);
+    expect(radio).toHaveAttribute("aria-checked", "false");
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+    expect(sendBtn).toBeDisabled();
+  });
+
+  // 18
+  it("manual_receiver_not_busy_remains_selectable", async () => {
+    // Some other, unrelated terminal is busy — Beta itself is free.
+    const busyTerminalIds = new Map([["term-someone-else", "bridge"]]);
+    const fetchLatestAssistant = vi.fn().mockResolvedValue("Latest assistant text");
+    render(<BridgeModal {...defaultProps({ busyTerminalIds, fetchLatestAssistant })} />);
+
+    const radio = screen.getByRole("radio");
+    expect(radio).not.toBeDisabled();
+    fireEvent.click(radio);
+    expect(radio).toHaveAttribute("aria-checked", "true");
+
+    // Selecting a receiver triggers the async "fetch latest reply" effect —
+    // await it so the resulting state update happens inside act().
+    await waitFor(() => expect(fetchLatestAssistant).toHaveBeenCalledTimes(1));
+  });
+
+  // 19
+  it("channel_lead_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
+    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "channel"]]);
+    render(
+      <BridgeModal
+        {...defaultProps({
+          allSessions: [FROM_SESSION, PEER_SESSION, THIRD_SESSION],
+          onStartChannel: vi.fn(),
+          busyTerminalIds,
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: /channel/i }));
+
+    const leadRadios = screen.getAllByRole("radio", { name: /Beta|Zeta/i });
+    const betaRadio = leadRadios.find((r) => r.textContent.includes("Beta"));
+    const zetaRadio = leadRadios.find((r) => r.textContent.includes("Zeta"));
+
+    expect(betaRadio).toBeDisabled();
+    expect(betaRadio.textContent.toLowerCase()).toContain("in channel");
+    expect(zetaRadio).not.toBeDisabled();
+
+    // Clicking the disabled (busy) lead candidate must not select it.
+    fireEvent.click(betaRadio);
+    expect(betaRadio).toHaveAttribute("aria-checked", "false");
+
+    // Worker section still prompts to pick a lead first — nothing got selected.
+    expect(screen.getByText(/select a lead session first/i)).toBeInTheDocument();
+  });
+
+  // 20
+  it("channel_worker_busy_session_renders_disabled_with_hint_and_is_unselectable", () => {
+    const busyTerminalIds = new Map([[PEER_SESSION.terminalId, "channel"]]);
+    render(
+      <BridgeModal
+        {...defaultProps({
+          allSessions: [FROM_SESSION, PEER_SESSION, THIRD_SESSION],
+          onStartChannel: vi.fn(),
+          busyTerminalIds,
+        })}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: /channel/i }));
+
+    // Pick the non-busy session (Zeta) as lead so the worker list renders.
+    const leadRadios = screen.getAllByRole("radio", { name: /Beta|Zeta/i });
+    const zetaLeadRadio = leadRadios.find((r) => r.textContent.includes("Zeta"));
+    fireEvent.click(zetaLeadRadio);
+
+    const workerCheckboxes = screen.getAllByRole("checkbox");
+    const betaWorkerCheckbox = workerCheckboxes.find((c) => c.textContent.includes("Beta"));
+
+    expect(betaWorkerCheckbox).toBeDisabled();
+    expect(betaWorkerCheckbox.textContent.toLowerCase()).toContain("in channel");
+
+    fireEvent.click(betaWorkerCheckbox);
+    expect(betaWorkerCheckbox).toHaveAttribute("aria-checked", "false");
   });
 });

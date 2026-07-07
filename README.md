@@ -223,7 +223,7 @@ Claude sessions inside Cockpit automatically use any [MCP servers](https://model
 Copy `web/.env.example` to `web/.env`:
 
 ```env
-HOST=0.0.0.0
+HOST=127.0.0.1
 PORT=8420
 MAX_SESSIONS=8
 IDLE_TIMEOUT=0
@@ -233,7 +233,7 @@ IDLE_TIMEOUT=0
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HOST` | `0.0.0.0` | Bind address |
+| `HOST` | `127.0.0.1` | Bind address. The server has no authentication — it binds localhost only by default. Set to `0.0.0.0` to allow access from other devices on your network (a startup warning is logged). |
 | `PORT` | `8420` | Server port |
 | `MAX_SESSIONS` | `8` | Maximum concurrent sessions |
 | `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |

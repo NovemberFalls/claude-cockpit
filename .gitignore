@@ -17,6 +17,7 @@ credentials*.json
 .tauri/
 
 # Node
+node_modules/
 web/frontend/node_modules/
 
 # Tauri build artifacts
@@ -46,6 +47,10 @@ releases/
 web/dist/
 web/build/
 web/.cockpit.pid
+web/.cockpit-child-pids
 
 # Reaper hygiene-tool incremental review cache
 .reaper/
+
+# Local build/release artifact downloads (not project-relative Downloads folder)
+downloads/

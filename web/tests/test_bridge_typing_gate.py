@@ -16,7 +16,6 @@ Tests:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import os
 import time
@@ -30,7 +29,7 @@ import logging_config
 logging_config.setup("WARNING")
 
 import bridge_manager as bm_module
-from bridge_manager import _wait_for_idle_simple, _wait_for_idle, _BridgeRecord, _TYPING_QUIET_WINDOW
+from bridge_manager import _wait_for_idle_simple, _wait_for_idle, _BridgeRecord
 
 
 # ---------------------------------------------------------------------------

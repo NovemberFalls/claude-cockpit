@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -173,6 +172,7 @@ async def tail_jsonl(
     filepath: str,
     from_beginning: bool = True,
     poll_interval: float = 0.3,
+    start_offset: int | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Async generator that tails a JSONL file and yields parsed messages.
 
@@ -180,6 +180,18 @@ async def tail_jsonl(
         filepath: Path to the JSONL file to watch.
         from_beginning: If True, read all existing entries first. If False, start from end.
         poll_interval: Seconds between file polls.
+        start_offset: When *from_beginning* is False, use this byte offset as the
+            initial tail position instead of stat-ing the file size at the moment
+            iteration begins. Async generators are lazy — the body of this function
+            does not run until the caller starts iterating, which can happen well
+            after the caller decided to watch the file (e.g. bridge_manager injects
+            a kickoff prompt, THEN creates the watcher task). If the watched process
+            appends a new entry in that gap, a bare ``from_beginning=False`` would
+            silently skip it because ``offset = path.stat().st_size`` is taken too
+            late. Callers that need race-free tailing should snapshot the file size
+            (0 if the file doesn't exist yet) BEFORE triggering whatever might
+            produce new content, then pass that snapshot here. Defaults to None,
+            which preserves the original stat-at-discovery behavior.
 
     Yields:
         Parsed message dicts (see parse_jsonl_entry).
@@ -210,6 +222,8 @@ async def tail_jsonl(
                 offset = f.tell()
         except Exception:
             logger.debug("Error reading JSONL: %s", filepath, exc_info=True)
+    elif start_offset is not None:
+        offset = start_offset
     else:
         try:
             offset = path.stat().st_size

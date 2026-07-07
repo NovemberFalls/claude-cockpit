@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import settings_store
+
 logger = logging.getLogger("cockpit.pty")
 
 # Inter-chunk delay for large PTY writes.  ConPTY's input pipe buffer is
@@ -70,7 +72,7 @@ class SessionStateTracker:
         combined = self._line_fragment + clean
         lines = combined.split("\n")
         self._line_fragment = lines[-1]
-        complete = [l for l in lines[:-1] if l.strip()]
+        complete = [line for line in lines[:-1] if line.strip()]
         if complete:
             self.output_lines.extend(complete)
 
@@ -139,6 +141,7 @@ class TerminalSession:
     pty: Any  # winpty.PtyProcess or conpty.PtyProcess
     created_at: str
     model: str = "sonnet"
+    provider: str = "anthropic"  # "anthropic" | "openrouter" — for display + reroute detection
     working_dir: str = ""
     claude_session_id: Optional[str] = None  # for --resume
     bypass_permissions: bool = False
@@ -186,6 +189,19 @@ _ALLOWED_EFFORT_LEVELS = {"", "low", "medium", "high", "xhigh", "max"}
 
 # Claude session ID format: hex or UUID-style
 _SESSION_ID_RE = re.compile(r"^[a-f0-9\-]{8,64}$", re.IGNORECASE)
+
+# Allowed providers — "anthropic" (default, official Claude API/subscription)
+# or "openrouter" (reroutes the session through OpenRouter's Anthropic-compatible
+# endpoint via env vars; see create_terminal()).
+_ALLOWED_PROVIDERS = {"anthropic", "openrouter"}
+
+# OpenRouter model slug format: "<vendor>/<model>", e.g. "qwen/qwen3-coder-next"
+# or "anthropic/claude-3.7-sonnet:beta". Vendor segment must start with an
+# alnum char (lowercase enforced upstream by OpenRouter's own catalog); model
+# segment additionally allows ":" for variant suffixes like ":free"/":beta".
+# The slug is only ever placed into env vars (ANTHROPIC_MODEL), never the cmd
+# string, but it is validated anyway as defense in depth.
+_OPENROUTER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-\.]*\/[a-z0-9][a-z0-9\-\.:]*$")
 
 
 class PtyManager:
@@ -273,6 +289,7 @@ class PtyManager:
                 else:
                     logger.debug("PID %d reused by '%s' — skipping", pid, proc.name())
             except (psutil.NoSuchProcess, psutil.AccessDenied):
+                logger.debug("PID %d gone or inaccessible during orphan cleanup — skipping", pid, exc_info=True)
                 continue
 
         self._clear_child_pids()
@@ -341,11 +358,11 @@ class PtyManager:
                         proc.cpu_percent(interval=None)  # Prime (non-blocking)
                         pid_procs[tid] = proc
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                        logger.debug("Child PID for session %s gone or inaccessible during CPU priming", tid, exc_info=True)
             if pid_procs:
                 time.sleep(0.1)  # Single sleep for all sessions
         except ImportError:
-            pass
+            logger.warning("psutil not installed — skipping CPU-based idle sparing")
 
         to_kill = []
         for tid, elapsed in candidates:
@@ -357,7 +374,7 @@ class PtyManager:
                         logger.debug("Session %s idle %.0fs but CPU %.1f%% — sparing", tid, elapsed, cpu)
                         continue
                 except Exception:
-                    pass
+                    logger.debug("CPU check failed for session %s — treating as idle", tid, exc_info=True)
             to_kill.append(tid)
 
         for tid in to_kill:
@@ -378,6 +395,8 @@ class PtyManager:
         name: str = "",
         workdir: str = "",
         model: str = "sonnet",
+        provider: str = "anthropic",
+        provider_model: str = "",
         resume_session_id: str = "",
         continue_last: bool = False,
         bypass_permissions: bool = False,
@@ -387,13 +406,49 @@ class PtyManager:
         cols: int = 120,
         rows: int = 30,
     ) -> TerminalSession:
-        """Spawn a new interactive Claude CLI session in a PTY."""
+        """Spawn a new interactive Claude CLI session in a PTY.
+
+        provider selects which backend the spawned ``claude`` CLI talks to:
+          - "anthropic" (default): official Claude API/subscription, unchanged
+            behavior. ``model`` is validated against ``_ALLOWED_MODELS`` and
+            passed via ``--model``.
+          - "openrouter": reroutes the session through OpenRouter's
+            Anthropic-compatible endpoint. ``provider_model`` (an OpenRouter
+            slug, e.g. "qwen/qwen3-coder-next") is REQUIRED and becomes the
+            session's effective model via the ANTHROPIC_MODEL env var —
+            OpenRouter slugs are not valid ``--model`` values, so ``--model``
+            is omitted entirely and the ``model`` param is ignored (it is
+            not even allowlist-validated for this provider).
+        """
         if len(self.sessions) >= MAX_SESSIONS:
             raise RuntimeError(f"Maximum session limit ({MAX_SESSIONS}) reached")
 
-        # Validate model to prevent command injection (e.g. "sonnet --dangerously-skip-permissions")
-        if model not in _ALLOWED_MODELS:
-            raise ValueError(f"Invalid model: {model!r}")
+        # Validate provider against the allowlist before anything else — every
+        # branch below depends on knowing which provider we're spawning for.
+        if provider not in _ALLOWED_PROVIDERS:
+            raise ValueError(f"Invalid provider: {provider!r}")
+
+        openrouter_key: Optional[str] = None
+        if provider == "openrouter":
+            if not provider_model:
+                raise ValueError("provider_model is required when provider='openrouter'")
+            # Validated even though the slug only ever reaches env vars (never
+            # the cmd string) — defense in depth against a malformed value
+            # landing in ANTHROPIC_MODEL.
+            if not _OPENROUTER_SLUG_RE.match(provider_model):
+                raise ValueError(f"Invalid provider_model slug: {provider_model!r}")
+            openrouter_key, _key_source = settings_store.resolve_openrouter_key()
+            if not openrouter_key:
+                raise ValueError(
+                    "OpenRouter key not configured — add one via the key icon "
+                    "in the top bar or set OPENROUTER_API_KEY"
+                )
+        else:
+            # Validate model to prevent command injection (e.g. "sonnet --dangerously-skip-permissions").
+            # Skipped for provider="openrouter": model selection there rides
+            # ANTHROPIC_MODEL (see above), not this allowlist/--model flag.
+            if model not in _ALLOWED_MODELS:
+                raise ValueError(f"Invalid model: {model!r}")
 
         # Validate permission_mode against allowlist — value is interpolated into the cmd string.
         if permission_mode not in _ALLOWED_PERMISSION_MODES:
@@ -417,6 +472,14 @@ class PtyManager:
         # 1. Remove Claude Code markers (avoids "inside another session" error)
         # 2. Remove PyInstaller artifacts (avoids DLL conflicts)
         blocked_keys = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+        if provider != "openrouter":
+            # A machine-global OpenRouter config (e.g. exported in the user's
+            # shell profile for other tools, or left behind by a previous
+            # openrouter-provider session's parent shell) must never leak into
+            # an anthropic-provider pane and silently reroute a paid Claude
+            # subscription session onto OpenRouter's endpoint. openrouter-
+            # provider sessions set these two vars explicitly below instead.
+            blocked_keys |= {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
         pyi_prefixes = ("_PYI", "_MEI")
         env = {}
         for k, v in os.environ.items():
@@ -436,6 +499,16 @@ class PtyManager:
         # 10000-line scrollback. It affects only cockpit-spawned sessions; the
         # user's native-terminal TUI preference is left untouched.
         env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+
+        # Suppress Claude Code's built-in auto-updater. With up to MAX_SESSIONS
+        # (default 8) concurrent cockpit-spawned `claude` processes all holding
+        # a handle on the same claude.exe, the updater can never win the file
+        # replace and every session logs "Auto-update failed: claude.exe in
+        # use...". The update itself is harmless to skip here — the user is
+        # expected to update Claude Code manually (outside cockpit) when a new
+        # version ships. Scoped to this child's env dict only; does not touch
+        # the running cockpit server's own os.environ.
+        env["DISABLE_AUTOUPDATER"] = "1"
 
         import sys as _sys
         meipass = getattr(_sys, "_MEIPASS", None)
@@ -480,6 +553,24 @@ class PtyManager:
                 current_path = os.pathsep.join(prepend) + os.pathsep + current_path
         env["PATH"] = current_path
 
+        if provider == "openrouter":
+            # Reroute this session's `claude` CLI onto OpenRouter's Anthropic-
+            # compatible endpoint. ANTHROPIC_API_KEY is explicitly cleared so
+            # the CLI can't fall back to a real Anthropic key that happens to
+            # be set in the parent environment — ANTHROPIC_AUTH_TOKEN is the
+            # only credential the CLI should see for this session.
+            env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
+            env["ANTHROPIC_AUTH_TOKEN"] = openrouter_key
+            env["ANTHROPIC_API_KEY"] = ""
+            env["ANTHROPIC_MODEL"] = provider_model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = "qwen/qwen3-coder-next"
+            # NEVER log the key itself — var names only.
+            logger.info(
+                "OpenRouter provider: set env vars %s",
+                ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                 "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"],
+            )
+
         # Build the command
         import shutil
 
@@ -493,7 +584,13 @@ class PtyManager:
         if os.path.isdir(jsonl_dir):
             pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
 
-        cmd = f"claude --model {model}"
+        if provider == "openrouter":
+            # OpenRouter model slugs (e.g. "qwen/qwen3-coder-next") are not
+            # valid --model values for the claude CLI — model selection rides
+            # ANTHROPIC_MODEL (set above) instead. --model is omitted entirely.
+            cmd = "claude"
+        else:
+            cmd = f"claude --model {model}"
         if resume_session_id:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
@@ -511,7 +608,10 @@ class PtyManager:
             cmd += f" --permission-mode {permission_mode}"
 
         # Effort level: empty string means "use model default" (no flag appended).
-        if effort:
+        # Skipped entirely for openrouter — foreign models don't support --effort.
+        if effort and provider == "openrouter":
+            logger.info("Effort level %r requested but skipped — not supported for provider=openrouter", effort)
+        elif effort:
             # Value is allowlist-validated above — safe to interpolate.
             cmd += f" --effort {effort}"
 
@@ -522,8 +622,11 @@ class PtyManager:
         # ConPTY/winpty where inline braces/quotes are mangled by the shell.
         # Gate: fast mode is only available for Opus models. The /fast toggle in the TUI
         # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
+        # Also skipped entirely for openrouter — foreign models don't support fast mode.
         _fast_settings_path: Optional[str] = None
-        if fast and "opus" in model.lower():
+        if fast and provider == "openrouter":
+            logger.info("Fast mode requested but skipped — not supported for provider=openrouter")
+        elif fast and "opus" in model.lower():
             import json as _json
             import tempfile as _tempfile
             try:
@@ -593,12 +696,18 @@ class PtyManager:
         # Post-spawn health check is deferred to the async caller (server.py)
         # so it can use asyncio.sleep() without blocking the event loop.
 
+        # Display model: for openrouter, `model` is ignored entirely (never
+        # allowlist-validated, never passed as --model) — the session's
+        # effective/displayed model is the OpenRouter slug instead.
+        display_model = provider_model if provider == "openrouter" else model
+
         session = TerminalSession(
             id=terminal_id,
             name=name,
             pty=pty_process,
             created_at=datetime.now(timezone.utc).isoformat(),
-            model=model,
+            model=display_model,
+            provider=provider,
             working_dir=workdir,
             claude_session_id=resume_session_id or None,
             bypass_permissions=effective_bypass,
@@ -662,15 +771,22 @@ class PtyManager:
         """Kill a process and all its descendants (for pywinpty mode)."""
         try:
             import psutil
+        except ImportError:
+            # psutil is unbound here — must not be referenced in this except's
+            # exception tuple (that would raise NameError and mask the real
+            # error). Handle the missing-dependency case in its own clause.
+            logger.debug("psutil unavailable — skipping process tree kill for PID %d", pid, exc_info=True)
+            return
+        try:
             parent = psutil.Process(pid)
             children = parent.children(recursive=True)
             for child in children:
                 try:
                     child.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except (ImportError, psutil.NoSuchProcess):
-            pass
+                    logger.debug("Child process %s already gone or inaccessible during tree kill", child, exc_info=True)
+        except psutil.NoSuchProcess:
+            logger.debug("Parent process gone — skipping process tree kill for PID %d", pid, exc_info=True)
 
     def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> bool:
         """Resize a terminal's PTY dimensions."""
@@ -732,6 +848,37 @@ class PtyManager:
         # terminal mode — chat mode requires a discoverable JSONL file.
         return None
 
+    def _session_to_dict(self, session: TerminalSession) -> dict:
+        """Build the REST-facing dict for a single session.
+
+        Shared by ``list_terminals`` (bulk) and single-terminal callers (e.g.
+        the PATCH rename route in server.py, which echoes the updated record
+        back to the caller) so the shape never drifts between the two.
+        """
+        alive = session.pty.isalive()
+        if not alive:
+            session.alive = False
+        else:
+            session.tracker.tick()
+        return {
+            "id": session.id,
+            "name": session.name,
+            "model": session.model,
+            "provider": session.provider,
+            "created_at": session.created_at,
+            "working_dir": session.working_dir,
+            "claude_session_id": session.claude_session_id,
+            "jsonl_path": self._get_jsonl_path(session),
+            "bypass_permissions": session.bypass_permissions,
+            "cols": session.cols,
+            "rows": session.rows,
+            "alive": alive,
+            "activity_state": session.tracker.state,
+            "tokens": session.tracker.total_tokens,
+            "cost": session.tracker.total_cost,
+            "context_percent": session.tracker.context_percent,
+        }
+
     def list_terminals(self) -> list[dict]:
         """List all terminals, marking dead ones but NOT removing them.
 
@@ -739,31 +886,29 @@ class PtyManager:
         (e.g. the post-spawn health check) can still find them.  They are
         cleaned up by explicit ``kill_terminal`` or ``cleanup_idle_sessions``.
         """
-        result = []
-        for tid, session in self.sessions.items():
-            alive = session.pty.isalive()
-            if not alive:
-                session.alive = False
-            else:
-                session.tracker.tick()
-            result.append({
-                "id": session.id,
-                "name": session.name,
-                "model": session.model,
-                "created_at": session.created_at,
-                "working_dir": session.working_dir,
-                "claude_session_id": session.claude_session_id,
-                "jsonl_path": self._get_jsonl_path(session),
-                "bypass_permissions": session.bypass_permissions,
-                "cols": session.cols,
-                "rows": session.rows,
-                "alive": alive,
-                "activity_state": session.tracker.state,
-                "tokens": session.tracker.total_tokens,
-                "cost": session.tracker.total_cost,
-                "context_percent": session.tracker.context_percent,
-            })
-        return result
+        return [self._session_to_dict(session) for session in self.sessions.values()]
+
+    def rename_terminal(self, terminal_id: str, name: str) -> Optional[TerminalSession]:
+        """Rename a terminal's Cockpit-side display name.
+
+        This does NOT touch the underlying Claude Code session — it only
+        updates the label shown in the Cockpit UI (``GET /api/terminals``).
+        Callers that also want to sync the name into the Claude Code session
+        itself (via the ``/rename`` slash command) do so separately after
+        this call succeeds — see server.py's PATCH /api/terminals/{id} route.
+
+        Concurrency: plain string attribute assignment on a dataclass is
+        atomic under the GIL (single reassignment, not an in-place mutation),
+        matching the existing pattern used by ``resize_terminal`` for
+        ``session.cols``/``session.rows``. No additional lock is needed.
+
+        Returns the updated session, or None if *terminal_id* is unknown.
+        """
+        session = self.sessions.get(terminal_id)
+        if session is None:
+            return None
+        session.name = name
+        return session
 
     def get_terminal(self, terminal_id: str) -> Optional[TerminalSession]:
         """Get a terminal session by ID."""

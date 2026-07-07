@@ -19,7 +19,7 @@ import re
 import sys
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -98,7 +98,7 @@ def patch_pty(monkeypatch, from_session, to_session):
 
 def _async_gen_from_list(entries: list[dict]):
     """Return an async generator that yields items from *entries* then returns."""
-    async def _gen(path, from_beginning=False):
+    async def _gen(path, from_beginning=False, **kwargs):
         for entry in entries:
             yield entry
     return _gen
@@ -216,7 +216,7 @@ async def test_start_manual_default_prefix_when_none(bm, patch_pty, from_session
 async def test_start_auto_returns_bridge_id(bm, patch_pty, from_session, to_session, monkeypatch):
     """start_auto returns {ok: True, bridge_id: <12-char hex>} when both sessions are live."""
     # Stub tail_jsonl so relay tasks don't spin forever
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(10)
         return
         yield  # make it an async generator
@@ -269,7 +269,7 @@ async def test_start_auto_no_jsonl_still_starts(bm, monkeypatch, from_session, t
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
 
     # Stub tail_jsonl so relay tasks don't spin forever waiting for JSONL
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(3600)
         return
         yield
@@ -333,7 +333,7 @@ async def test_start_auto_dead_session_returns_error(bm, monkeypatch, from_sessi
 @pytest.mark.asyncio
 async def test_start_auto_kicks_off_both_sides(bm, patch_pty, from_session, to_session, monkeypatch):
     """start_auto sends one kickoff write to each session."""
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(10)
         return
         yield
@@ -377,7 +377,7 @@ async def test_stop_existing_bridge_returns_true_and_marks_ended_user(
     bm, patch_pty, from_session, to_session, monkeypatch
 ):
     """stop() on an active bridge returns True and sets state='ended_user'."""
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(10)
         return
         yield
@@ -414,7 +414,7 @@ def test_stop_unknown_bridge_returns_false(bm):
 @pytest.mark.asyncio
 async def test_stop_already_ended_idempotent(bm, patch_pty, from_session, to_session, monkeypatch):
     """Calling stop() twice on the same bridge both return True."""
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(10)
         return
         yield
@@ -441,7 +441,7 @@ async def test_stop_already_ended_idempotent(bm, patch_pty, from_session, to_ses
 @pytest.mark.asyncio
 async def test_list_active_shape(bm, patch_pty, from_session, to_session, monkeypatch):
     """list_active() returns dicts with all required keys."""
-    async def never_yield(path, from_beginning=False):
+    async def never_yield(path, from_beginning=False, **kwargs):
         await asyncio.sleep(10)
         return
         yield
@@ -510,7 +510,7 @@ async def test_sentinel_in_relay_text_ends_bridge(bm, monkeypatch, from_session,
 
     call_count = {"from": 0, "to": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         # Only yield from the from_session path; to_session path hangs
         if "fake" in path:
             # Distinguish by call order
@@ -544,9 +544,8 @@ async def test_sentinel_in_relay_text_ends_bridge(bm, monkeypatch, from_session,
     record = bm._bridges[bid]
     assert record.state == "ended_sentinel", f"Expected ended_sentinel, got {record.state}"
 
-    # The message was delivered: at least one relay write happened (beyond the two kickoffs)
-    relay_writes = [(t, d) for t, d in write_calls if _BP_START in d and "BRIDGE-DONE" not in d or "PEER REPLY" in d]
-    # At minimum the kickoff writes (2) plus the relay write (1)
+    # The message was delivered: at least one relay write happened (beyond the two kickoffs).
+    # At minimum the kickoff writes (2) plus the relay write (1).
     assert len(write_calls) >= 3
 
 
@@ -577,7 +576,7 @@ async def test_turn_cap_ends_bridge(bm, monkeypatch, from_session, to_session):
 
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         for entry in single_entry:
             yield entry
@@ -648,7 +647,7 @@ async def test_idle_gate_dead_peer_errors_bridge(bm, monkeypatch, from_session, 
     monkeypatch.setattr(bm_module.pty_manager, "write_pty_async", fake_write)
 
     # from_session tails one entry, triggering an inject into the (soon-dead) peer
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["tail"] += 1
         if call_idx["tail"] == 1:
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
@@ -700,7 +699,7 @@ async def test_idle_gate_busy_alive_peer_is_skipped_not_errored(bm, monkeypatch,
 
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         if call_idx["n"] == 1:
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
@@ -798,7 +797,7 @@ async def _cancel_channel_tasks(record: _ChannelRecord):
 # ---------------------------------------------------------------------------
 
 
-async def _never_yield(path, from_beginning=False):
+async def _never_yield(path, from_beginning=False, **kwargs):
     """Async generator that hangs forever without yielding anything."""
     await asyncio.sleep(3600)
     return
@@ -1172,7 +1171,7 @@ async def test_channel_worker_relay_targets_lead_only(monkeypatch):
     # then lead last in ChannelManager.start).
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         current = call_idx["n"]
         if current == 1:
@@ -1231,7 +1230,7 @@ async def test_channel_lead_relay_targets_all_workers(monkeypatch):
     # We want only the lead task (third call) to yield an entry.
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         current = call_idx["n"]
         if current == 3:
@@ -1284,7 +1283,7 @@ async def test_channel_sentinel_from_worker_ends_channel(monkeypatch):
 
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         current = call_idx["n"]
         if current == 1:
@@ -1338,7 +1337,7 @@ async def test_channel_turn_cap_ends_channel(monkeypatch):
     # will increment turns_used to 1 and hit the cap.
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         yield {
             "type": "assistant",
@@ -1615,7 +1614,8 @@ async def test_inject_large_payload_uses_file_handoff(monkeypatch, from_session,
 # ---------------------------------------------------------------------------
 
 
-def test_relay_file_gc_deletes_stale_files():
+@pytest.mark.asyncio
+async def test_relay_file_gc_deletes_stale_files():
     """_maybe_file_handoff's opportunistic GC deletes files whose mtime is older
     than _RELAY_FILE_MAX_AGE seconds.
 
@@ -1630,6 +1630,10 @@ def test_relay_file_gc_deletes_stale_files():
     `now - st_mtime` is deeply negative and never exceeds _RELAY_FILE_MAX_AGE.
     With time.time(), the backdated mtime produces a positive age well above
     the TTL, and the file is correctly deleted.
+
+    Note: _maybe_file_handoff is async (it wraps its blocking file I/O in
+    asyncio.to_thread — see bridge_manager fix "blocking I/O on the event
+    loop"), so this test must be async and await the call.
     """
     # Plant a stale file directly in the module-level relay dir.
     stale = bm_module._RELAY_DIR / "stale_relay.txt"
@@ -1641,7 +1645,7 @@ def test_relay_file_gc_deletes_stale_files():
 
     # Trigger the opportunistic GC by calling _maybe_file_handoff with a
     # payload that exceeds the inline threshold (> 2048 bytes).
-    bm_module._maybe_file_handoff("A" * 3000, peer_name=None)
+    await bm_module._maybe_file_handoff("A" * 3000, peer_name=None)
 
     # The stale file must have been deleted.
     assert not stale.exists(), (

@@ -9,8 +9,6 @@ These tests exercise the contract directly on TerminalSession and the queue-drai
 logic without requiring a real PTY or a live WebSocket connection.
 """
 
-import asyncio
-
 import pytest
 
 import logging_config
@@ -181,9 +179,8 @@ async def test_dead_session_banner_not_sent_by_superseded_forwarder():
     """
     session = make_session(alive=True)
 
-    # First WS connects
+    # First WS connects (its captured generation, 1, is now stale)
     session.active_consumer += 1
-    my_gen_stale = session.active_consumer  # == 1
 
     # Second WS supersedes
     session.active_consumer += 1

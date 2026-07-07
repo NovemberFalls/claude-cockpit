@@ -722,7 +722,10 @@ class PtyProcess:
                         self._cleanup()
                         return
             except Exception:
-                pass
+                import logging
+                logging.getLogger("cockpit.pty").debug(
+                    "Graceful terminate (Ctrl+C) failed — falling back to force kill", exc_info=True,
+                )
         # Kill entire process tree via Job Object (cmd.exe + node.exe + children)
         if self._job:
             kernel32.TerminateJobObject(self._job, 1)
@@ -763,4 +766,5 @@ class PtyProcess:
         try:
             self._cleanup()
         except Exception:
-            pass
+            import logging
+            logging.getLogger("cockpit.pty").debug("Cleanup failed in __del__", exc_info=True)

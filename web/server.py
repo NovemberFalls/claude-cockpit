@@ -15,6 +15,7 @@ import tempfile
 import time as _time
 import uuid
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,23 +23,108 @@ from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.requests import Request
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 load_dotenv()
 
-import logging_config
+import logging_config  # noqa: E402 -- deliberately imported after load_dotenv() so logging is configured before any other cockpit module is imported
 logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
-from pty_manager import pty_manager
-from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir
+from pty_manager import pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
+# _wait_for_idle_simple / _wrap are underscore-prefixed (bridge_manager treats
+# them as internal helpers), but they are exactly the typing-quiet + idle gate
+# and bracketed-paste injection mechanics the CLI-actions routes below need
+# (PATCH rename sync, POST command). Reusing them here avoids re-implementing
+# proven injection machinery — see bridge_manager.py's V1 manual relay for the
+# same pattern.
+from bridge_manager import _wait_for_idle_simple, _wrap  # noqa: E402
+import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
 
 START_TIME = _time.time()
+
+
+# NOTE on definition order: `lifespan` must exist before the `FastAPI(...)`
+# call below since it is passed in as a constructor argument. Its BODY,
+# however, references module-level names defined further down this file
+# (PID_FILE, UPLOAD_DIR) — that is safe because Python resolves names inside
+# a function body lazily, at call time, not at definition time. uvicorn only
+# invokes this context manager after the entire module has finished
+# importing (from main()), by which point every module-level name below is
+# already bound.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle, replacing the deprecated
+    ``@app.on_event("startup"/"shutdown")`` decorators.
+    """
+    # ---- Startup ----
+    # 1. Clean up orphaned processes from previous crashes
+    pty_manager.cleanup_orphans()
+
+    # 2. PID file for crash detection
+    try:
+        import psutil
+        if PID_FILE.exists():
+            old_pid = int(PID_FILE.read_text().strip())
+            if psutil.pid_exists(old_pid):
+                logger.warning("Another cockpit instance may be running (PID %d)", old_pid)
+            else:
+                logger.info("Previous instance (PID %d) crashed — cleaned up", old_pid)
+    except Exception:
+        logger.debug("Crash-detection PID check failed — continuing startup", exc_info=True)
+    PID_FILE.write_text(str(os.getpid()))
+
+    # 3. Start idle session cleanup loop (tracked for graceful shutdown)
+    async def idle_cleanup_loop():
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                await asyncio.sleep(60)
+                # Run in executor: cleanup_idle_sessions uses time.sleep(0.1)
+                # for the two-pass CPU check — keeps the event loop unblocked.
+                await loop.run_in_executor(None, pty_manager.cleanup_idle_sessions)
+        except asyncio.CancelledError:
+            pass
+    app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
+
+    # 4. Start background state ticker — calls tick() on every live session
+    # every ~1s so SessionStateTracker.state is authoritative independent of
+    # frontend polling.  The bridge idle gate depends on this for correctness.
+    pty_manager.start_state_ticker()
+
+    logger.info("Startup complete (PID %d)", os.getpid())
+
+    yield
+
+    # ---- Shutdown ----
+    # Cancel idle cleanup loop
+    cleanup_task = getattr(app.state, "idle_cleanup_task", None)
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop the background state ticker
+    await pty_manager.stop_state_ticker()
+
+    logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
+    pty_manager.shutdown()
+    logger.info("Shutdown: cleaning upload dir...")
+    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    logger.info("Shutdown: cleaning relay dir...")
+    cleanup_relay_dir()
+    PID_FILE.unlink(missing_ok=True)
+    logger.info("Shutdown complete")
+
 
 app = FastAPI(
     title="Claude Cockpit Web",
     description="Multi-session Claude CLI terminal manager",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS: allow Tauri webview origins + Vite dev server
@@ -50,7 +136,7 @@ app.add_middleware(
         "http://localhost:5174",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -189,7 +275,7 @@ async def clear_upload_dir(keep: int = 10):
                 f.unlink()
                 deleted += 1
             except OSError:
-                pass
+                logger.debug("Failed to delete upload file %s during cleanup", f, exc_info=True)
         _upload_dir_size = sum(f.stat().st_size for f in UPLOAD_DIR.iterdir())
     return JSONResponse({"deleted": deleted, "kept": len(files) - deleted, "quota_bytes": _upload_dir_size})
 
@@ -271,7 +357,7 @@ async def git_status(path: str):
             ["git", "status", "--porcelain"],
             cwd=str(target), capture_output=True, text=True, timeout=5,
         )
-        lines = [l for l in status_result.stdout.strip().split("\n") if l.strip()]
+        lines = [line for line in status_result.stdout.strip().split("\n") if line.strip()]
         dirty = len(lines) > 0
 
         return JSONResponse({
@@ -370,6 +456,8 @@ async def create_terminal(request: Request):
     name = body.get("name", "")
     workdir = body.get("workdir", str(Path.cwd()))
     model = body.get("model", "sonnet")
+    provider = body.get("provider", "anthropic")
+    provider_model = body.get("providerModel", "")
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
     bypass_permissions = body.get("bypassPermissions", False)
@@ -384,6 +472,8 @@ async def create_terminal(request: Request):
             name=name,
             workdir=workdir,
             model=model,
+            provider=provider,
+            provider_model=provider_model,
             resume_session_id=resume_id,
             continue_last=continue_last,
             bypass_permissions=bypass_permissions,
@@ -422,6 +512,7 @@ async def create_terminal(request: Request):
             "id": session.id,
             "name": session.name,
             "model": session.model,
+            "provider": session.provider,
             "created_at": session.created_at,
         })
     except FileNotFoundError:
@@ -448,6 +539,133 @@ async def delete_terminal(terminal_id: str):
     if pty_manager.kill_terminal(terminal_id):
         return JSONResponse({"status": "killed", "id": terminal_id})
     return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+
+# ── Per-Session CLI Actions ──────────────────────────────
+
+# Best-effort cap on how long the Claude-side /rename sync waits for the
+# target session to go typing-quiet + idle. This runs synchronously inside
+# the PATCH request, so it must stay short — the Cockpit-side rename has
+# already succeeded by this point regardless of the outcome.
+_RENAME_SYNC_TIMEOUT = 5.0
+
+# Slash commands the /command route is allowed to inject. Keeps this route
+# from becoming an arbitrary-injection surface beyond the existing /input
+# route — only a curated set of safe, well-understood commands are allowed.
+_ALLOWED_COMMAND_PREFIXES = ("/compact", "/clear", "/rename", "/model", "/fast")
+
+# How long POST /command waits (typing-quiet + idle) before giving up with a
+# 409. Short because this is a synchronous user-triggered action — the caller
+# is waiting on the HTTP response, unlike the V2/V3 bridge's 5-minute patience.
+_COMMAND_GATE_TIMEOUT = 5.0
+
+
+async def _sync_claude_rename(terminal_id: str, name: str) -> bool:
+    """Best-effort: inject ``/rename <name>`` into the live Claude Code session.
+
+    Gated on typing-quiet + idle (capped at _RENAME_SYNC_TIMEOUT) via the same
+    helper bridge_manager's V1 manual relay uses. Any failure — gate timeout,
+    dead session, or PTY write failure — is swallowed and reported back as
+    False. The caller (PATCH /api/terminals/{id}) has already committed the
+    Cockpit-side rename by the time this runs, and that must NOT be rolled
+    back just because the Claude Code sync didn't land.
+    """
+    try:
+        idle = await _wait_for_idle_simple(terminal_id, timeout=_RENAME_SYNC_TIMEOUT)
+        if not idle:
+            return False
+        return bool(await pty_manager.write_pty_async(terminal_id, _wrap(f"/rename {name}")))
+    except Exception:
+        logger.warning("Claude rename sync failed for terminal %s", terminal_id, exc_info=True)
+        return False
+
+
+@app.patch("/api/terminals/{terminal_id}")
+async def rename_terminal_route(terminal_id: str, request: Request):
+    """Rename a Cockpit session, optionally syncing the name into Claude Code.
+
+    Body: {"name": str, "sync_claude": bool=false}
+    The Cockpit-side rename always happens first and always succeeds if the
+    terminal exists and the name validates — sync_claude failure never rolls
+    it back (see _sync_claude_rename).
+    """
+    body = await request.json()
+    name = body.get("name", "")
+    sync_claude = bool(body.get("sync_claude", False))
+
+    if not isinstance(name, str) or not name.strip():
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    name = name.strip()
+    if len(name) > 100:
+        return JSONResponse({"error": "name must be 100 characters or fewer"}, status_code=400)
+
+    session = pty_manager.rename_terminal(terminal_id, name)
+    if session is None:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    claude_synced = False
+    if sync_claude:
+        claude_synced = await _sync_claude_rename(terminal_id, name)
+
+    return JSONResponse({
+        "ok": True,
+        "terminal": pty_manager._session_to_dict(session),
+        "sync_requested": sync_claude,
+        "claude_synced": claude_synced,
+    })
+
+
+@app.post("/api/terminals/{terminal_id}/interrupt")
+async def interrupt_terminal(terminal_id: str):
+    """Immediately send ESC to interrupt a busy generation — no idle/typing gating.
+
+    Deliberately bypasses _wait_for_idle_simple: the whole point of an
+    interrupt is to reach a session that is currently busy.
+    """
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None or not session.alive:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    ok = await pty_manager.write_pty_async(terminal_id, "\x1b")
+    if not ok:
+        return JSONResponse({"error": "Failed to send interrupt"}, status_code=500)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/terminals/{terminal_id}/command")
+async def send_terminal_command(terminal_id: str, request: Request):
+    """Inject an allowlisted slash command as if typed, gated on typing-quiet + idle.
+
+    Body: {"command": str} — must start with "/", be a single line, and
+    start with one of _ALLOWED_COMMAND_PREFIXES.
+    """
+    body = await request.json()
+    command = body.get("command", "")
+
+    if not isinstance(command, str) or not command.startswith("/"):
+        return JSONResponse({"error": "command must start with '/'"}, status_code=400)
+    if "\n" in command or "\r" in command:
+        return JSONResponse({"error": "command must be a single line"}, status_code=400)
+    if len(command) > 500:
+        return JSONResponse({"error": "command must be 500 characters or fewer"}, status_code=400)
+    if not command.startswith(_ALLOWED_COMMAND_PREFIXES):
+        return JSONResponse(
+            {"error": f"command must start with one of: {', '.join(_ALLOWED_COMMAND_PREFIXES)}"},
+            status_code=400,
+        )
+
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None or not session.alive:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    idle = await _wait_for_idle_simple(terminal_id, timeout=_COMMAND_GATE_TIMEOUT)
+    if not idle:
+        return JSONResponse({"ok": False, "error": "Session is busy"}, status_code=409)
+
+    ok = await pty_manager.write_pty_async(terminal_id, _wrap(command))
+    if not ok:
+        return JSONResponse({"ok": False, "error": "PTY write failed"}, status_code=500)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/system")
@@ -484,9 +702,9 @@ async def system_stats():
             proc.kill()
             await proc.wait()
         except (ValueError, IndexError):
-            pass
+            logger.debug("GPU query returned unparseable output", exc_info=True)
     except (FileNotFoundError, OSError):
-        pass
+        logger.debug("nvidia-smi not available", exc_info=True)
     except Exception:
         logger.debug("GPU query failed", exc_info=True)
 
@@ -579,7 +797,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             try:
                 await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
             except Exception:
-                pass
+                logger.debug("Failed to send [Session ended] banner for terminal %s", terminal_id, exc_info=True)
 
     async def heartbeat():
         """Send periodic ping to keep the connection alive."""
@@ -615,7 +833,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                         if ctrl.get("type") == "pong":
                             continue
                     except json.JSONDecodeError:
-                        pass
+                        logger.debug("Malformed WS control message for terminal %s: %r", terminal_id, text)
                 session = pty_manager.get_terminal(terminal_id)
                 if session is not None:
                     session.last_user_input_time = _time.monotonic()
@@ -629,7 +847,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                 await pty_manager.write_pty_async(terminal_id, data.decode("utf-8", errors="replace"))
 
     except WebSocketDisconnect:
-        pass
+        logger.debug("WS client disconnected for terminal %s", terminal_id)
     except Exception:
         logger.warning("WS handler error for terminal %s", terminal_id, exc_info=True)
     finally:
@@ -760,6 +978,19 @@ async def bridge_manual(request: Request):
         return JSONResponse(
             {"ok": False, "error": "Cannot bridge a session to itself"},
             status_code=400,
+        )
+    # Guard: refuse if either session is already enrolled in an active auto
+    # bridge or channel. A manual relay writing into a session whose PTY is
+    # already being driven by an active V2/V3 relay task would interleave
+    # writes to the same input buffer and produce corrupt, unpredictable
+    # output — same rationale as the guard on /api/bridge/auto.
+    active = [b for b in bridge_manager.list_active() if b.get("state") == "active"]
+    busy_ids = {b["from_id"] for b in active} | {b["to_id"] for b in active}
+    busy_ids |= channel_manager.member_ids()
+    if from_id in busy_ids or to_id in busy_ids:
+        return JSONResponse(
+            {"ok": False, "error": "One or both sessions already in an active bridge or channel"},
+            status_code=409,
         )
     result = await bridge_manager.start_manual(from_id, to_id, message, prefix)
     status = 200 if result.get("ok") else 400
@@ -947,6 +1178,90 @@ async def stream_terminal_messages(terminal_id: str, from_beginning: str = "true
     )
 
 
+# ── Markdown Export ───────────────────────────────────────
+
+_EXPORT_FILENAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_export_filename(name: str) -> str:
+    """Convert a session name into a filesystem-safe ASCII slug for Content-Disposition."""
+    ascii_name = name.encode("ascii", "ignore").decode("ascii")
+    sanitized = _EXPORT_FILENAME_UNSAFE_RE.sub("-", ascii_name).strip("-")
+    return sanitized or "session"
+
+
+def _extract_markdown_text(message: dict) -> str:
+    """Join all text/thinking blocks in a parsed jsonl_watcher message into one string.
+
+    Tool-use/tool-result blocks are intentionally omitted here — the export's
+    goal is a readable transcript, not a full tool-call audit trail.
+    """
+    parts: list[str] = []
+    for block in message.get("content", []):
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = block.get("text", "")
+            if text:
+                parts.append(text)
+    return "\n\n".join(parts).strip()
+
+
+def _render_markdown_export(session_name: str, model: str, workdir: str, messages: list[dict]) -> str:
+    """Render a parsed message list as a Markdown transcript.
+
+    Format: H1 session name, one metadata line, then ``## User`` / ``## Assistant``
+    sections in chronological order. Tool-use/tool-result/system noise is skipped
+    (thinking/text blocks are all _extract_markdown_text keeps).
+    """
+    exported_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        f"# {session_name}",
+        "",
+        f"_Model: {model or 'unknown'} · Workdir: {workdir or 'unknown'} · Exported: {exported_at}_",
+        "",
+    ]
+    for message in messages:
+        msg_type = message.get("type")
+        if msg_type not in ("user", "assistant"):
+            continue  # tool_result / system entries are noise for a conversation transcript
+        text = _extract_markdown_text(message)
+        if not text:
+            continue
+        heading = "## User" if msg_type == "user" else "## Assistant"
+        lines.append(heading)
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@app.get("/api/terminals/{terminal_id}/export")
+async def export_terminal_markdown(terminal_id: str):
+    """Render a session's conversation as a downloadable Markdown transcript."""
+    from jsonl_watcher import read_all_messages
+
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+
+    jsonl_path = pty_manager._get_jsonl_path(session)
+    if not jsonl_path:
+        return JSONResponse({"error": "No conversation to export yet"}, status_code=404)
+
+    messages = read_all_messages(jsonl_path)
+    markdown = _render_markdown_export(session.name, session.model, session.working_dir, messages)
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M")
+    filename = f"{_sanitize_export_filename(session.name)}-{timestamp}.md"
+
+    return Response(
+        content=markdown,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Awareness API ────────────────────────────────────────
 
 
@@ -1008,7 +1323,7 @@ def _get_skills(workdir: str) -> list[dict]:
                         desc = stripped[len("description:"):].strip().strip('"').strip("'")
                         break
             except Exception:
-                pass
+                logger.debug("Failed to read skill description: %s", f, exc_info=True)
             skills.append({"name": name, "description": desc, "source": source})
 
     scan_dir(Path(workdir) / ".claude" / "commands", "project")
@@ -1175,6 +1490,7 @@ def _scan_session_file(filepath: Path) -> dict | None:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    logger.debug("Skipping malformed JSONL line in %s", filepath, exc_info=True)
                     continue
 
                 if session_id is None:
@@ -1218,7 +1534,7 @@ def _scan_session_file(filepath: Path) -> dict | None:
             if ts:
                 last_modified_iso = ts
         except json.JSONDecodeError:
-            pass
+            logger.debug("Failed to parse last line of %s for timestamp", filepath, exc_info=True)
 
     if not last_modified_iso:
         # Fall back to file mtime
@@ -1239,7 +1555,7 @@ def _scan_session_file(filepath: Path) -> dict | None:
         else:
             message_count = lines_in_chunk
     except Exception:
-        pass
+        logger.debug("Failed to estimate message count for %s", filepath, exc_info=True)
 
     # Clean command XML tags from the preview text
     if first_user_message:
@@ -1387,6 +1703,132 @@ async def get_history_messages(session_id: str, workdir: str = ""):
     return JSONResponse({"session_id": session_id, "messages": messages})
 
 
+# ── Settings: OpenRouter API Key ─────────────────────────
+
+# Timeout for the live OpenRouter validation call. Generous (well above a
+# normal round-trip) because this runs synchronously inside the POST request
+# and a slow/unreachable OpenRouter must not hang the request indefinitely.
+_OPENROUTER_VALIDATE_TIMEOUT = 15.0
+_OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+
+
+def _validate_openrouter_key(key: str) -> dict:
+    """Synchronously validate *key* against OpenRouter's /credits endpoint.
+
+    This is a BLOCKING call (urllib.request) -- the route handler below runs
+    it via ``await asyncio.to_thread(...)`` so it never blocks the event
+    loop. Kept as a free function (rather than inlined) so tests can
+    monkeypatch it directly instead of exercising the real network.
+
+    Returns a dict with:
+        status: "ok" | "rejected" | "network_error"
+        credits_remaining: float | None (only set when status == "ok")
+
+    The raw key is never included in the return value, and any exception
+    logged here only includes the masked form -- never the key itself.
+    """
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        _OPENROUTER_CREDITS_URL,
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_OPENROUTER_VALIDATE_TIMEOUT) as resp:
+            status_code = resp.getcode()
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"status": "rejected", "credits_remaining": None}
+        logger.warning(
+            "OpenRouter credits check returned unexpected HTTP %d for key %s",
+            e.code, settings_store.mask_key(key),
+        )
+        return {"status": "network_error", "credits_remaining": None}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        logger.warning(
+            "OpenRouter credits check failed for key %s", settings_store.mask_key(key), exc_info=True,
+        )
+        return {"status": "network_error", "credits_remaining": None}
+
+    if status_code != 200:
+        logger.warning(
+            "OpenRouter credits check returned unexpected status %d for key %s",
+            status_code, settings_store.mask_key(key),
+        )
+        return {"status": "network_error", "credits_remaining": None}
+
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    total_credits = data.get("total_credits")
+    total_usage = data.get("total_usage")
+    credits_remaining = None
+    if isinstance(total_credits, (int, float)) and isinstance(total_usage, (int, float)):
+        credits_remaining = total_credits - total_usage
+    return {"status": "ok", "credits_remaining": credits_remaining}
+
+
+@app.get("/api/settings/openrouter")
+async def get_openrouter_settings():
+    """Report whether an OpenRouter key is configured, and from where."""
+    key, source = settings_store.resolve_openrouter_key()
+    return JSONResponse({
+        "configured": key is not None,
+        "source": source,
+        "masked": settings_store.mask_key(key) if key else None,
+    })
+
+
+@app.post("/api/settings/openrouter")
+async def set_openrouter_settings(request: Request):
+    """Validate and persist a user-supplied OpenRouter API key.
+
+    Body: {"key": str}. The key is live-validated against OpenRouter's
+    /credits endpoint before being saved -- an unvalidated key that turns
+    out to be wrong would otherwise silently fail later, deep inside a
+    session's model calls, with much less context than a save-time 400.
+    """
+    body = await request.json()
+    key = body.get("key", "")
+
+    if not isinstance(key, str):
+        return JSONResponse({"ok": False, "error": "key must be a string"}, status_code=400)
+    key = key.strip()
+    if not key:
+        return JSONResponse({"ok": False, "error": "key must not be empty"}, status_code=400)
+    if any(ch.isspace() for ch in key):
+        return JSONResponse({"ok": False, "error": "key must not contain whitespace"}, status_code=400)
+
+    # Blocking network call -- run off the event loop via to_thread. See
+    # _validate_openrouter_key's docstring for why this must never be
+    # awaited/called directly on the loop.
+    result = await asyncio.to_thread(_validate_openrouter_key, key)
+
+    if result["status"] == "ok":
+        settings_store.set_ui_key(key)
+        masked = settings_store.mask_key(key)
+        logger.info("OpenRouter API key saved (masked: %s)", masked)
+        return JSONResponse({
+            "ok": True,
+            "masked": masked,
+            "credits_remaining": result["credits_remaining"],
+        })
+    if result["status"] == "rejected":
+        return JSONResponse({"ok": False, "error": "OpenRouter rejected the key"}, status_code=400)
+    return JSONResponse(
+        {"ok": False, "error": "Could not reach OpenRouter to validate the key"},
+        status_code=502,
+    )
+
+
+@app.delete("/api/settings/openrouter")
+async def delete_openrouter_settings():
+    """Remove the UI-configured OpenRouter key. The env var (if set) may still provide one."""
+    settings_store.delete_ui_key()
+    key, source = settings_store.resolve_openrouter_key()
+    return JSONResponse({"ok": True, "configured": key is not None, "source": source})
+
+
 # ── Static files ─────────────────────────────────────────
 
 
@@ -1421,46 +1863,6 @@ async def frontend_root_files(request: Request):
     return HTMLResponse("Not found", 404)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Clean up orphans, write PID file, start idle cleanup."""
-    # 1. Clean up orphaned processes from previous crashes
-    pty_manager.cleanup_orphans()
-
-    # 2. PID file for crash detection
-    try:
-        import psutil
-        if PID_FILE.exists():
-            old_pid = int(PID_FILE.read_text().strip())
-            if psutil.pid_exists(old_pid):
-                logger.warning("Another cockpit instance may be running (PID %d)", old_pid)
-            else:
-                logger.info("Previous instance (PID %d) crashed — cleaned up", old_pid)
-    except Exception:
-        pass
-    PID_FILE.write_text(str(os.getpid()))
-
-    # 3. Start idle session cleanup loop (tracked for graceful shutdown)
-    async def idle_cleanup_loop():
-        loop = asyncio.get_event_loop()
-        try:
-            while True:
-                await asyncio.sleep(60)
-                # Run in executor: cleanup_idle_sessions uses time.sleep(0.1)
-                # for the two-pass CPU check — keeps the event loop unblocked.
-                await loop.run_in_executor(None, pty_manager.cleanup_idle_sessions)
-        except asyncio.CancelledError:
-            pass
-    app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
-
-    # 4. Start background state ticker — calls tick() on every live session
-    # every ~1s so SessionStateTracker.state is authoritative independent of
-    # frontend polling.  The bridge idle gate depends on this for correctness.
-    pty_manager.start_state_ticker()
-
-    logger.info("Startup complete (PID %d)", os.getpid())
-
-
 @app.post("/api/shutdown")
 async def api_shutdown():
     """Initiate graceful shutdown — called by the auto-updater before replacing the sidecar exe."""
@@ -1469,37 +1871,29 @@ async def api_shutdown():
     return {"status": "shutting down"}
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Graceful shutdown: kill sessions, clean up."""
-    # Cancel idle cleanup loop
-    cleanup_task = getattr(app.state, "idle_cleanup_task", None)
-    if cleanup_task:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop the background state ticker
-    await pty_manager.stop_state_ticker()
-
-    logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
-    pty_manager.shutdown()
-    logger.info("Shutdown: cleaning upload dir...")
-    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-    logger.info("Shutdown: cleaning relay dir...")
-    cleanup_relay_dir()
-    PID_FILE.unlink(missing_ok=True)
-    logger.info("Shutdown complete")
+# Hosts considered loopback-only — anything else means the API (which has no
+# authentication) is reachable from other machines on the LAN.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def main():
     import uvicorn
     port = int(os.getenv("PORT", "8420"))
-    host = os.getenv("HOST", "0.0.0.0")
+    # Default to loopback-only. The server has no authentication, so binding
+    # 0.0.0.0 by default would expose filesystem browse/upload endpoints and
+    # arbitrary process spawn (new PTY sessions run `claude`) to the whole
+    # LAN. HOST still overrides for anyone who explicitly wants that.
+    host = os.getenv("HOST", "127.0.0.1")
     url = f"http://localhost:{port}"
     logger.info("Claude Cockpit -> %s", url)
+    if host not in _LOOPBACK_HOSTS:
+        logger.warning(
+            "Cockpit is binding to %s, which is NOT loopback-only — the API has "
+            "no authentication, so it will be reachable by anyone on the LAN "
+            "(filesystem browse/upload, arbitrary process spawn). Set HOST=127.0.0.1 "
+            "unless you specifically intend to expose it.",
+            host,
+        )
     # Auto-open browser unless suppressed
     if os.getenv("NO_BROWSER", "").lower() not in ("1", "true", "yes"):
         import threading

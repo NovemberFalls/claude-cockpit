@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import logging_config
 logging_config.setup("WARNING")
 
-import pty_manager as pm_module
 from pty_manager import PtyManager, TerminalSession
 
 

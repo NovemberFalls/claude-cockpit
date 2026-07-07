@@ -5,6 +5,11 @@ import StateIcon from "./StateIcon.jsx";
 // ---------------------------------------------------------------------------
 // Preset chips for the custom-message mode
 // ---------------------------------------------------------------------------
+// Stable empty Map identity so callers that don't pass busyTerminalIds (e.g.
+// existing tests) get correct "nothing is busy" behaviour without a fresh
+// object being created on every render.
+const EMPTY_BUSY_MAP = new Map();
+
 const PRESET_CHIPS = [
     {
         label: "Share blast radius",
@@ -32,7 +37,15 @@ function SessionDot({ activityState }) {
 // ---------------------------------------------------------------------------
 // ReceiverList — radio-style list of selectable target sessions
 // ---------------------------------------------------------------------------
-function ReceiverList({ sessions, fromSessionId, selected, onSelect }) {
+function BusyHint({ reason }) {
+    return (
+        <span className="bridge-busy-hint">
+            {reason === "channel" ? "in channel" : "in bridge"}
+        </span>
+    );
+}
+
+function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTerminalIds = EMPTY_BUSY_MAP }) {
     const eligible = sessions.filter(
         (s) =>
             s.id !== fromSessionId &&
@@ -55,14 +68,19 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect }) {
         <div className="flex flex-col gap-1" role="radiogroup" aria-label="Target session">
             {eligible.map((s) => {
                 const isSelected = s.id === selected;
+                const busyReason = busyTerminalIds.get(s.terminalId);
+                const isBusy = Boolean(busyReason);
                 return (
                     <button
                         key={s.id}
                         type="button"
                         role="radio"
                         aria-checked={isSelected}
+                        disabled={isBusy}
                         onClick={() => onSelect(s.id)}
-                        className="flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors hover-bg-surface"
+                        className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
+                            isBusy ? "bridge-session-busy" : "hover-bg-surface"
+                        }`}
                         style={{
                             border: isSelected
                                 ? "1px solid var(--accent)"
@@ -75,6 +93,7 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect }) {
                     >
                         <SessionDot activityState={s.activityState} />
                         <span className="flex-1 truncate">{s.name}</span>
+                        {isBusy && <BusyHint reason={busyReason} />}
                         <span
                             className="text-[10px] truncate"
                             style={{ color: "var(--text-muted)" }}
@@ -118,6 +137,7 @@ export default function BridgeModal({
     open,
     fromSession,
     allSessions,
+    busyTerminalIds = EMPTY_BUSY_MAP,
     onSendManual,
     onStartAuto,
     onStartChannel,
@@ -238,6 +258,16 @@ export default function BridgeModal({
     // After a lead is chosen, workers are the remaining eligible sessions (excluding lead)
     const channelWorkerEligible = channelEligible.filter((s) => s.id !== channelLeadId);
 
+    // ---- busy-session helper — true if the given local session id maps to a
+    // terminalId currently enrolled in another active bridge/channel. Used both
+    // to disable picker rows and as a submit-time safety net in case busyness
+    // changes (via polling) after a row was already selected. ----
+    const sessionIsBusy = (sessionId) => {
+        if (!sessionId) return false;
+        const s = allSessions.find((x) => x.id === sessionId);
+        return s ? busyTerminalIds.has(s.terminalId) : false;
+    };
+
     const toggleChannelWorker = (sessionId) => {
         setChannelWorkerIds((prev) => {
             const next = new Set(prev);
@@ -315,17 +345,20 @@ export default function BridgeModal({
     const manualSendDisabled =
         !toSessionId ||
         submitting ||
+        sessionIsBusy(toSessionId) ||
         (manualMode === "latest" && (!latestText || latestLoading)) ||
         (manualMode === "custom" && !customText.trim());
 
-    const autoContinueDisabled = !toSessionId || !autoPrompt.trim();
+    const autoContinueDisabled = !toSessionId || !autoPrompt.trim() || sessionIsBusy(toSessionId);
 
     const channelStartDisabled =
         !channelLeadId ||
         channelWorkerIds.size === 0 ||
         !channelPrompt.trim() ||
         !channelConfirmed ||
-        submitting;
+        submitting ||
+        sessionIsBusy(channelLeadId) ||
+        [...channelWorkerIds].some(sessionIsBusy);
 
     if (!open || !fromSession) return null;
 
@@ -461,6 +494,7 @@ export default function BridgeModal({
                                 fromSessionId={fromSession.id}
                                 selected={toSessionId}
                                 onSelect={(id) => setToSessionId(id)}
+                                busyTerminalIds={busyTerminalIds}
                             />
                         </div>
                     )}
@@ -948,14 +982,19 @@ export default function BridgeModal({
                                     <div className="flex flex-col gap-1" role="radiogroup" aria-label="Lead session">
                                         {channelEligible.map((s) => {
                                             const isSelected = s.id === channelLeadId;
+                                            const busyReason = busyTerminalIds.get(s.terminalId);
+                                            const isBusy = Boolean(busyReason);
                                             return (
                                                 <button
                                                     key={s.id}
                                                     type="button"
                                                     role="radio"
                                                     aria-checked={isSelected}
+                                                    disabled={isBusy}
                                                     onClick={() => handleChannelLeadChange(s.id)}
-                                                    className="flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors hover-bg-surface"
+                                                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
+                                                        isBusy ? "bridge-session-busy" : "hover-bg-surface"
+                                                    }`}
                                                     style={{
                                                         border: isSelected
                                                             ? "1px solid var(--accent)"
@@ -968,6 +1007,7 @@ export default function BridgeModal({
                                                 >
                                                     <SessionDot activityState={s.activityState} />
                                                     <span className="flex-1 truncate">{s.name}</span>
+                                                    {isBusy && <BusyHint reason={busyReason} />}
                                                     <span
                                                         className="text-[10px] truncate"
                                                         style={{ color: "var(--text-muted)" }}
@@ -1007,14 +1047,19 @@ export default function BridgeModal({
                                     <div className="flex flex-col gap-1" role="group" aria-label="Worker sessions">
                                         {channelWorkerEligible.map((s) => {
                                             const isChecked = channelWorkerIds.has(s.id);
+                                            const busyReason = busyTerminalIds.get(s.terminalId);
+                                            const isBusy = Boolean(busyReason);
                                             return (
                                                 <button
                                                     key={s.id}
                                                     type="button"
                                                     role="checkbox"
                                                     aria-checked={isChecked}
+                                                    disabled={isBusy}
                                                     onClick={() => toggleChannelWorker(s.id)}
-                                                    className="flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors hover-bg-surface"
+                                                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
+                                                        isBusy ? "bridge-session-busy" : "hover-bg-surface"
+                                                    }`}
                                                     style={{
                                                         border: isChecked
                                                             ? "1px solid var(--accent)"
@@ -1051,6 +1096,7 @@ export default function BridgeModal({
                                                     </span>
                                                     <SessionDot activityState={s.activityState} />
                                                     <span className="flex-1 truncate">{s.name}</span>
+                                                    {isBusy && <BusyHint reason={busyReason} />}
                                                     <span
                                                         className="text-[10px] truncate"
                                                         style={{ color: "var(--text-muted)" }}

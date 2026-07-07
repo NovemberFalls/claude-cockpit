@@ -1,9 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { useTheme } from "../hooks/useTheme";
+import { MODELS } from "./TopBar";
+import {
+  isContainerMeasurable,
+  dimsChanged,
+  debounce,
+  loadPersistedZoom,
+  ZOOM_STORAGE_KEY,
+} from "../utils/terminalFit";
 import "@xterm/xterm/css/xterm.css";
 
 function buildXtermTheme(theme) {
@@ -34,11 +42,15 @@ function buildXtermTheme(theme) {
 }
 
 export default function PopoutTerminal({ terminalId, name, model }) {
+  // Long OpenRouter slugs would overflow the pill — show the friendly label
+  // when known, falling back to the raw string (mirrors TerminalPane.jsx).
+  const modelLabel = MODELS.find((m) => m.id === model)?.label || model;
   const termRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
   const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);
+  const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
   const pendingDataRef = useRef("");
@@ -49,6 +61,48 @@ export default function PopoutTerminal({ terminalId, name, model }) {
   useEffect(() => {
     document.title = `${name} — Claude Cockpit`;
   }, [name]);
+
+  // Safe fit: guard against zero-dimension containers and send resize to PTY.
+  // Mirrors TerminalPane.jsx's safeFit exactly (dedupe + hidden guard) — this
+  // is a separate browser window/document with its own xterm instance and WS
+  // connection, so it needs its own copy rather than sharing state.
+  const safeFit = useCallback(() => {
+    const el = termRef.current;
+    const fit = fitRef.current;
+    const t = xtermRef.current;
+    if (!isContainerMeasurable(el) || !fit || !t) return;
+    try {
+      fit.fit();
+      const next = { cols: t.cols, rows: t.rows };
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN && dimsChanged(lastSentDimsRef.current, next)) {
+        ws.send(JSON.stringify({ type: "resize", cols: next.cols, rows: next.rows }));
+        lastSentDimsRef.current = next;
+      }
+    } catch {
+      // fit() can throw if terminal is disposed during resize
+    }
+  }, []);
+
+  // Zoom sync: PopoutTerminal is a separate window/document — App.jsx's
+  // `terminalZoom` React state does not reach it. Read the persisted value on
+  // mount (below, in the init effect) and stay in sync afterwards via the
+  // `storage` event, which fires on OTHER windows of the same origin whenever
+  // the main window's zoom controls (Ctrl+=/-/0, Ctrl+wheel) write a new
+  // value to localStorage. Without this, a pane popped out at a non-default
+  // zoom starts at the wrong font size and reports the wrong cols/rows to the
+  // backend PTY until it is reclaimed.
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key !== ZOOM_STORAGE_KEY || !xtermRef.current) return;
+      const next = loadPersistedZoom();
+      if (xtermRef.current.options.fontSize === next) return;
+      xtermRef.current.options.fontSize = next;
+      requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [safeFit]);
 
   // BroadcastChannel: fire CLOSED on unload, listen for RECLAIM
   useEffect(() => {
@@ -96,7 +150,11 @@ export default function PopoutTerminal({ terminalId, name, model }) {
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
-      fontSize: 13,
+      // Read the current zoom level from localStorage rather than hardcoding
+      // a default — App.jsx's zoom state lives in a different window/document
+      // and can't be passed as a prop. See the storage-event effect above for
+      // how this stays in sync after the initial mount.
+      fontSize: loadPersistedZoom(),
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', monospace",
       lineHeight: 1.3,
       theme: buildXtermTheme(theme),
@@ -283,29 +341,22 @@ export default function PopoutTerminal({ terminalId, name, model }) {
     });
 
     // -------------------------------------------------------------------------
-    // Layout helpers
+    // Layout: fit() runs via the hoisted safeFit (dedupe + hidden guard, see
+    // above). Debounced ResizeObserver mirrors TerminalPane.jsx so a window
+    // drag-resize doesn't fire a full re-render + WS resize on every frame.
     // -------------------------------------------------------------------------
-    const safeFit = () => {
-      const el = termRef.current;
-      const fit = fitRef.current;
-      const t = xtermRef.current;
-      if (!el || !fit || !t) return;
-      if (el.clientWidth < 10 || el.clientHeight < 10) return;
-      try {
-        fit.fit();
-        const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols: t.cols, rows: t.rows }));
-        }
-      } catch {
-        // fit() can throw if terminal is disposed during resize
-      }
-    };
-
     requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
 
-    const resizeObserver = new ResizeObserver(() => safeFit());
+    const debouncedFit = debounce(safeFit, 150);
+    const resizeObserver = new ResizeObserver(debouncedFit);
     resizeObserver.observe(termRef.current);
+
+    // Safety net for the popout window being minimized/backgrounded — no DOM
+    // resize fires while merely occluded, so re-measure once visible again.
+    const handleVisibilityChange = () => {
+      if (!document.hidden) safeFit();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     // Terminal input -> WebSocket
     term.onData((data) => {
@@ -372,6 +423,8 @@ export default function PopoutTerminal({ terminalId, name, model }) {
 
     return () => {
       termEl.removeEventListener("paste", pasteHandler, { capture: true });
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      debouncedFit.cancel();
       clearTimeout(reconnectTimer.current);
       cancelAnimationFrame(writeRafRef.current);
       resizeObserver.disconnect();
@@ -440,21 +493,25 @@ export default function PopoutTerminal({ terminalId, name, model }) {
             backgroundColor: "var(--bg-surface)",
           }}
         >
-          {model}
+          {modelLabel}
         </span>
       </div>
 
-      {/* Terminal area */}
-      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        <div
-          ref={termRef}
-          style={{
-            width: "100%",
-            height: "100%",
-            padding: "4px 8px",
-            backgroundColor: theme.bg,
-          }}
-        />
+      {/* Terminal area. Padding lives on termRef's parent, not termRef itself
+          — see the matching comment in TerminalPane.jsx for why: FitAddon
+          reads padding from term.element (always 0) but measures available
+          size from term.element.parentElement, so padding on termRef would
+          silently inflate the computed cols/rows. */}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          position: "relative",
+          padding: "4px 8px",
+          backgroundColor: theme.bg,
+        }}
+      >
+        <div ref={termRef} style={{ width: "100%", height: "100%" }} />
       </div>
     </div>
   );

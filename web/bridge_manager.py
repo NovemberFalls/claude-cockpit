@@ -162,24 +162,42 @@ def _wrap(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Helper — snapshot a JSONL file's size before a kickoff write
+# ---------------------------------------------------------------------------
+
+def _snapshot_jsonl_size(jsonl_path: str | None) -> int:
+    """Return the current byte size of *jsonl_path*, or 0 if unknown/missing.
+
+    Callers (start_auto / ChannelManager.start) call this BEFORE injecting a
+    kickoff prompt, then pass the result as ``start_offset`` to ``tail_jsonl``
+    for the corresponding watcher. This anchors the watch position to a
+    point-in-time that predates the kickoff, closing the race where the
+    watcher task's async generator doesn't actually start iterating (and
+    therefore doesn't stat the file) until after the kickoff's reply has
+    already been appended — which would otherwise cause that reply to be
+    silently skipped forever. See ``tail_jsonl``'s ``start_offset`` parameter.
+    """
+    if not jsonl_path:
+        return 0
+    try:
+        return pathlib.Path(jsonl_path).stat().st_size
+    except OSError:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Helper — file handoff for large relay payloads
 # ---------------------------------------------------------------------------
 
-def _maybe_file_handoff(full_text: str, peer_name: str | None) -> str:
-    """If *full_text* exceeds the inline threshold, persist it to a relay file
-    and return a compact reference prompt instead.  Otherwise return *full_text*
-    unchanged.
+def _cleanup_and_write_relay_file(full_text: str) -> pathlib.Path:
+    """Blocking helper: GC stale relay files, then write *full_text* to a fresh one.
 
-    The compact prompt names the relay file on its own line so Claude Code's
-    Read tool can open it without any path mangling.
-
-    Also opportunistically deletes relay files in ``_RELAY_DIR`` that are older
-    than ``_RELAY_FILE_MAX_AGE`` seconds (best-effort; never raises).
+    Contains ALL the synchronous filesystem work for the file-handoff path
+    (directory iteration, per-file stat/unlink, and the relay file write
+    itself). Deliberately factored out so ``_maybe_file_handoff`` can run it
+    via ``asyncio.to_thread`` instead of blocking the event loop — see the
+    caller for why that matters.
     """
-    encoded = full_text.encode("utf-8")
-    if len(encoded) <= _RELAY_INLINE_MAX:
-        return full_text
-
     # Opportunistic cleanup of old relay files — best-effort, never raise.
     try:
         now = time.time()
@@ -197,6 +215,32 @@ def _maybe_file_handoff(full_text: str, peer_name: str | None) -> str:
     # Write to a new relay file.
     relay_path = _RELAY_DIR / f"{uuid.uuid4().hex[:8]}_relay.txt"
     relay_path.write_text(full_text, encoding="utf-8")
+    return relay_path
+
+
+async def _maybe_file_handoff(full_text: str, peer_name: str | None) -> str:
+    """If *full_text* exceeds the inline threshold, persist it to a relay file
+    and return a compact reference prompt instead.  Otherwise return *full_text*
+    unchanged.
+
+    The compact prompt names the relay file on its own line so Claude Code's
+    Read tool can open it without any path mangling.
+
+    Also opportunistically deletes relay files in ``_RELAY_DIR`` that are older
+    than ``_RELAY_FILE_MAX_AGE`` seconds (best-effort; never raises).
+
+    Async gotcha: the GC scan and file write are blocking filesystem calls.
+    They run via ``asyncio.to_thread`` (see ``_cleanup_and_write_relay_file``)
+    so a large relay payload never stalls the single event loop shared by
+    every session's WebSocket read/write and PTY I/O. The small/inline path
+    (the common case — most relay messages are under the threshold) does no
+    I/O at all and returns synchronously without ever reaching a thread hop.
+    """
+    encoded = full_text.encode("utf-8")
+    if len(encoded) <= _RELAY_INLINE_MAX:
+        return full_text
+
+    relay_path = await asyncio.to_thread(_cleanup_and_write_relay_file, full_text)
 
     logger.info(
         "File handoff: relay payload too large (%d bytes, peer=%r) — saved to %s",
@@ -371,7 +415,7 @@ async def _inject(
     # (e.g. [PEER REPLY from "X"]) is already embedded inside *text* by the
     # caller (_relay_message / _channel_*_kickoff); the handoff prompt omits
     # a redundant attribution header.
-    inject_text = _maybe_file_handoff(text, peer_name=None)
+    inject_text = await _maybe_file_handoff(text, peer_name=None)
 
     ok = await pty_manager.write_pty_async(terminal_id, _wrap(inject_text))
     if not ok:
@@ -438,8 +482,14 @@ async def _relay_task(
     target_id: str,
     target_name: str,
     side: str,  # "from" or "to" — identifies which per-side counter to increment
+    start_offset: int = 0,
 ) -> None:
     """Tail *watch_id*'s JSONL and relay each new assistant turn to *target_id*.
+
+    *start_offset* is the JSONL byte size snapshotted (by the caller) BEFORE
+    the kickoff prompt was injected into *watch_id* — see
+    ``_snapshot_jsonl_size`` / ``tail_jsonl``'s ``start_offset`` parameter for
+    why this matters (closes the watcher-start race).
 
     Ends when:
         - max_turns round-trips have been completed
@@ -486,7 +536,7 @@ async def _relay_task(
     )
 
     try:
-        async for entry in tail_jsonl(jsonl_path, from_beginning=False):
+        async for entry in tail_jsonl(jsonl_path, from_beginning=False, start_offset=start_offset):
             if record._stop_event.is_set():
                 logger.debug("[bridge %s] Stop event set — relay task exiting", record.bridge_id)
                 return
@@ -666,7 +716,7 @@ class BridgeManager:
         # Fix B: apply file-handoff so large payloads never overwhelm the PTY
         # pipe.  Pass the source session name so the compact inline prompt keeps
         # sender attribution even when the full body lives in the relay file.
-        inject_text = _maybe_file_handoff(full_text, peer_name=from_session.name)
+        inject_text = await _maybe_file_handoff(full_text, peer_name=from_session.name)
 
         ok = await pty_manager.write_pty_async(to_terminal_id, _wrap(inject_text))
         if not ok:
@@ -735,6 +785,11 @@ class BridgeManager:
         from_kickoff = _kickoff_message(to_session.name, kickoff_prompt)
         to_kickoff = _kickoff_message(from_session.name, kickoff_prompt)
 
+        # Snapshot each side's JSONL size BEFORE injecting the kickoff prompt —
+        # see _snapshot_jsonl_size for why this closes the watcher-start race.
+        from_start_offset = _snapshot_jsonl_size(pty_manager._get_jsonl_path(from_session))
+        to_start_offset = _snapshot_jsonl_size(pty_manager._get_jsonl_path(to_session))
+
         # Send kickoff to both sides simultaneously.
         from_ok, to_ok = await asyncio.gather(
             pty_manager.write_pty_async(from_terminal_id, _wrap(from_kickoff)),
@@ -760,6 +815,7 @@ class BridgeManager:
                 target_id=to_terminal_id,
                 target_name=to_session.name,
                 side="from",
+                start_offset=from_start_offset,
             ),
             name=f"bridge-{bridge_id}-from",
         )
@@ -771,6 +827,7 @@ class BridgeManager:
                 target_id=from_terminal_id,
                 target_name=from_session.name,
                 side="to",
+                start_offset=to_start_offset,
             ),
             name=f"bridge-{bridge_id}-to",
         )
@@ -966,8 +1023,14 @@ async def _worker_relay_task(
     record: _ChannelRecord,
     worker_id: str,
     worker_name: str,
+    start_offset: int = 0,
 ) -> None:
     """Tail *worker_id*'s JSONL and relay each new assistant turn to the lead.
+
+    *start_offset* is the JSONL byte size snapshotted (by the caller) BEFORE
+    the kickoff prompt was injected into *worker_id* — see
+    ``_snapshot_jsonl_size`` / ``tail_jsonl``'s ``start_offset`` parameter for
+    why this matters (closes the watcher-start race).
 
     Ends when:
         - BRIDGE-DONE sentinel is detected in the worker's reply
@@ -1015,7 +1078,7 @@ async def _worker_relay_task(
     )
 
     try:
-        async for entry in tail_jsonl(jsonl_path, from_beginning=False):
+        async for entry in tail_jsonl(jsonl_path, from_beginning=False, start_offset=start_offset):
             if record._stop_event.is_set():
                 logger.debug(
                     "[channel %s] Stop event set — worker relay task for %s exiting",
@@ -1080,8 +1143,13 @@ async def _worker_relay_task(
         _end_channel(record, "errored")
 
 
-async def _lead_relay_task(record: _ChannelRecord) -> None:
+async def _lead_relay_task(record: _ChannelRecord, start_offset: int = 0) -> None:
     """Tail the lead's JSONL and relay each new assistant turn to ALL workers.
+
+    *start_offset* is the JSONL byte size snapshotted (by the caller) BEFORE
+    the kickoff prompt was injected into the lead — see
+    ``_snapshot_jsonl_size`` / ``tail_jsonl``'s ``start_offset`` parameter for
+    why this matters (closes the watcher-start race).
 
     Ends when:
         - BRIDGE-DONE sentinel is detected in the lead's reply
@@ -1129,7 +1197,7 @@ async def _lead_relay_task(record: _ChannelRecord) -> None:
     )
 
     try:
-        async for entry in tail_jsonl(jsonl_path, from_beginning=False):
+        async for entry in tail_jsonl(jsonl_path, from_beginning=False, start_offset=start_offset):
             if record._stop_event.is_set():
                 logger.debug("[channel %s] Stop event set — lead relay task exiting", record.channel_id)
                 return
@@ -1149,17 +1217,49 @@ async def _lead_relay_task(record: _ChannelRecord) -> None:
             sentinel_detected = "BRIDGE-DONE" in text
 
             relay_body = _relay_message(record.lead_name, text)
+
+            # Inject into all workers CONCURRENTLY rather than sequentially.
+            # A sequential for-loop means one slow worker (each _inject can wait
+            # up to _BUSY_WAIT_MAX == 300s for its idle gate) head-of-line-blocks
+            # every worker after it in record.worker_ids. asyncio.gather runs all
+            # N idle-gate waits + injections in parallel, and return_exceptions=True
+            # isolates one worker's unexpected failure from the others — a raised
+            # exception for worker A must not prevent worker B's coroutine from
+            # completing (or being reflected in the results below).
+            inject_results = await asyncio.gather(
+                *(_inject(worker_id, relay_body, record) for worker_id in record.worker_ids),
+                return_exceptions=True,
+            )
+
             any_fatal = False
             delivered_any = False
-            for worker_id in record.worker_ids:
-                inject_result = await _inject(worker_id, relay_body, record)
+            for worker_id, inject_result in zip(record.worker_ids, inject_results):
+                if isinstance(inject_result, BaseException):
+                    # Preserve prior semantics: before this change, an exception
+                    # raised out of _inject propagated to the outer try/except
+                    # around the whole relay loop, which ended the channel with
+                    # 'errored'. return_exceptions=True stops that propagation,
+                    # so we must explicitly treat it as fatal here to keep the
+                    # channel's end-state behavior coherent.
+                    logger.warning(
+                        "[channel %s] _inject raised for worker %s",
+                        record.channel_id, worker_id,
+                        exc_info=inject_result,
+                    )
+                    any_fatal = True
+                    continue
                 if inject_result == "fatal":
                     # A worker died or its PTY write failed — end the whole channel.
+                    logger.warning(
+                        "[channel %s] Fatal delivery failure for worker %s",
+                        record.channel_id, worker_id,
+                    )
                     any_fatal = True
-                    break
+                    continue
                 if inject_result == "skip":
                     # Worker alive-but-slow timeout, or stop event.  Skip this
-                    # worker's delivery for this turn; keep going for other workers.
+                    # worker's delivery for this turn; other workers still got
+                    # their own concurrent delivery attempt.
                     logger.warning(
                         "[channel %s] Skipping relay to slow/stopped worker %s for this turn",
                         record.channel_id, worker_id,
@@ -1324,6 +1424,15 @@ class ChannelManager:
             for wid in worker_ids
         }
 
+        # Snapshot each participant's JSONL size BEFORE injecting kickoff
+        # prompts — see _snapshot_jsonl_size for why this closes the
+        # watcher-start race (applies to the lead and every worker).
+        lead_start_offset = _snapshot_jsonl_size(pty_manager._get_jsonl_path(lead_session))
+        worker_start_offsets = {
+            wid: _snapshot_jsonl_size(pty_manager._get_jsonl_path(worker_sessions[wid]))
+            for wid in worker_ids
+        }
+
         # Send all kickoffs simultaneously
         kickoff_coros = [
             pty_manager.write_pty_async(lead_id, _wrap(lead_kickoff)),
@@ -1354,13 +1463,16 @@ class ChannelManager:
 
         for wid in worker_ids:
             t = asyncio.create_task(
-                _worker_relay_task(record, wid, worker_sessions[wid].name),
+                _worker_relay_task(
+                    record, wid, worker_sessions[wid].name,
+                    start_offset=worker_start_offsets[wid],
+                ),
                 name=f"channel-{channel_id}-worker-{wid}",
             )
             tasks.append(t)
 
         lead_task = asyncio.create_task(
-            _lead_relay_task(record),
+            _lead_relay_task(record, start_offset=lead_start_offset),
             name=f"channel-{channel_id}-lead",
         )
         tasks.append(lead_task)

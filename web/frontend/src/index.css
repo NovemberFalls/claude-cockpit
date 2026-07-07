@@ -107,6 +107,24 @@ body {
   animation: channel-active-glow 2s ease-in-out infinite;
 }
 
+/* BridgeModal session pickers — sessions already busy in another active
+   bridge/channel render disabled (not hidden) with a muted look + hint badge. */
+.bridge-session-busy {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bridge-busy-hint {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+}
+
 .state-icon-busy {
   animation: state-pulse 1.5s ease-in-out infinite;
 }

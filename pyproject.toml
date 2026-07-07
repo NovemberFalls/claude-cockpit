@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-cockpit"
-version = "1.3.6"
+version = "1.3.8"
 description = "Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
@@ -33,3 +33,16 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["web/tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 130
+
+[tool.ruff.lint]
+select = ["E", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules deliberately do sys.path manipulation / env var setup before
+# importing the modules under test (see conftest-less path bootstrap at the
+# top of each test file) — E402 (import not at top) is expected there.
+"web/tests/*" = ["E402"]

@@ -4,10 +4,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { SearchAddon } from "@xterm/addon-search";
-import { X, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow } from "lucide-react";
+import { X, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, OctagonX, EllipsisVertical } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
+import PaneActionsMenu from "./PaneActionsMenu";
+import { MODELS } from "./TopBar";
+import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import "@xterm/xterm/css/xterm.css";
 
 /**
@@ -54,6 +57,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onEndBridge,     // (bridgeId: string) => void — terminate an active bridge
   onPopout,        // (session) => void — open terminal in separate window
   workflowSummary, // { count: number, inProgressCount: number, items: array } | null — recent workflows
+  onRenameSession, // (newName: string, syncClaude: boolean) => Promise<void> — PATCH rename, owned by App.jsx (updates sidebar name)
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -61,7 +65,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);         // WebSocket
   const resizeObserver = useRef(null);
-  const resizeTimer = useRef(null);
+  const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
   const pendingDataRef = useRef("");  // Batched WS data for xterm
@@ -70,8 +74,19 @@ const TerminalPane = forwardRef(function TerminalPane({
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [workflowsOpen, setWorkflowsOpen] = useState(false);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSyncClaude, setRenameSyncClaude] = useState(true);
   const searchInputRef = useRef(null);
+  const renameInputRef = useRef(null);
+  const actionsMenuBtnRef = useRef(null);
   const { theme } = useTheme();
+
+  // Long OpenRouter slugs (e.g. "deepseek/deepseek-v4-pro") would overflow the
+  // pill in the header — display the friendly label when the id is known,
+  // falling back to the raw string (covers unrecognized/future model ids).
+  const modelLabel = MODELS.find((m) => m.id === session.model)?.label || session.model;
 
   // Expose focus() to parent via ref
   useImperativeHandle(ref, () => ({
@@ -90,23 +105,32 @@ const TerminalPane = forwardRef(function TerminalPane({
     }
   }, [searchQuery]);
 
-  // Safe fit: guard against zero-dimension containers and send resize to PTY
+  // Safe fit: guard against zero-dimension containers and send resize to PTY.
+  // Skips (rather than fits) while the pane is hidden/zero-sized — the caller
+  // is expected to re-invoke once the pane becomes visible/sized again (the
+  // debounced ResizeObserver below does this naturally, since a hidden->visible
+  // transition is itself a resize; the visibilitychange listener is a second
+  // safety net for tab/window backgrounding, where no DOM resize occurs).
   const safeFit = useCallback(() => {
     const el = termRef.current;
     const fit = fitRef.current;
     const term = xtermRef.current;
-    if (!el || !fit || !term) return;
-    // Skip if container has no size (hidden, transitioning, or not laid out yet)
-    if (el.clientWidth < 10 || el.clientHeight < 10) return;
+    if (!isContainerMeasurable(el) || !fit || !term) return;
     try {
       fit.fit();
+      const next = { cols: term.cols, rows: term.rows };
       const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
+      // Dedupe: only notify the backend when cols/rows actually changed since
+      // the last successful send. lastSentDimsRef is only updated on a
+      // successful send, so a fit() that runs while the WS is briefly closed
+      // (e.g. mid-reconnect) still looks "changed" once the WS reopens.
+      if (ws?.readyState === WebSocket.OPEN && dimsChanged(lastSentDimsRef.current, next)) {
         ws.send(JSON.stringify({
           type: "resize",
-          cols: term.cols,
-          rows: term.rows,
+          cols: next.cols,
+          rows: next.rows,
         }));
+        lastSentDimsRef.current = next;
       }
     } catch {
       // fit() can throw if terminal is disposed during resize
@@ -421,12 +445,23 @@ const TerminalPane = forwardRef(function TerminalPane({
       }
     });
 
-    // Resize observer with debounce
-    resizeObserver.current = new ResizeObserver(() => {
-      clearTimeout(resizeTimer.current);
-      resizeTimer.current = setTimeout(safeFit, 150);
-    });
+    // Resize observer with debounce. Catches window resize, sidebar toggle,
+    // pane count/layout changes, and popout-reclaim remount — anything that
+    // changes the container's actual box size. It does NOT catch zoom
+    // (font-size change with an unchanged box size), which is refit
+    // explicitly by the terminalZoom effect below.
+    const debouncedFit = debounce(safeFit, 150);
+    resizeObserver.current = new ResizeObserver(debouncedFit);
     resizeObserver.current.observe(termRef.current);
+
+    // Safety net for tab/window backgrounding: no DOM resize occurs while a
+    // pane is merely occluded (minimized window, backgrounded browser tab),
+    // so the ResizeObserver above never fires. Re-measure once the document
+    // is visible again in case the OS/monitor geometry changed while hidden.
+    const handleVisibilityChange = () => {
+      if (!document.hidden) safeFit();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     // Connect to PTY if we have a terminalId
     if (session.terminalId) {
@@ -435,7 +470,8 @@ const TerminalPane = forwardRef(function TerminalPane({
 
     return () => {
       termEl.removeEventListener("paste", pasteHandler, { capture: true });
-      clearTimeout(resizeTimer.current);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      debouncedFit.cancel();
       clearTimeout(reconnectTimer.current);
       cancelAnimationFrame(writeRafRef.current);
       resizeObserver.current?.disconnect();
@@ -471,12 +507,21 @@ const TerminalPane = forwardRef(function TerminalPane({
     }
   }, [theme]);
 
-  // Update font size when zoom changes — Canvas re-rasterizes automatically.
+  // Update font size when zoom changes — font size changes cols/rows WITHOUT
+  // changing the container's box size, so the ResizeObserver above can never
+  // catch it; this is the only path that refits after a zoom change.
+  // Double-rAF (mirrors the initial-mount fit below): a single frame is not
+  // always enough for the browser to settle the font-size-driven layout
+  // before FitAddon reads DOM measurements. The trailing delayed fit is a
+  // safety net for slower reflows, matching the paneIndex "wait for CSS to
+  // settle" pattern below.
   useEffect(() => {
-    if (xtermRef.current) {
-      xtermRef.current.options.fontSize = terminalZoom;
-      requestAnimationFrame(() => safeFit());
-    }
+    if (!xtermRef.current) return;
+    xtermRef.current.options.fontSize = terminalZoom;
+    let cancelled = false;
+    requestAnimationFrame(() => requestAnimationFrame(() => { if (!cancelled) safeFit(); }));
+    const fallback = setTimeout(() => { if (!cancelled) safeFit(); }, 120);
+    return () => { cancelled = true; clearTimeout(fallback); };
   }, [terminalZoom, safeFit]);
 
   // Connect/reconnect when terminalId changes
@@ -488,6 +533,11 @@ const TerminalPane = forwardRef(function TerminalPane({
       wsRef.current?.close();
       // Reset terminal
       xtermRef.current.clear();
+      // A different terminalId is a different backend PTY that has no
+      // knowledge of the size we last reported to the previous one — forget
+      // the dedupe cache so the post-connect safeFit() always sends fresh
+      // dims even if they happen to match the old terminal's last-known size.
+      lastSentDimsRef.current = null;
       connectWs(session.terminalId);
     }
   }, [session.terminalId, connectWs]);
@@ -540,7 +590,52 @@ const TerminalPane = forwardRef(function TerminalPane({
     e.stopPropagation();
   }, []);
 
+  // Interrupt (ESC) the busy generation — never gated on server side, so no
+  // 409 handling needed here (unlike the /command endpoint used by PaneActionsMenu).
+  const handleInterrupt = useCallback(async () => {
+    if (!session.terminalId) return;
+    try {
+      const res = await fetch(`/api/terminals/${session.terminalId}/interrupt`, { method: "POST" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast?.(data.error || "Interrupt failed", "error");
+      }
+    } catch (err) {
+      toast?.(`Interrupt failed: ${err.message}`, "error");
+    }
+  }, [session.terminalId, toast]);
+
+  // Rename: enter inline-edit mode. Triggered by double-click on the pane
+  // header name or by the "Rename…" row in PaneActionsMenu.
+  // renameCommittedRef guards against a double-fire: unmounting the focused
+  // <input> (React removing it from the DOM after Enter/Escape) synchronously
+  // fires a native 'blur' event, which would otherwise re-invoke commitRename
+  // via onBlur with the same stale value and send a duplicate PATCH.
+  const renameCommittedRef = useRef(false);
+
+  const startRename = useCallback(() => {
+    renameCommittedRef.current = false;
+    setRenameValue(session.name);
+    setRenameSyncClaude(true);
+    setRenaming(true);
+  }, [session.name]);
+
+  const cancelRename = useCallback(() => {
+    renameCommittedRef.current = true;
+    setRenaming(false);
+  }, []);
+
+  const commitRename = useCallback(async () => {
+    if (renameCommittedRef.current) return;
+    renameCommittedRef.current = true;
+    const trimmed = renameValue.trim();
+    setRenaming(false);
+    if (!trimmed || trimmed === session.name) return;
+    await onRenameSession?.(trimmed, renameSyncClaude);
+  }, [renameValue, renameSyncClaude, session.name, onRenameSession]);
+
   const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
+  const isBusy = activityState === "busy";
   const isBridged = !!activeBridge;
   const isWaiting = activityState === "waiting";
   const wrapperStyle = {
@@ -569,7 +664,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           borderBottom: "1px solid var(--border-color)",
           cursor: onSwap ? "grab" : "default",
         }}
-        draggable={onSwap != null}
+        draggable={onSwap != null && !renaming}
         onDragStart={(e) => {
           if (paneIndex == null) return;
           e.dataTransfer.effectAllowed = "move";
@@ -601,12 +696,54 @@ const TerminalPane = forwardRef(function TerminalPane({
             />
           )}
           <StateIcon state={activityState} />
-          <span
-            className="text-xs font-medium truncate"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {session.name}
-          </span>
+          {renaming ? (
+            <div className="flex items-center gap-1.5 min-w-0" onMouseDown={(e) => e.stopPropagation()}>
+              <input
+                ref={renameInputRef}
+                autoFocus
+                type="text"
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitRename();
+                  if (e.key === "Escape") cancelRename();
+                }}
+                onBlur={commitRename}
+                aria-label="Session name"
+                className="text-xs font-medium px-1 py-0.5 rounded min-w-0"
+                style={{
+                  color: "var(--text-primary)",
+                  backgroundColor: "var(--bg-surface)",
+                  border: "1px solid var(--accent)",
+                  outline: "none",
+                  width: 120,
+                }}
+              />
+              <label
+                className="flex items-center gap-1 text-[9px] flex-shrink-0"
+                style={{ color: "var(--text-muted)" }}
+                title="Also send /rename inside the Claude Code session"
+              >
+                <input
+                  type="checkbox"
+                  checked={renameSyncClaude}
+                  onChange={(e) => setRenameSyncClaude(e.target.checked)}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  aria-label="Also rename in Claude session"
+                />
+                sync
+              </label>
+            </div>
+          ) : (
+            <span
+              className="text-xs font-medium truncate"
+              style={{ color: "var(--text-primary)" }}
+              onDoubleClick={startRename}
+              title="Double-click to rename"
+            >
+              {session.name}
+            </span>
+          )}
           <span
             className="text-[10px] px-1.5 py-0.5 rounded-full"
             style={{
@@ -614,10 +751,23 @@ const TerminalPane = forwardRef(function TerminalPane({
               backgroundColor: "var(--bg-surface)",
             }}
           >
-            {session.model}
+            {modelLabel}
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {isBusy && (
+            <button
+              type="button"
+              onClick={handleInterrupt}
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated"
+              style={{ color: "var(--red)" }}
+              data-tooltip="Interrupt"
+              aria-label="Interrupt session"
+              title="Interrupt (Esc)"
+            >
+              <OctagonX size={13} />
+            </button>
+          )}
           {onPopout && (
             <button
               type="button"
@@ -707,6 +857,33 @@ const TerminalPane = forwardRef(function TerminalPane({
               <Link2 size={13} />
             </button>
           )}
+          <div className="relative">
+            <button
+              ref={actionsMenuBtnRef}
+              type="button"
+              onClick={() => setActionsMenuOpen((o) => !o)}
+              className="icon-tooltip p-0.5 rounded transition-colors hover-bg-elevated hover-color-secondary"
+              style={{ color: "var(--text-muted)" }}
+              data-tooltip="More actions"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={actionsMenuOpen}
+            >
+              <EllipsisVertical size={13} />
+            </button>
+            {actionsMenuOpen && (
+              <PaneActionsMenu
+                session={session}
+                busy={isBusy}
+                toast={toast}
+                onClose={() => {
+                  setActionsMenuOpen(false);
+                  actionsMenuBtnRef.current?.focus();
+                }}
+                onStartRename={startRename}
+              />
+            )}
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -810,21 +987,25 @@ const TerminalPane = forwardRef(function TerminalPane({
         </div>
       )}
 
-      {/* Terminal area */}
+      {/* Terminal area. Padding lives here, on termRef's PARENT, not on
+          termRef itself: FitAddon.proposeDimensions() subtracts padding read
+          from term.element (xterm's own generated .xterm div, which has zero
+          padding) but measures available width/height from term.element's
+          parentElement. Padding placed directly on termRef (term.element's
+          parent) would inflate FitAddon's computed cols/rows by the padding
+          size, since it is included in the measured box but never
+          subtracted — a small but constant resize-accuracy bug. */}
       <div
         className="flex-1 min-h-0"
-        style={{ position: "relative" }}
+        style={{
+          position: "relative",
+          padding: "4px 8px",
+          backgroundColor: theme.bg,
+        }}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
       >
-        <div
-          ref={termRef}
-          className="w-full h-full"
-          style={{
-            padding: "4px 8px",
-            backgroundColor: theme.bg,
-          }}
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-        />
+        <div ref={termRef} className="w-full h-full" />
         {activeBridge && (
           <div
             style={{

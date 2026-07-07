@@ -52,7 +52,7 @@ def run_watchdog(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         if restart_times:
             env["NO_BROWSER"] = "1"
 
-        print(f"  [watchdog] Starting cockpit server...")
+        print("  [watchdog] Starting cockpit server...")
         proc = subprocess.Popen(
             [python, "-m", "uvicorn", "server:app", "--host", host, "--port", str(port)],
             cwd=str(server_dir),

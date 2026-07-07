@@ -27,7 +27,7 @@ import asyncio
 import sys
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -44,10 +44,8 @@ from bridge_manager import (
     _BridgeRecord,
     BridgeManager,
     ChannelManager,
-    _BP_START,
 )
-import pty_manager as pm_module
-from pty_manager import PtyManager, SessionStateTracker
+from pty_manager import PtyManager
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +80,7 @@ def _make_bridge_record(from_id="f1", to_id="t2", max_turns=4) -> _BridgeRecord:
     )
 
 
-async def _never_yield(path, from_beginning=False):
+async def _never_yield(path, from_beginning=False, **kwargs):
     """Async generator that hangs forever without yielding anything."""
     await asyncio.sleep(3600)
     return
@@ -339,7 +337,7 @@ async def test_v2_bridge_stays_active_when_peer_times_out(monkeypatch):
     # from_session emits one assistant turn — triggers a relay attempt to busy to_session
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         if call_idx["n"] == 1:
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
@@ -406,7 +404,7 @@ async def test_v2_bridge_errors_when_peer_dies(monkeypatch):
 
     tail_calls = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         tail_calls["n"] += 1
         if tail_calls["n"] == 1:
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello peer"}]}
@@ -455,7 +453,7 @@ async def test_v2_bridge_end_bridge_not_called_on_skip(monkeypatch):
 
     call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         call_idx["n"] += 1
         if call_idx["n"] == 1:
             yield {"type": "assistant", "content": [{"type": "text", "text": "Hello"}]}
@@ -536,7 +534,7 @@ async def test_channel_lead_relay_skip_one_worker_stays_active(monkeypatch):
     # Only the lead (third tail_jsonl call) yields; worker tails hang
     tail_call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         tail_call_idx["n"] += 1
         current = tail_call_idx["n"]
         if current == 3:
@@ -622,12 +620,12 @@ async def test_channel_lead_relay_all_workers_skip_does_not_count_turn(monkeypat
     w2 = _make_mock_session("w2c", "Worker2", alive=True, tracker_state="busy")
 
     sessions = {lead.id: lead, w1.id: w1, w2.id: w2}
-    write_calls = _patch_channel_pty(monkeypatch, sessions)
+    _patch_channel_pty(monkeypatch, sessions)
 
     # The lead relay task is the 3rd tail_jsonl call (workers spawn first).
     tail_call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         tail_call_idx["n"] += 1
         current = tail_call_idx["n"]
         if current == 3:
@@ -723,7 +721,7 @@ async def test_channel_lead_relay_fatal_worker_ends_channel_errored(monkeypatch)
 
     tail_call_idx = {"n": 0}
 
-    async def fake_tail(path, from_beginning=False):
+    async def fake_tail(path, from_beginning=False, **kwargs):
         tail_call_idx["n"] += 1
         current = tail_call_idx["n"]
         if current == 3:
@@ -911,7 +909,6 @@ async def test_wait_for_idle_simple_uses_manual_wait_max_default(monkeypatch):
     This confirms the default is not baked in at function definition time.
     """
     # Tracker starts busy, switches to idle after a short delay
-    state_holder = {"state": "busy"}
     calls_to_idle = {"n": 0}
 
     session = MagicMock()
@@ -975,3 +972,97 @@ async def test_wait_for_idle_simple_60s_is_enough_for_slow_peer(monkeypatch):
         f"Expected True for peer that idles within the window; got {result!r}. "
         "Old 10s cap would have failed here on real slow peers."
     )
+
+
+# ===========================================================================
+# Section G — V3 channel: concurrent (not sequential) worker broadcast
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_lead_relay_broadcasts_to_workers_concurrently_not_sequentially(monkeypatch):
+    """_lead_relay_task's fan-out to N busy workers takes ~one _BUSY_WAIT_MAX
+    window, not N of them — proving the broadcast is concurrent, not a
+    sequential for-loop that head-of-line-blocks slow workers.
+
+    Regression for the fix: the old code awaited `_inject(worker_id, ...)`
+    one worker at a time inside a `for` loop. With 3 permanently-busy workers
+    and _BUSY_WAIT_MAX patched to 0.2s, the OLD sequential code would take
+    >= 3 * 0.2s == 0.6s (each worker's idle-gate wait fully blocking the
+    next). The NEW asyncio.gather-based fan-out runs all three idle-gate
+    waits in parallel and should complete in ~1x the window (~0.2-0.3s).
+
+    We assert the elapsed wall-clock time is comfortably below the sequential
+    lower bound (0.6s) but generous enough not to be flaky.
+    """
+    lead = _make_mock_session("lead-concurrent", "Lead", alive=True, tracker_state="idle")
+    workers = [
+        _make_mock_session(f"w{i}-concurrent", f"Worker{i}", alive=True, tracker_state="busy")
+        for i in range(3)
+    ]
+    sessions = {lead.id: lead, **{w.id: w for w in workers}}
+    _patch_channel_pty(monkeypatch, sessions)
+
+    # The lead relay task is the last of the N+1 tail_jsonl calls (workers
+    # spawn first, then the lead) — mirror the ordering used elsewhere in
+    # this file.
+    tail_call_idx = {"n": 0}
+
+    async def fake_tail(path, from_beginning=False, **kwargs):
+        tail_call_idx["n"] += 1
+        current = tail_call_idx["n"]
+        if current == len(workers) + 1:
+            yield {"type": "assistant", "content": [{"type": "text", "text": "Go, all of you"}]}
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bm_module, "tail_jsonl", fake_tail)
+    monkeypatch.setattr(bm_module, "_BUSY_WAIT_MAX", 0.2)
+    monkeypatch.setattr(bm_module, "_IDLE_POLL_INTERVAL", 0.03)
+
+    # Every worker here is busy-forever, so every _inject() call resolves via
+    # "skip" (never "ok") — no PTY write happens, so write_calls can't be used
+    # to detect fan-out completion. Instead, wrap _inject itself and record a
+    # completion timestamp per call so we can measure the actual spread.
+    original_inject = bm_module._inject
+    completion_times: list[float] = []
+
+    async def tracked_inject(terminal_id, text, record):
+        result = await original_inject(terminal_id, text, record)
+        completion_times.append(time.monotonic())
+        return result
+
+    monkeypatch.setattr(bm_module, "_inject", tracked_inject)
+
+    cm = ChannelManager()
+    t_start = time.monotonic()
+    result = await cm.start(lead.id, [w.id for w in workers], "kickoff", max_turns=10)
+    assert result.get("ok") is True
+    cid = result["channel_id"]
+
+    # Poll until all N worker deliveries have resolved (or a generous timeout).
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if len(completion_times) >= len(workers) or time.monotonic() - t_start > 2.0:
+            break
+
+    assert len(completion_times) == len(workers), (
+        f"Expected {len(workers)} _inject completions, got {len(completion_times)}"
+    )
+
+    elapsed = max(completion_times) - t_start
+
+    # Sequential old code: >= 3 * 0.2s = 0.6s just for the idle-gate waits.
+    # Concurrent new code: ~1 * 0.2s (all three waits run in parallel) plus
+    # scheduling overhead.
+    assert elapsed < 0.5, (
+        f"Broadcasting to {len(workers)} busy workers took {elapsed:.3f}s — expected well under "
+        f"{len(workers)} * _BUSY_WAIT_MAX (0.6s), which would indicate the old sequential "
+        "for-loop (head-of-line blocking) regressed."
+    )
+
+    # Channel must still be active — all-skip does not end or cap the channel.
+    record = cm._channels[cid]
+    assert record.state == "active"
+
+    cm.stop(cid)
+    await asyncio.sleep(0)

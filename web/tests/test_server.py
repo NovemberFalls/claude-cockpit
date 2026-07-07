@@ -8,6 +8,7 @@ import logging_config
 logging_config.setup("WARNING")
 
 from server import app
+import server as server_module
 
 
 @pytest.fixture
@@ -58,7 +59,6 @@ async def test_me_local(client):
 async def test_git_status_non_git_dir(client):
     """Git status on a non-git directory returns git=False."""
     import tempfile
-    import os
     with tempfile.TemporaryDirectory() as tmpdir:
         res = await client.get(f"/api/git/status?path={tmpdir}")
         assert res.status_code == 200
@@ -357,3 +357,98 @@ async def test_upload_mixed_valid_invalid_returns_partial(client):
     assert "errors" in data
     assert len(data["errors"]) == 1
     assert "bad.exe" in data["errors"][0]
+
+
+# ---------------------------------------------------------------------------
+# main() — default bind host (fix: insecure default was HOST=0.0.0.0)
+#
+# uvicorn.run is monkeypatched in every test below so main() never actually
+# binds a real port or starts a server — we only assert what main() WOULD
+# hand to uvicorn, and whether it logged the no-authentication warning.
+# server_module.logger.warning is monkeypatched directly (rather than using
+# caplog) because logging_config.setup() sets propagate=False on the
+# "cockpit" logger, which would prevent records from reaching caplog's
+# root-attached capture handler.
+# ---------------------------------------------------------------------------
+
+
+def _patch_uvicorn_run(monkeypatch):
+    """Replace uvicorn.run with a stub that records its args instead of
+    binding a real port. Returns the dict the stub will populate.
+    """
+    import uvicorn
+    captured = {}
+
+    def fake_run(app, host, port):
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    return captured
+
+
+def _patch_server_warning(monkeypatch):
+    """Wrap server_module.logger.warning to record formatted messages."""
+    warnings: list[str] = []
+    original_warning = server_module.logger.warning
+
+    def tracked_warning(msg, *args, **kwargs):
+        warnings.append(msg % args if args else msg)
+        return original_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(server_module.logger, "warning", tracked_warning)
+    return warnings
+
+
+def test_main_defaults_to_loopback_host(monkeypatch):
+    """main() binds 127.0.0.1 by default (not 0.0.0.0) when HOST is unset,
+    and does not log the no-authentication warning (127.0.0.1 is loopback).
+    """
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.setenv("PORT", "18420")
+    monkeypatch.setenv("NO_BROWSER", "1")  # skip the browser-open timer thread
+
+    captured = _patch_uvicorn_run(monkeypatch)
+    warnings = _patch_server_warning(monkeypatch)
+
+    server_module.main()
+
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 18420
+    assert not any("no authentication" in w.lower() for w in warnings)
+
+
+def test_main_warns_when_host_overridden_to_non_loopback(monkeypatch):
+    """main() logs a prominent warning when HOST is explicitly set to a
+    non-loopback address, since the API has no authentication.
+    """
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("PORT", "18421")
+    monkeypatch.setenv("NO_BROWSER", "1")
+
+    captured = _patch_uvicorn_run(monkeypatch)
+    warnings = _patch_server_warning(monkeypatch)
+
+    server_module.main()
+
+    assert captured["host"] == "0.0.0.0"
+    assert any(
+        "no authentication" in w.lower() and "0.0.0.0" in w for w in warnings
+    ), f"Expected a prominent non-loopback warning; got: {warnings}"
+
+
+def test_main_host_env_override_to_loopback_alias_does_not_warn(monkeypatch):
+    """HOST=localhost (a recognised loopback alias) is respected and does NOT
+    trigger the no-authentication warning.
+    """
+    monkeypatch.setenv("HOST", "localhost")
+    monkeypatch.setenv("PORT", "18422")
+    monkeypatch.setenv("NO_BROWSER", "1")
+
+    captured = _patch_uvicorn_run(monkeypatch)
+    warnings = _patch_server_warning(monkeypatch)
+
+    server_module.main()
+
+    assert captured["host"] == "localhost"
+    assert not any("no authentication" in w.lower() for w in warnings)

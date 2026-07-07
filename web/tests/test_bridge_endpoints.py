@@ -29,7 +29,6 @@ logging_config.setup("WARNING")
 
 from server import app
 import server as server_module
-import bridge_manager as bm_module
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +215,135 @@ async def test_bridge_manual_failure_returns_400(client, monkeypatch):
     data = res.json()
     assert data["ok"] is False
     assert "error" in data
+
+
+# ---------------------------------------------------------------------------
+# POST /api/bridge/manual — conflict guard (409)
+#
+# Regression tests for the fix that gave manual relay the same busy-session
+# guard as /api/bridge/auto and /api/bridge/channel. Previously start_manual
+# had NO conflict check at all — a manual relay into (or out of) a session
+# already enrolled in an active V2 bridge or V3 channel would interleave
+# writes into that session's PTY input buffer with the active relay task's
+# writes, corrupting output.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bridge_manual_conflict_when_from_id_in_active_bridge(client, monkeypatch):
+    """Returns 409 when from_terminal_id is already in an active bridge."""
+    monkeypatch.setattr(
+        server_module.bridge_manager,
+        "list_active",
+        lambda: [{"bridge_id": "br-1", "from_id": "a", "to_id": "c", "state": "active",
+                  "from_name": "A", "to_name": "C", "turns_used": 0, "max_turns": 4}],
+    )
+    monkeypatch.setattr(server_module.channel_manager, "member_ids", MagicMock(return_value=set()))
+
+    start_manual_calls: list = []
+
+    async def fake_start_manual(*a, **kw):
+        start_manual_calls.append((a, kw))
+        return {"ok": True}
+
+    monkeypatch.setattr(server_module.bridge_manager, "start_manual", fake_start_manual)
+
+    res = await client.post("/api/bridge/manual", json={
+        "from_terminal_id": "a",
+        "to_terminal_id": "b",
+        "message": "relay this",
+    })
+    assert res.status_code == 409
+    data = res.json()
+    assert data["ok"] is False
+    assert "active bridge" in data.get("error", "").lower()
+    # start_manual must NOT have been called — the guard short-circuits before it
+    assert len(start_manual_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_manual_conflict_when_to_id_in_active_bridge(client, monkeypatch):
+    """Returns 409 when to_terminal_id is already in an active bridge."""
+    monkeypatch.setattr(
+        server_module.bridge_manager,
+        "list_active",
+        lambda: [{"bridge_id": "br-1", "from_id": "x", "to_id": "b", "state": "active",
+                  "from_name": "X", "to_name": "B", "turns_used": 0, "max_turns": 4}],
+    )
+    monkeypatch.setattr(server_module.channel_manager, "member_ids", MagicMock(return_value=set()))
+
+    start_manual_calls: list = []
+
+    async def fake_start_manual(*a, **kw):
+        start_manual_calls.append((a, kw))
+        return {"ok": True}
+
+    monkeypatch.setattr(server_module.bridge_manager, "start_manual", fake_start_manual)
+
+    res = await client.post("/api/bridge/manual", json={
+        "from_terminal_id": "a",
+        "to_terminal_id": "b",
+        "message": "relay this",
+    })
+    assert res.status_code == 409
+    assert res.json()["ok"] is False
+    assert len(start_manual_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_manual_conflict_when_session_in_active_channel(client, monkeypatch):
+    """Returns 409 when either session is already enrolled in an active channel."""
+    monkeypatch.setattr(server_module.bridge_manager, "list_active", lambda: [])
+    monkeypatch.setattr(
+        server_module.channel_manager,
+        "member_ids",
+        MagicMock(return_value={"b"}),
+    )
+
+    start_manual_calls: list = []
+
+    async def fake_start_manual(*a, **kw):
+        start_manual_calls.append((a, kw))
+        return {"ok": True}
+
+    monkeypatch.setattr(server_module.bridge_manager, "start_manual", fake_start_manual)
+
+    res = await client.post("/api/bridge/manual", json={
+        "from_terminal_id": "a",
+        "to_terminal_id": "b",
+        "message": "relay this",
+    })
+    assert res.status_code == 409
+    data = res.json()
+    assert data["ok"] is False
+    assert "channel" in data.get("error", "").lower()
+    assert len(start_manual_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_bridge_manual_no_conflict_when_only_ended_bridges_exist(client, monkeypatch):
+    """Does NOT return 409 when all existing bridges are in a terminal state."""
+    monkeypatch.setattr(
+        server_module.bridge_manager,
+        "list_active",
+        lambda: [{"bridge_id": "old1", "from_id": "a", "to_id": "b", "state": "ended_user",
+                  "from_name": "A", "to_name": "B", "turns_used": 2, "max_turns": 4}],
+    )
+    monkeypatch.setattr(server_module.channel_manager, "member_ids", MagicMock(return_value=set()))
+
+    async def fake_start_manual(*a, **kw):
+        return {"ok": True}
+
+    monkeypatch.setattr(server_module.bridge_manager, "start_manual", fake_start_manual)
+
+    res = await client.post("/api/bridge/manual", json={
+        "from_terminal_id": "a",
+        "to_terminal_id": "b",
+        "message": "fresh relay",
+    })
+    assert res.status_code != 409
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import os
 os.environ.setdefault("MAX_SESSIONS", "8")
 
 from pty_manager import PtyManager
@@ -269,11 +268,10 @@ class TestFastModeCmd:
         )
         assert '--settings "' in cmd
 
-        # Extract the path from the cmd string (between the double quotes after --settings)
+        # Confirm the path is present in the cmd string (between the double quotes after --settings)
         import re
         m = re.search(r'--settings "([^"]+)"', cmd)
         assert m, f"Could not extract --settings path from: {cmd!r}"
-        settings_path = m.group(1)
 
         # The file should no longer exist (cleanup runs post-spawn in server.py),
         # but the session stores the path so we can check what was written.

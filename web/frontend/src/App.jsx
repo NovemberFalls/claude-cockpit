@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
 import HexGrid from "./components/HexGrid";
-import TopBar from "./components/TopBar";
+import TopBar, { getModelProvider } from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
 import StatusBar from "./components/StatusBar";
@@ -9,6 +9,8 @@ import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
 import BridgeModal from "./components/BridgeModal";
+import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM } from "./utils/terminalFit";
+import { computeEndEvents, formatEndEventToast, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 
 const LOCATIONS_KEY = "cockpit-locations";
 const RECENTS_KEY = "cockpit-recent-locations";
@@ -57,10 +59,9 @@ function notifyActivityChange(name, terminalId, prevState, currState) {
 }
 
 const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
-const ZOOM_KEY = "cockpit-terminal-zoom";
-const DEFAULT_ZOOM = 13;
-const MIN_ZOOM = 8;
-const MAX_ZOOM = 28;
+// ZOOM_STORAGE_KEY/DEFAULT_ZOOM/MIN_ZOOM/MAX_ZOOM imported from utils/terminalFit —
+// PopoutTerminal.jsx (a separate window/document) reads the same constants
+// directly from localStorage, so both must stay in lockstep.
 
 let nextLocalId = 1;
 
@@ -77,7 +78,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(() => lsLoad(SIDEBAR_WIDTH_KEY, 224));
   const [terminalZoom, setTerminalZoom] = useState(() => {
-    const saved = lsLoad(ZOOM_KEY, DEFAULT_ZOOM);
+    const saved = lsLoad(ZOOM_STORAGE_KEY, DEFAULT_ZOOM);
     return (saved >= MIN_ZOOM && saved <= MAX_ZOOM) ? saved : DEFAULT_ZOOM;
   });
   const [zoomToast, setZoomToast] = useState(null);
@@ -118,6 +119,14 @@ export default function App() {
   const [workspacePresets, setWorkspacePresets] = useState(() => lsLoad(WORKSPACES_KEY, []));
   const paneRefs = useRef([]);
   const prevStatesRef = useRef({});
+  // Bridge/channel end-event tracking (see utils/bridgeEvents.js) — last-seen
+  // record per id + a permanent "already toasted" set, so a bridge/channel
+  // ending fires exactly one Toast regardless of how many more polls observe
+  // its terminal state before the backend's TTL prunes it.
+  const prevBridgeStatesRef = useRef(new Map());
+  const seenBridgeIdsRef = useRef(new Set());
+  const prevChannelStatesRef = useRef(new Map());
+  const seenChannelIdsRef = useRef(new Set());
 
   // System stats (polled from /api/system every 5s)
   const [systemStats, setSystemStats] = useState(null);
@@ -300,6 +309,9 @@ export default function App() {
         permissionMode,
         effort,
         fast: isOpus && fast,
+        ...(getModelProvider(useModel) === "openrouter"
+          ? { provider: "openrouter", providerModel: useModel }
+          : {}),
         ...(options.continueSession ? { continue: true } : {}),
         ...(options.bypassPermissions ? { bypassPermissions: true } : {}),
         ...(options.resumeSessionId ? { resume_session_id: options.resumeSessionId } : {}),
@@ -628,7 +640,9 @@ export default function App() {
     return () => clearInterval(id);
   }, [backendReady]);
 
-  // Poll /api/bridge every 3s to track active bridges for the indicator overlay
+  // Poll /api/bridge every 3s to track active bridges for the indicator overlay.
+  // Also detects active -> ended transitions (or TTL-prune vanish) and toasts
+  // the reason — see utils/bridgeEvents.js.
   useEffect(() => {
     if (!backendReady) return;
     const fetchBridges = async () => {
@@ -636,7 +650,13 @@ export default function App() {
         const res = await fetch("/api/bridge");
         if (!res.ok) return;
         const data = await res.json();
-        setActiveBridges(data.bridges || []);
+        const bridges = data.bridges || [];
+        setActiveBridges(bridges);
+        const events = computeEndEvents(BRIDGE_KIND, bridges, prevBridgeStatesRef.current, seenBridgeIdsRef.current);
+        events.forEach((evt) => {
+          const { message, type } = formatEndEventToast(evt);
+          toast(message, type);
+        });
       } catch (_) {
         // soft-fail — stale bridge state is not critical
       }
@@ -644,9 +664,10 @@ export default function App() {
     fetchBridges();
     const id = setInterval(fetchBridges, 3000);
     return () => clearInterval(id);
-  }, [backendReady]);
+  }, [backendReady, toast]);
 
-  // Poll /api/bridge/channel every 3s to track active channels
+  // Poll /api/bridge/channel every 3s to track active channels. Also detects
+  // active -> ended transitions (or TTL-prune vanish) and toasts the reason.
   useEffect(() => {
     if (!backendReady) return;
     const fetchChannels = async () => {
@@ -654,7 +675,13 @@ export default function App() {
         const res = await fetch("/api/bridge/channel");
         if (!res.ok) return;
         const data = await res.json();
-        setChannels(data.channels || []);
+        const channelList = data.channels || [];
+        setChannels(channelList);
+        const events = computeEndEvents(CHANNEL_KIND, channelList, prevChannelStatesRef.current, seenChannelIdsRef.current);
+        events.forEach((evt) => {
+          const { message, type } = formatEndEventToast(evt);
+          toast(message, type);
+        });
       } catch (_) {
         // soft-fail — stale channel state is not critical
       }
@@ -662,7 +689,7 @@ export default function App() {
     fetchChannels();
     const id = setInterval(fetchChannels, 3000);
     return () => clearInterval(id);
-  }, [backendReady]);
+  }, [backendReady, toast]);
 
   // Poll /api/terminals/{id}/workflows every 3s — best-effort background polling
   const sessionsForWorkflows = useRef(sessions);
@@ -849,6 +876,24 @@ export default function App() {
     return null;
   }, [channels]);
 
+  /** Set of terminalIds currently participating in any active bridge or channel.
+   *  Passed to BridgeModal so its session pickers can disable already-busy sessions
+   *  instead of letting the user hit a 409 on Send. */
+  const busyTerminalIds = useMemo(() => {
+    const ids = new Set();
+    for (const b of activeBridges) {
+      if (b.state !== "active") continue;
+      if (b.from_id) ids.add(b.from_id);
+      if (b.to_id) ids.add(b.to_id);
+    }
+    for (const ch of channels) {
+      if (ch.state !== "active") continue;
+      if (ch.lead_id) ids.add(ch.lead_id);
+      if (ch.worker_ids) for (const w of ch.worker_ids) ids.add(w);
+    }
+    return ids;
+  }, [activeBridges, channels]);
+
   // BroadcastChannel: receive CLOSED from popout windows to clear their placeholder
   useEffect(() => {
     const bc = new BroadcastChannel("cockpit-popout");
@@ -906,6 +951,48 @@ export default function App() {
       { continueSession: true, bypassPermissions: session.bypassPermissions }
     );
   }, [sessions, createSession]);
+
+  // Rename a session — PATCH /api/terminals/{id} always commits the Cockpit-side
+  // name first; sync_claude best-effort injects /rename into the live session
+  // and may report claude_synced: false without the whole request failing.
+  // Owns the sessions-state mutation here (not in TerminalPane) so the sidebar
+  // name updates immediately alongside the pane header.
+  // Optimistic: the new name is shown before the PATCH resolves — with
+  // sync_claude the request blocks up to ~5s waiting for the session to go
+  // idle, and the header showing the stale name that whole time reads as a
+  // hang. Rolled back if the server rejects the rename.
+  const renameSession = useCallback(async (localId, newName, syncClaude) => {
+    const session = sessions.find((s) => s.id === localId);
+    if (!session?.terminalId) return;
+    const prevName = session.name;
+    setSessions((prev) =>
+      prev.map((s) => (s.id === localId ? { ...s, name: newName } : s))
+    );
+    const rollback = () =>
+      setSessions((prev) =>
+        prev.map((s) => (s.id === localId ? { ...s, name: prevName } : s))
+      );
+    try {
+      const res = await fetch(`/api/terminals/${session.terminalId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName, sync_claude: syncClaude }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        rollback();
+        toast(data.error || "Rename failed", "error");
+        return;
+      }
+      if (syncClaude && data.claude_synced === false) {
+        toast(`Renamed to "${newName}" — Claude session sync did not go through`, "info");
+      }
+    } catch (err) {
+      rollback();
+      toast(`Rename failed: ${err.message}`, "error");
+    }
+  }, [sessions, toast]);
+
   // Workspace preset management
   const saveWorkspace = useCallback((name) => {
     const preset = {
@@ -970,7 +1057,7 @@ export default function App() {
   /** Apply a zoom level: persist, show toast, update state */
   const applyZoom = useCallback((value) => {
     setTerminalZoom(value);
-    lsSave(ZOOM_KEY, value);
+    lsSave(ZOOM_STORAGE_KEY, value);
     clearTimeout(zoomToastTimer.current);
     setZoomToast(value);
     zoomToastTimer.current = setTimeout(() => setZoomToast(null), 1200);
@@ -1156,6 +1243,7 @@ export default function App() {
             sidebarOpen={sidebarOpen}
             setSidebarOpen={setSidebarOpen}
             user={user}
+            onToast={toast}
           />
 
           <div className="flex flex-1 min-h-0">
@@ -1411,6 +1499,7 @@ export default function App() {
                           onEndBridge={handleEndBridge}
                           onPopout={session.terminalId ? handlePopout : undefined}
                           workflowSummary={workflowsByTerminal[session.terminalId] || null}
+                          onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
                         />
                       )}
                       {/* Channel overlay — shown when pane is part of an active channel */}
@@ -1553,6 +1642,7 @@ export default function App() {
               open={true}
               fromSession={fromSession}
               allSessions={sessions}
+              busyTerminalIds={busyTerminalIds}
               onSendManual={handleSendManual}
               onStartAuto={handleStartAuto}
               onStartChannel={handleStartChannel}

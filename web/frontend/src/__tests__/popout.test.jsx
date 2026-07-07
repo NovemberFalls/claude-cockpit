@@ -202,7 +202,11 @@ vi.mock("../components/StateIcon", () => ({
 // ---------------------------------------------------------------------------
 
 vi.mock("../components/HexGrid", () => ({ default: () => null }));
-vi.mock("../components/TopBar", () => ({ default: () => null }));
+// MODELS is exported alongside default — TerminalPane.jsx/PopoutTerminal.jsx
+// map session.model through it for display (falls back to the raw id when
+// not found, which is what these tests assert for ids like
+// "claude-sonnet-4-6" that intentionally aren't in the real MODELS list).
+vi.mock("../components/TopBar", () => ({ default: () => null, MODELS: [] }));
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/StatusBar", () => ({ default: () => null }));
 vi.mock("../components/NewSessionDialog", () => ({ default: () => null }));
