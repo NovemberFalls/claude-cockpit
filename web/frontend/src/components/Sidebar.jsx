@@ -1,6 +1,12 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle, Save, Trash2, Play } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle, Save, Trash2, Play, LifeBuoy } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
 import StateIcon from "./StateIcon";
+
+/** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
+function openExternal(url) {
+  fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
+    .catch(() => window.open(url, "_blank"));
+}
 
 /** Normalize path separators to backslash for comparison */
 function norm(dir) {
@@ -543,17 +549,22 @@ export default function Sidebar({
             style={{ borderColor: "var(--border-color)" }}
           >
             <button
-              onClick={() => {
-                const url = "https://registry.modelcontextprotocol.io/";
-                fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) })
-                  .catch(() => window.open(url, "_blank"));
-              }}
+              onClick={() => openExternal("https://registry.modelcontextprotocol.io/")}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
               style={{ color: "var(--text-secondary)" }}
               title="Browse MCP server registry"
             >
               <Puzzle size={12} />
               MCP Servers
+            </button>
+            <button
+              onClick={() => openExternal("https://desk.boord-its.com")}
+              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
+              style={{ color: "var(--text-secondary)" }}
+              title="Open the BITS service desk"
+            >
+              <LifeBuoy size={12} />
+              Support
             </button>
           </div>
         </>

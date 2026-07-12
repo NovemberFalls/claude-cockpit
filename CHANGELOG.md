@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [1.3.9] - 2026-07-12
+
+### Added
+- **Support link.** A "Support" button in the sidebar's resources footer opens the BITS service desk (https://desk.boord-its.com) in the default browser. Uses the existing `/api/open-url` external-open path (Tauri-safe), with a `window.open` fallback.
+
 ## [1.3.8] - 2026-07-07
 
 ### Added
