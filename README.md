@@ -301,6 +301,12 @@ Tests run automatically on push and PR via GitHub Actions.
 
 ---
 
+## Support
+
+Since v1.3.9, the app includes a **Support** link at the bottom of the sidebar (under MCP Servers). It opens the [BITS service desk](https://desk.boord-its.com) in your default browser, where you can get help or report a problem. You can also [open an issue on GitHub](https://github.com/NovemberFalls/claude-cockpit/issues).
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
