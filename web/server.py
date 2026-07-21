@@ -41,6 +41,7 @@ from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  #
 # same pattern.
 from bridge_manager import _wait_for_idle_simple, _wrap  # noqa: E402
 import settings_store  # noqa: E402 -- grouped with the other local-module imports above for consistency; has no load_dotenv() ordering dependency of its own
+from usage_tracker import usage_tracker  # noqa: E402 -- grouped with the other local-module imports above
 
 START_TIME = _time.time()
 
@@ -88,6 +89,33 @@ async def lifespan(app: FastAPI):
             pass
     app.state.idle_cleanup_task = asyncio.create_task(idle_cleanup_loop())
 
+    # 3b. Start background usage-ingestion loop: every 5s, ingest each running
+    # session's JSONL into the persistent usage SQLite store (survives JSONL
+    # deletion). sqlite3 is synchronous, so ingestion runs in the default
+    # executor to avoid blocking the event loop.
+    async def usage_ingest_loop():
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                await asyncio.sleep(5)
+                for session in list(pty_manager.sessions.values()):
+                    if not session.alive:
+                        continue
+                    try:
+                        jsonl_path = pty_manager._get_jsonl_path(session)
+                        if not jsonl_path:
+                            continue
+                        await loop.run_in_executor(
+                            None, usage_tracker.ingest_jsonl, session.id, jsonl_path
+                        )
+                    except Exception:
+                        logger.error(
+                            "Usage ingestion failed for session %s", session.id, exc_info=True
+                        )
+        except asyncio.CancelledError:
+            pass
+    app.state.usage_ingest_task = asyncio.create_task(usage_ingest_loop())
+
     # 4. Start background state ticker — calls tick() on every live session
     # every ~1s so SessionStateTracker.state is authoritative independent of
     # frontend polling.  The bridge idle gate depends on this for correctness.
@@ -106,6 +134,16 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+
+    # Cancel usage ingestion loop
+    usage_task = getattr(app.state, "usage_ingest_task", None)
+    if usage_task:
+        usage_task.cancel()
+        try:
+            await usage_task
+        except asyncio.CancelledError:
+            pass
+    usage_tracker.close()
 
     # Stop the background state ticker
     await pty_manager.stop_state_ticker()
@@ -415,6 +453,9 @@ async def _session_reader(terminal_id: str):
         data = await pty_manager.read_pty(terminal_id)
         if data:
             session.tracker.feed(data)
+            session.last_output_time = _time.monotonic()
+            if session.tracker.effort:
+                session.effort = session.tracker.effort
             if "\ufffd" in data:
                 logger.debug(
                     "PTY replacement chars in terminal %s: %r",
@@ -959,6 +1000,28 @@ def get_workflows(terminal_id: str):
     workflows.sort(key=lambda w: w.get("started_at") or "", reverse=True)
     # Cap to 20 most recent — keeps the response small for polling
     return {"workflows": workflows[:20]}
+
+
+@app.get("/api/terminals/{terminal_id}/usage")
+def get_terminal_usage(terminal_id: str):
+    """Return persistent token/cost usage for a session, merged with its live effort level.
+
+    Usage totals come from the SQLite-backed usage_tracker (survives JSONL
+    deletion); effort is read from the live in-memory session (parsed from
+    PTY output — see SessionStateTracker._EFFORT_RE).
+    """
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None:
+        return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    summary = usage_tracker.session_summary(terminal_id)
+    summary["effort"] = session.effort or None
+    return summary
+
+
+@app.get("/api/usage/daily")
+def get_daily_usage(day: str | None = None):
+    """Return the daily cost/token rollup, optionally for a specific ``day`` (YYYY-MM-DD)."""
+    return usage_tracker.daily_summary(day)
 
 
 @app.post("/api/bridge/manual")

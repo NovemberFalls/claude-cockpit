@@ -40,6 +40,8 @@ _WAITING_PATTERNS = ["Allow", "Yes/No", "y/n", "Do you want", "(y)es", "(n)o"]
 # Patterns for token/cost parsing
 _TOKEN_RE = re.compile(r"(\d[\d,]*)\s*tokens?")
 _COST_RE = re.compile(r"\$(\d+\.?\d*)")
+# Live effort-level change, e.g. "Set effort level to high" (from the /effort slash command output)
+_EFFORT_RE = re.compile(r"Set effort level to (\w+)")
 
 
 class SessionStateTracker:
@@ -56,6 +58,7 @@ class SessionStateTracker:
         self.output_lines: deque = deque(maxlen=500)  # ring buffer: last 500 ANSI-stripped lines
         self._line_fragment: str = ""  # incomplete line accumulator
         self.context_percent: Optional[int] = None  # last seen context window fill %
+        self.effort: Optional[str] = None  # last effort level seen in PTY output (e.g. "high")
 
     def feed(self, raw_data: str) -> None:
         """Process new PTY output data."""
@@ -95,6 +98,11 @@ class SessionStateTracker:
         ctx_match = re.search(r'context\D{0,30}?(\d{1,3})\s*%', clean, re.IGNORECASE)
         if ctx_match:
             self.context_percent = int(ctx_match.group(1))
+
+        # Detect live effort-level changes (e.g. from the /effort slash command).
+        effort_match = _EFFORT_RE.search(clean)
+        if effort_match:
+            self.effort = effort_match.group(1)
 
     def tick(self) -> str:
         """Check for idle/waiting state based on buffer tail and timing."""
@@ -161,6 +169,7 @@ class TerminalSession:
     context_percent: Optional[int] = None  # last seen context window fill % (from tracker)
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_user_input_time: float = 0.0  # monotonic timestamp of last user keystroke (bridge typing-quiet gate)
+    last_output_time: float = 0.0  # monotonic timestamp of last PTY output (JSONL staleness detection)
 
 
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "8"))
@@ -821,13 +830,20 @@ class PtyManager:
         project_id = session.working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
         jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
 
-        # Strategy 1: known session ID — once discovered, locked in permanently.
-        # We don't re-discover because the fallback strategy can pick up the wrong
-        # file (e.g., another active Claude session's JSONL).
+        # Strategy 1: known session ID. Locked while fresh, but an in-terminal
+        # /resume makes Claude Code append to the RESUMED conversation's file,
+        # leaving the locked file permanently stale (bug #15 family). Detect
+        # that: session produced PTY output recently, yet the locked file
+        # hasn't been written in a long stretch → unlock and re-discover.
         if session.claude_session_id:
             path = os.path.join(jsonl_dir, f"{session.claude_session_id}.jsonl")
             if os.path.isfile(path):
-                return path
+                if not self._jsonl_is_stale(session, path):
+                    return path
+                fresher = self._rediscover_jsonl(session, jsonl_dir)
+                if fresher:
+                    return fresher
+                return path  # stale but nothing better — keep it
 
         if not os.path.isdir(jsonl_dir):
             return None
@@ -847,6 +863,60 @@ class PtyManager:
         # No discovery succeeded. For /resume sessions, the user should use
         # terminal mode — chat mode requires a discoverable JSONL file.
         return None
+
+    # Locked JSONL is considered stale when the session has produced PTY output
+    # within this window but the file hasn't been written for longer than it.
+    _JSONL_STALE_SECONDS = 180.0
+
+    def _jsonl_is_stale(self, session, path: str) -> bool:
+        if session.last_output_time <= 0:
+            return False  # no output activity recorded — nothing to compare against
+        try:
+            file_age = time.time() - os.path.getmtime(path)
+        except OSError:
+            return True
+        output_age = time.monotonic() - session.last_output_time
+        return output_age < self._JSONL_STALE_SECONDS and file_age > self._JSONL_STALE_SECONDS
+
+    def _rediscover_jsonl(self, session, jsonl_dir: str) -> str | None:
+        """Find the JSONL the session is actually writing to after a /resume.
+
+        Candidates: recently-modified files in the project dir NOT claimed by any
+        other live session. Pick the most recently modified one.
+        """
+        claimed = {
+            s.claude_session_id
+            for s in self.sessions.values()
+            if s.id != session.id and s.claude_session_id
+        }
+        best, best_mtime = None, 0.0
+        try:
+            names = os.listdir(jsonl_dir)
+        except OSError:
+            return None
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            sid = name[:-6]
+            if sid == session.claude_session_id or sid in claimed:
+                continue
+            full = os.path.join(jsonl_dir, name)
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                continue
+            # Only files written very recently qualify — the live conversation
+            # file is updated continuously while the session produces output.
+            if time.time() - mtime < self._JSONL_STALE_SECONDS and mtime > best_mtime:
+                best, best_mtime = full, mtime
+        if best:
+            new_id = os.path.basename(best)[:-6]
+            logger.info(
+                "Re-locking JSONL for terminal %s: %s -> %s (stale after /resume)",
+                session.id, session.claude_session_id, new_id,
+            )
+            session.claude_session_id = new_id
+        return best
 
     def _session_to_dict(self, session: TerminalSession) -> dict:
         """Build the REST-facing dict for a single session.
