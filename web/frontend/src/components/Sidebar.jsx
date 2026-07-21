@@ -1,6 +1,5 @@
-import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Puzzle, Save, Trash2, Play, LifeBuoy } from "lucide-react";
+import { Plus, X, FolderOpen, ChevronRight, ChevronDown, GitBranch, ShieldOff, Save, Trash2, Play, LifeBuoy, Search } from "lucide-react";
 import { useState, useMemo, useEffect, useCallback } from "react";
-import StateIcon from "./StateIcon";
 
 /** Open a URL in the system's default browser (Tauri-safe), falling back to a new tab. */
 function openExternal(url) {
@@ -18,6 +17,25 @@ function shortPath(dir) {
   if (!dir) return "";
   const parts = norm(dir).split("\\").filter(Boolean);
   return parts[parts.length - 1] || dir;
+}
+
+/** Map a session's activity state/status to a --cc-* state color token */
+const STATE_COLOR = {
+  busy: "var(--cc-working)",
+  working: "var(--cc-working)",
+  thinking: "var(--cc-thinking)",
+  waiting: "var(--cc-waiting)",
+  idle: "var(--cc-idle)",
+  running: "var(--cc-idle)",
+  error: "var(--cc-error)",
+  starting: "var(--cc-muted)",
+  history: "var(--cc-muted)",
+};
+function getStateColor(state) {
+  return STATE_COLOR[state] || STATE_COLOR.idle;
+}
+function isPulseState(state) {
+  return state === "busy" || state === "working" || state === "thinking";
 }
 
 /**
@@ -82,7 +100,7 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
     padding: "6px 12px",
     fontSize: "12px",
     cursor: "pointer",
-    color: "var(--text-secondary)",
+    color: "var(--cc-dim)",
     whiteSpace: "nowrap",
   };
 
@@ -94,12 +112,13 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
         left: x,
         top: y,
         zIndex: 1000,
-        backgroundColor: "var(--bg-surface)",
-        border: "1px solid var(--border-color)",
-        borderRadius: "6px",
+        backgroundColor: "var(--cc-surface)",
+        border: "1px solid var(--cc-border)",
+        borderRadius: "8px",
         padding: "4px 0",
         boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
         minWidth: "150px",
+        fontFamily: "inherit",
       }}
     >
       <div
@@ -124,17 +143,17 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
         Open session here
       </div>
       <div
-        style={{ ...itemStyle, color: isBypass ? "var(--yellow)" : "var(--text-secondary)" }}
+        style={{ ...itemStyle, color: isBypass ? "var(--cc-waiting)" : "var(--cc-dim)" }}
         className="hover-bg-elevated"
         onClick={() => { onToggleBypass(path); onClose(); }}
       >
         {isBypass ? "Disable bypass" : "Enable bypass"}
       </div>
       <div
-        style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "4px 0" }}
+        style={{ height: "1px", backgroundColor: "var(--cc-border)", margin: "4px 0" }}
       />
       <div
-        style={{ ...itemStyle, color: "var(--red)" }}
+        style={{ ...itemStyle, color: "var(--cc-error)" }}
         className="hover-bg-elevated"
         onClick={() => { onRemove(path); onClose(); }}
       >
@@ -149,6 +168,10 @@ function LocationContextMenu({ x, y, path, isBypass, onExpand, onNewAt, onRemove
 // ---------------------------------------------------------------------------
 
 function SessionItem({ session, isActive, onSelect, onDelete }) {
+  const state = session.activityState || session.status;
+  const color = getStateColor(state);
+  const pulsing = isPulseState(state);
+
   return (
     <div
       className="group flex items-center"
@@ -157,33 +180,60 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
         e.dataTransfer.effectAllowed = "move";
         e.dataTransfer.setData("text/plain", `session:${session.id}`);
       }}
+      style={{
+        height: "24px",
+        borderRadius: "6px",
+        backgroundColor: isActive ? "color-mix(in srgb, var(--cc-accent) 10%, transparent)" : "transparent",
+        borderLeft: isActive ? "2px solid var(--cc-accent)" : "2px solid transparent",
+      }}
     >
       <button
         onClick={() => onSelect(session.id)}
-        className={`flex items-center gap-2 flex-1 text-left px-3 py-1.5 rounded-md text-sm transition-colors min-w-0 ${!isActive ? "hover-bg-surface" : ""}`}
+        className={`flex items-center gap-1.5 flex-1 text-left h-full min-w-0 ${!isActive ? "hover-bg-surface" : ""}`}
         style={{
-          color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
-          fontWeight: isActive ? 600 : 400,
-          backgroundColor: isActive ? "var(--bg-surface)" : "transparent",
+          paddingLeft: "6px",
+          paddingRight: "4px",
+          borderRadius: "6px",
         }}
       >
-        <StateIcon state={session.activityState || session.status} />
-        <span className="truncate">{session.name}</span>
+        <span
+          data-glowdot
+          style={{
+            width: "6px",
+            height: "6px",
+            borderRadius: "999px",
+            backgroundColor: color,
+            boxShadow: `0 0 6px ${color}`,
+            flexShrink: 0,
+            animation: pulsing ? "cc-pulse 1.5s infinite" : "none",
+          }}
+        />
+        <span
+          className="text-xs truncate flex-1"
+          style={{ color: isActive ? "var(--cc-fg)" : "var(--cc-dim)", fontWeight: isActive ? 700 : 400 }}
+        >
+          {session.name}
+        </span>
         {session.bypassPermissions && (
           <ShieldOff
             size={10}
-            style={{ color: "var(--yellow)", flexShrink: 0 }}
+            style={{ color: "var(--cc-waiting)", flexShrink: 0 }}
             title="Permissions bypassed"
           />
+        )}
+        {session.tokensPerSec > 0 && (
+          <span className="text-[9px] flex-shrink-0" style={{ color: "var(--cc-fn)" }}>
+            {Math.round(session.tokensPerSec)}t/s
+          </span>
         )}
       </button>
       <button
         onClick={(e) => { e.stopPropagation(); onDelete(session.id); }}
-        className="opacity-0 group-hover:opacity-100 p-1.5 rounded transition-all flex-shrink-0 mr-1 hover-color-red"
-        style={{ color: "var(--text-muted)" }}
+        className="opacity-0 group-hover:opacity-100 p-1 rounded transition-all flex-shrink-0 mr-1 hover-color-red"
+        style={{ color: "var(--cc-muted)" }}
         title="Close session"
       >
-        <X size={28} />
+        <X size={12} />
       </button>
     </div>
   );
@@ -194,14 +244,17 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
 
+  const git = gitStatuses[norm(node.path)];
+
   return (
     <div>
       <div
-        className="group flex items-center gap-1 py-0.5 cursor-pointer rounded-md transition-colors hover-bg-surface"
+        className="group flex items-center gap-1 cursor-pointer rounded-md transition-colors hover-bg-surface"
         style={{
-          color: "var(--text-secondary)",
-          paddingLeft: `${depth * 12 + 8}px`,
-          paddingRight: "8px",
+          height: "23px",
+          color: "var(--cc-dim)",
+          paddingLeft: `${depth * 12 + 6}px`,
+          paddingRight: "6px",
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -213,7 +266,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
           <button
             onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
             className="p-0.5 flex-shrink-0"
-            style={{ color: "var(--text-muted)" }}
+            style={{ color: "var(--cc-muted)" }}
           >
             {expanded
               ? <ChevronDown size={10} />
@@ -221,7 +274,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
             }
           </button>
         ) : (
-          <span className="w-[18px] flex-shrink-0" />
+          <span className="w-[15px] flex-shrink-0" />
         )}
 
         <button
@@ -230,48 +283,44 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
           onDoubleClick={() => onNewAt(node.path)}
           title={node.path}
         >
-          <FolderOpen size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
-          <span className="text-xs truncate">{node.name}</span>
+          <FolderOpen size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
+          <span className="text-xs truncate" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{node.name}</span>
           {node.bypassPermissions && (
-            <ShieldOff size={10} style={{ color: "var(--yellow)", flexShrink: 0 }} title="Bypass permissions enabled" />
+            <ShieldOff size={10} style={{ color: "var(--cc-waiting)", flexShrink: 0 }} title="Bypass permissions enabled" />
           )}
         </button>
 
-        {(() => {
-          const git = gitStatuses[norm(node.path)];
-          if (!git?.git) return null;
-          return (
-            <span
-              className="flex items-center gap-0.5 flex-shrink-0"
-              title={`${git.branch}${git.dirty ? ` (${git.files_changed} changed)` : ""}`}
-            >
-              <GitBranch size={9} style={{ color: "var(--text-muted)" }} />
-              <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>
-                {git.branch.length > 12 ? git.branch.slice(0, 12) + "\u2026" : git.branch}
-              </span>
-              {git.dirty && (
-                <span
-                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: "var(--yellow)" }}
-                />
-              )}
+        {git?.git && (
+          <span
+            className="flex items-center gap-0.5 flex-shrink-0"
+            title={`${git.branch}${git.dirty ? ` (${git.files_changed} changed)` : ""}`}
+          >
+            <GitBranch size={9} style={{ color: "var(--cc-muted)" }} />
+            <span className="text-[8px]" style={{ color: "var(--cc-muted)" }}>
+              {git.branch.length > 12 ? git.branch.slice(0, 12) + "…" : git.branch}
             </span>
-          );
-        })()}
+            {git.dirty && (
+              <span
+                className="w-[5px] h-[5px] rounded-full flex-shrink-0"
+                style={{ backgroundColor: "var(--cc-waiting)" }}
+              />
+            )}
+          </span>
+        )}
 
         {sessionsHere.length > 0 && (
           <span
-            className="text-[10px] flex-shrink-0"
-            style={{ color: "var(--text-muted)" }}
+            className="text-[9px] flex-shrink-0"
+            style={{ color: "var(--cc-muted)" }}
           >
             {sessionsHere.length}
           </span>
         )}
 
         <Plus
-          size={14}
+          size={13}
           className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 cursor-pointer"
-          style={{ color: "var(--accent)" }}
+          style={{ color: "var(--cc-accent)" }}
           onClick={(e) => { e.stopPropagation(); onNewAt(node.path); }}
         />
       </div>
@@ -279,7 +328,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
       {expanded && (
         <>
           {sessionsHere.length > 0 && (
-            <div style={{ paddingLeft: `${depth * 12 + 20}px` }}>
+            <div style={{ paddingLeft: `${depth * 12 + 20}px`, display: "flex", flexDirection: "column", gap: "1px" }}>
               {sessionsHere.map((s) => (
                 <SessionItem key={s.id} session={s} isActive={activeIds.includes(s.id)} onSelect={onSelect} onDelete={onDelete} />
               ))}
@@ -371,17 +420,24 @@ export default function Sidebar({
     <aside
       data-tour="sidebar"
       className="flex flex-col flex-shrink-0 h-full"
-      style={{ overflow: "hidden" }}
+      style={{
+        width: "100%",
+        overflow: "hidden",
+        borderRight: "1px solid var(--cc-border)",
+        backgroundColor: "color-mix(in srgb, var(--cc-bg2) 35%, transparent)",
+        fontFamily: "inherit",
+      }}
     >
       <div
-        className="flex flex-col flex-1 overflow-y-auto py-4 px-2"
+        className="flex flex-col flex-1 overflow-y-auto"
+        style={{ padding: "10px 8px 8px" }}
       >
         {/* New button */}
         <button
           data-tour="new-session-btn"
           onClick={onNew}
-          className="flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-md mb-2 transition-colors hover-bg-surface"
-          style={{ color: "var(--text-secondary)" }}
+          className="flex items-center gap-2 text-sm font-medium rounded-md mb-2 transition-colors hover-bg-surface"
+          style={{ color: "var(--cc-dim)", padding: "6px 8px" }}
           title="New session (Ctrl+Shift+N)"
         >
           <Plus size={16} />
@@ -390,35 +446,37 @@ export default function Sidebar({
 
         {/* Session filter */}
         {sessions.length > 0 && (
-          <div className="px-2 mb-2">
-            <input
-              className="w-full text-xs px-2.5 py-1.5 rounded-md"
+          <div className="mb-2" style={{ padding: "0 2px" }}>
+            <div
+              className="flex items-center gap-1.5"
               style={{
-                backgroundColor: "var(--bg-surface)",
-                color: "var(--text-primary)",
-                border: "1px solid var(--border-color)",
-                outline: "none",
+                height: "30px",
+                padding: "0 10px",
+                borderRadius: "8px",
+                backgroundColor: "color-mix(in srgb, var(--cc-surface) 70%, transparent)",
+                border: "1px solid var(--cc-border)",
               }}
-              placeholder="Filter sessions..."
-              value={sessionFilter}
-              onChange={(e) => setSessionFilter(e.target.value)}
-            />
+            >
+              <Search size={12} style={{ color: "var(--cc-muted)", flexShrink: 0 }} />
+              <input
+                className="w-full text-xs bg-transparent min-w-0"
+                style={{ color: "var(--cc-fg)", outline: "none", border: "none" }}
+                placeholder="Filter sessions…"
+                value={sessionFilter}
+                onChange={(e) => setSessionFilter(e.target.value)}
+              />
+            </div>
           </div>
         )}
 
         {/* Workspace presets */}
-        <div className="px-2 mb-2">
-          <div className="flex items-center justify-between mb-1">
-            <p
-              className="text-[10px] uppercase tracking-widest font-semibold px-1"
-              style={{ color: "var(--text-muted)" }}
-            >
-              Workspaces
-            </p>
+        <div className="mb-2" style={{ padding: "0 2px" }}>
+          <div className="flex items-center justify-between mb-1" style={{ padding: "2px 4px 4px" }}>
+            <p className="cc-label">Workspaces</p>
             <button
               onClick={() => setShowSaveWorkspace((v) => !v)}
               className="p-0.5 rounded transition-colors hover-bg-surface"
-              style={{ color: "var(--text-muted)" }}
+              style={{ color: "var(--cc-muted)" }}
               title="Save current workspace"
             >
               <Save size={12} />
@@ -430,9 +488,9 @@ export default function Sidebar({
                 autoFocus
                 className="flex-1 text-xs px-2 py-1 rounded"
                 style={{
-                  backgroundColor: "var(--bg-surface)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border-color)",
+                  backgroundColor: "var(--cc-surface)",
+                  color: "var(--cc-fg)",
+                  border: "1px solid var(--cc-border)",
                   outline: "none",
                   minWidth: 0,
                 }}
@@ -465,18 +523,18 @@ export default function Sidebar({
                     className="flex items-center gap-1.5 flex-1 text-left min-w-0"
                     title={`Load workspace: ${preset.sessions.length} session(s), layout ${preset.layout}`}
                   >
-                    <Play size={10} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                    <span className="text-xs truncate" style={{ color: "var(--text-secondary)" }}>
+                    <Play size={10} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
+                    <span className="text-xs truncate" style={{ color: "var(--cc-dim)" }}>
                       {preset.name}
                     </span>
-                    <span className="text-[9px]" style={{ color: "var(--text-muted)" }}>
+                    <span className="text-[9px]" style={{ color: "var(--cc-muted)" }}>
                       {preset.sessions.length}s
                     </span>
                   </button>
                   <button
                     onClick={() => onDeleteWorkspace?.(preset.name)}
                     className="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-all hover-color-red"
-                    style={{ color: "var(--text-muted)" }}
+                    style={{ color: "var(--cc-muted)" }}
                     title="Delete workspace"
                   >
                     <Trash2 size={10} />
@@ -486,7 +544,7 @@ export default function Sidebar({
             </div>
           )}
           {workspacePresets.length === 0 && !showSaveWorkspace && (
-            <p className="text-[10px] px-1" style={{ color: "var(--text-muted)" }}>
+            <p className="text-[10px] px-1" style={{ color: "var(--cc-muted)" }}>
               No saved workspaces
             </p>
           )}
@@ -494,18 +552,18 @@ export default function Sidebar({
 
         {/* Empty state / first-run card */}
         {locationTree.length === 0 && sessions.length === 0 && (
-          <div className="px-2 py-4">
+          <div className="py-4" style={{ padding: "0 2px" }}>
             <div
               className="rounded-lg p-4"
               style={{
-                backgroundColor: "var(--bg-elevated)",
-                border: "1px solid var(--border-color)",
+                backgroundColor: "var(--cc-surface)",
+                border: "1px solid var(--cc-border)",
               }}
             >
-              <p className="text-xs font-semibold mb-3" style={{ color: "var(--text-primary)" }}>
+              <p className="text-xs font-semibold mb-3" style={{ color: "var(--cc-fg)" }}>
                 Welcome to Claude Cockpit
               </p>
-              <ul className="space-y-2 text-xs" style={{ color: "var(--text-secondary)" }}>
+              <ul className="space-y-2 text-xs" style={{ color: "var(--cc-dim)" }}>
                 <li>• Run multiple Claude Code sessions side-by-side</li>
                 <li>• Organize by project folder with git status</li>
                 <li>• Up to 8 sessions, default layout of 4</li>
@@ -514,8 +572,8 @@ export default function Sidebar({
                 onClick={onNew}
                 className="mt-4 w-full py-1.5 rounded-md text-xs font-medium transition-colors hover-bg-surface"
                 style={{
-                  border: "1px solid var(--border-color)",
-                  color: "var(--accent)",
+                  border: "1px solid var(--cc-border)",
+                  color: "var(--cc-accent)",
                 }}
               >
                 Create your first session →
@@ -527,13 +585,11 @@ export default function Sidebar({
         {/* Location tree */}
         {locationTree.length > 0 && (
           <>
-            <p
-              className="text-[10px] uppercase tracking-widest font-semibold px-3 mb-1"
-              style={{ color: "var(--text-muted)" }}
-            >
-              Locations
-            </p>
-            <div className="flex flex-col">
+            <div className="flex items-center justify-between" style={{ padding: "2px 6px 4px" }}>
+              <span className="cc-label">Locations</span>
+              <span style={{ fontSize: "9px", color: "var(--cc-muted)" }}>{savedLocations.length}</span>
+            </div>
+            <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
                 <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} />
               ))}
@@ -545,22 +601,12 @@ export default function Sidebar({
         <>
           <div style={{ flex: 1 }} />
           <div
-            className="border-t pt-3 mt-3"
-            style={{ borderColor: "var(--border-color)" }}
+            style={{ borderTop: "1px solid var(--cc-border)", paddingTop: "10px", marginTop: "10px" }}
           >
-            <button
-              onClick={() => openExternal("https://registry.modelcontextprotocol.io/")}
-              className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-              style={{ color: "var(--text-secondary)" }}
-              title="Browse MCP server registry"
-            >
-              <Puzzle size={12} />
-              MCP Servers
-            </button>
             <button
               onClick={() => openExternal("https://desk.boord-its.com")}
               className="flex items-center gap-2 text-xs w-full text-left px-3 py-1.5 rounded-md transition-colors hover-bg-surface"
-              style={{ color: "var(--text-secondary)" }}
+              style={{ color: "var(--cc-dim)" }}
               title="Open the BITS service desk"
             >
               <LifeBuoy size={12} />

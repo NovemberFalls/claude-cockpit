@@ -1,53 +1,20 @@
-import { useState } from "react";
-import { Square, Columns, Grid2x2, Wifi, WifiOff, Radio, Info, Pencil, CircleHelp, CircleCheck, CircleX, Loader, Plus, Minus } from "lucide-react";
+import { Info, Radio, Minus, Plus, FlipHorizontal2 } from "lucide-react";
 import { version } from "../../package.json";
 
-// Custom 4x2 grid icon — matches Lucide stroke style for visual consistency
-// with Square/Columns/Grid2x2.
-function Grid4x2({ size = 14, ...props }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      {...props}
-    >
-      {/* Outer rounded rect */}
-      <rect x="2" y="5" width="20" height="14" rx="2" />
-      {/* 3 vertical dividers (creating 4 columns) */}
-      <line x1="7" y1="5" x2="7" y2="19" />
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="17" y1="5" x2="17" y2="19" />
-      {/* 1 horizontal divider (creating 2 rows) */}
-      <line x1="2" y1="12" x2="22" y2="12" />
-    </svg>
-  );
-}
-
-const layoutOptions = [
-  { value: 1, icon: Square, label: "Single" },
-  { value: 2, icon: Columns, label: "Split" },
-  { value: 4, icon: Grid2x2, label: "Quad" },
-  { value: 8, icon: Grid4x2, label: "Octo" },
+const GLOW_LEGEND = [
+  { label: "Working", color: "var(--cc-working, var(--accent))" },
+  { label: "Thinking", color: "var(--cc-thinking, var(--cyan))" },
+  { label: "Waiting", color: "var(--cc-waiting, var(--yellow))" },
+  { label: "Idle", color: "var(--cc-idle, var(--green))" },
 ];
 
-const legendItems = [
-  { icon: Pencil, color: "var(--accent)", label: "Working", desc: "Claude is writing or thinking" },
-  { icon: CircleHelp, color: "var(--yellow)", label: "Waiting", desc: "Needs your approval (pane glows)" },
-  { icon: CircleCheck, color: "var(--green)", label: "Idle", desc: "Ready for input" },
-  { icon: CircleX, color: "var(--red)", label: "Error", desc: "Session has an error" },
-  { icon: Loader, color: "var(--text-muted)", label: "Starting", desc: "Session is launching" },
-];
+const FLIPPABLE = new Set([3, 5, 7]);
 
 export default function StatusBar({
   layout,
   setLayout,
+  flipLayout,
+  setFlipLayout,
   sessions,
   connected,
   broadcastMode,
@@ -57,36 +24,40 @@ export default function StatusBar({
   onZoomOut,
   onZoomReset,
   systemStats,
+  onShowOnboarding,
 }) {
   const runningCount = sessions.filter((s) => s.status === "running").length;
-  const [showLegend, setShowLegend] = useState(false);
+  const flippable = FLIPPABLE.has(layout);
 
   return (
     <footer
-      className="flex items-center justify-between px-5 h-8 flex-shrink-0"
+      className="flex items-center justify-between flex-shrink-0"
       style={{
-        borderTop: "1px solid var(--border-color)",
-        color: "var(--text-muted)",
-        fontSize: "11px",
+        padding: "0 16px",
+        height: 30,
+        borderTop: "1px solid var(--cc-border, var(--border-color))",
+        color: "var(--cc-muted, var(--text-muted))",
+        fontSize: 11,
       }}
     >
-      <div className="flex items-center gap-4">
-        {/* Connection indicator */}
-        <span className="flex items-center gap-1">
-          {connected ? (
-            <Wifi size={10} style={{ color: "var(--green)" }} />
-          ) : (
-            <WifiOff size={10} style={{ color: "var(--red)" }} />
-          )}
+      {/* Left cluster */}
+      <div className="flex items-center" style={{ gap: 15 }}>
+        <span className="flex items-center" style={{ gap: 5, color: connected ? "var(--cc-ok, var(--green))" : "var(--cc-error, var(--red))" }}>
+          <span
+            style={{
+              width: 6, height: 6, borderRadius: 999,
+              background: connected ? "var(--cc-ok, var(--green))" : "var(--cc-error, var(--red))",
+              boxShadow: connected ? "0 0 6px var(--cc-ok, var(--green))" : "none",
+            }}
+          />
           {connected ? "Connected" : "Disconnected"}
         </span>
-
         <span>{sessions.length} session{sessions.length !== 1 ? "s" : ""}</span>
         {runningCount > 0 && (
-          <span style={{ color: "var(--green)" }}>{runningCount} running</span>
+          <span style={{ color: "var(--cc-ok, var(--green))" }}>{runningCount} running</span>
         )}
         {systemStats && (
-          <span style={{ color: "var(--text-muted)", fontSize: "11px" }}>
+          <span>
             CPU {systemStats.cpu_percent}% · {systemStats.ram_used_gb}/{systemStats.ram_total_gb}GB
             {systemStats.gpu_percent !== null && systemStats.gpu_percent !== undefined && (
               <> · GPU {systemStats.gpu_percent}%</>
@@ -96,53 +67,28 @@ export default function StatusBar({
         <span style={{ opacity: 0.5 }}>v{version}</span>
       </div>
 
-      <div className="flex items-center gap-2" style={{ position: "relative" }}>
-        {/* Icon legend popup */}
-        {showLegend && (
-          <div
-            style={{
-              position: "absolute",
-              bottom: "100%",
-              right: 0,
-              marginBottom: "8px",
-              backgroundColor: "var(--bg-surface)",
-              border: "1px solid var(--border-color)",
-              borderRadius: "8px",
-              padding: "12px 16px",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-              minWidth: "300px",
-              zIndex: 100,
-            }}
-          >
-            <p className="text-xs font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
-              Status Icons
-            </p>
-            {legendItems.map(({ icon: Icon, color, label, desc }) => (
-              <div key={label} className="flex items-center gap-2 py-1">
-                <Icon size={12} style={{ color, flexShrink: 0 }} />
-                <span className="text-xs font-medium" style={{ color: "var(--text-primary)", minWidth: "52px" }}>
-                  {label}
-                </span>
-                <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  {desc}
-                </span>
-              </div>
-            ))}
-            <div style={{ height: "1px", backgroundColor: "var(--border-color)", margin: "8px 0" }} />
-            <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-              Ctrl+1-8 focus panes &middot; Ctrl+Shift+Enter broadcast &middot; Ctrl+=/- zoom
-            </p>
+      {/* Right cluster */}
+      <div className="flex items-center" style={{ gap: 12 }}>
+        {/* GLOW legend */}
+        <div
+          className="flex items-center"
+          style={{ gap: 9, paddingRight: 12, borderRight: "1px solid var(--cc-border, var(--border-color))" }}
+        >
+          <span className="cc-label" style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".1em", color: "var(--cc-muted, var(--text-muted))" }}>GLOW</span>
+          {GLOW_LEGEND.map((g) => (
+            <span key={g.label} className="flex items-center" style={{ gap: 3, fontSize: 10, color: "var(--cc-dim, var(--text-secondary))" }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: g.color }} />
+              {g.label}
+            </span>
+          ))}
+        </div>
 
-          </div>
-        )}
-
-        {/* Info button */}
+        {/* Info → Onboarding */}
         <button
-          onClick={() => setShowLegend((p) => !p)}
-          onBlur={() => setTimeout(() => setShowLegend(false), 150)}
-          title="Status icon legend & shortcuts"
-          className={`p-1 rounded transition-colors ${!showLegend ? "hover-color-secondary" : ""}`}
-          style={{ color: showLegend ? "var(--accent)" : "var(--text-muted)" }}
+          onClick={() => onShowOnboarding?.()}
+          title="Getting started"
+          className="flex p-1 rounded transition-colors"
+          style={{ color: "var(--cc-muted, var(--text-muted))" }}
         >
           <Info size={14} />
         </button>
@@ -152,65 +98,73 @@ export default function StatusBar({
           data-tour="broadcast-btn"
           onClick={() => setBroadcastMode?.(!broadcastMode)}
           title="Broadcast mode (Ctrl+Shift+Enter)"
-          className={`p-1 rounded transition-colors ${!broadcastMode ? "hover-color-secondary" : ""}`}
-          style={{
-            color: broadcastMode ? "var(--yellow)" : "var(--text-muted)",
-          }}
+          className="flex p-1 rounded transition-colors"
+          style={{ color: broadcastMode ? "var(--cc-waiting, var(--yellow))" : "var(--cc-muted, var(--text-muted))" }}
         >
           <Radio size={14} />
         </button>
 
-        {/* Zoom controls */}
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={onZoomOut}
-            title="Zoom out (Ctrl+-)"
-            className="p-1 rounded transition-colors hover-color-secondary"
-            style={{ color: "var(--text-muted)" }}
-          >
+        {/* Zoom stepper */}
+        <div
+          className="flex items-center"
+          style={{ gap: 2, background: "color-mix(in srgb, var(--cc-surface, var(--bg-surface)) 70%, transparent)", borderRadius: 7, padding: 2 }}
+        >
+          <button onClick={onZoomOut} title="Zoom out (Ctrl+-)" className="flex" style={{ padding: "3px 5px", color: "var(--cc-muted, var(--text-muted))" }}>
             <Minus size={12} />
           </button>
           <button
             onClick={onZoomReset}
             title="Reset zoom (Ctrl+0)"
-            className="px-1 rounded transition-colors hover-color-secondary"
-            style={{
-              color: terminalZoom !== 13 ? "var(--accent)" : "var(--text-muted)",
-              fontSize: "10px",
-              fontWeight: 600,
-              minWidth: "28px",
-              textAlign: "center",
-            }}
+            style={{ fontSize: 10, fontWeight: 600, padding: "0 3px", minWidth: 30, textAlign: "center", color: terminalZoom !== 13 ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))" }}
           >
             {terminalZoom}px
           </button>
-          <button
-            onClick={onZoomIn}
-            title="Zoom in (Ctrl+=)"
-            className="p-1 rounded transition-colors hover-color-secondary"
-            style={{ color: "var(--text-muted)" }}
-          >
+          <button onClick={onZoomIn} title="Zoom in (Ctrl+=)" className="flex" style={{ padding: "3px 5px", color: "var(--cc-muted, var(--text-muted))" }}>
             <Plus size={12} />
           </button>
         </div>
 
-        <span style={{ width: 1, height: 14, backgroundColor: "var(--border-color)", opacity: 0.5 }} />
-
-        {/* Layout switcher */}
-        <div data-tour="layout-switcher" className="flex items-center gap-1">
-          {layoutOptions.map(({ value, icon: Icon, label }) => (
-            <button
-              key={value}
-              onClick={() => setLayout(value)}
-              title={`${label} (Ctrl+Shift+${value})`}
-              className={`p-1 rounded transition-colors ${layout !== value ? "hover-color-secondary" : ""}`}
-              style={{
-                color: layout === value ? "var(--accent)" : "var(--text-muted)",
-              }}
-            >
-              <Icon size={14} />
-            </button>
-          ))}
+        {/* Layout switcher 1–8 + Flip */}
+        <div className="flex items-center" style={{ gap: 6 }} data-tour="layout-switcher">
+          <div
+            className="flex items-center"
+            style={{ gap: 2, background: "color-mix(in srgb, var(--cc-surface, var(--bg-surface)) 70%, transparent)", borderRadius: 7, padding: 2 }}
+          >
+            {Array.from({ length: 8 }).map((_, i) => {
+              const n = i + 1;
+              const on = layout === n;
+              return (
+                <button
+                  key={n}
+                  onClick={() => setLayout(n)}
+                  title={`${n} pane${n > 1 ? "s" : ""}`}
+                  style={{
+                    width: 21, height: 22, borderRadius: 5, fontSize: 11, fontWeight: 700,
+                    fontFamily: "inherit", cursor: "pointer", border: "none",
+                    color: on ? "#0f1216" : "var(--cc-dim, var(--text-secondary))",
+                    background: on ? "var(--cc-accent, var(--accent))" : "transparent",
+                  }}
+                >
+                  {n}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            onClick={() => { if (flippable) setFlipLayout?.(!flipLayout); }}
+            disabled={!flippable}
+            title={flippable ? "Flip featured pane" : "Flip available for 3 / 5 / 7 layouts"}
+            className="flex items-center"
+            style={{
+              padding: 4, borderRadius: 6, border: "none",
+              cursor: flippable ? "pointer" : "not-allowed",
+              color: flippable ? (flipLayout ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))") : "var(--cc-muted, var(--text-muted))",
+              background: flippable && flipLayout ? "color-mix(in srgb, var(--cc-accent, #4ea1e8) 12%, transparent)" : "transparent",
+              opacity: flippable ? 1 : 0.5,
+            }}
+          >
+            <FlipHorizontal2 size={14} />
+          </button>
         </div>
       </div>
     </footer>

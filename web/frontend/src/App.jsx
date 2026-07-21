@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
-import HexGrid from "./components/HexGrid";
 import TopBar, { getModelProvider } from "./components/TopBar";
 import Sidebar from "./components/Sidebar";
+import ActivityRail from "./components/ActivityRail";
 import TerminalPane from "./components/TerminalPane";
 import StatusBar from "./components/StatusBar";
 import NewSessionDialog from "./components/NewSessionDialog";
 import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
 import BridgeModal from "./components/BridgeModal";
+import FleetView from "./components/FleetView";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 
@@ -21,6 +22,61 @@ const MODEL_KEY = "cockpit-model";
 const PERMISSION_MODE_KEY = "cockpit-permission-mode";
 const EFFORT_KEY = "cockpit-effort";
 const FAST_KEY = "cockpit-fast";
+const LAYOUT_KEY = "cockpit-layout";
+const FLIP_KEY = "cockpit-flip";
+
+/**
+ * Adaptive layout engine (README "Adaptive Layout Engine" table).
+ * Returns { cols, rows, areas: [{ col, row }] } where col/row are
+ * CSS grid-column / grid-row shorthand strings. `flip` mirrors the
+ * featured column for n ∈ {3,5,7}.
+ */
+function computeLayout(n, flip) {
+  const A = (col, row) => ({ col, row });
+  switch (n) {
+    case 1:
+      return { cols: "1fr", rows: "1fr", areas: [A("1 / 2", "1 / 2")] };
+    case 2:
+      return { cols: "1fr 1fr", rows: "1fr", areas: [A("1 / 2", "1 / 2"), A("2 / 3", "1 / 2")] };
+    case 3: {
+      const fc = flip ? "2 / 3" : "1 / 2", sc = flip ? "1 / 2" : "2 / 3";
+      return { cols: "1fr 1fr", rows: "1fr 1fr", areas: [A(fc, "1 / 3"), A(sc, "1 / 2"), A(sc, "2 / 3")] };
+    }
+    case 4:
+      return {
+        cols: "1fr 1fr", rows: "1fr 1fr",
+        areas: [A("1 / 2", "1 / 2"), A("2 / 3", "1 / 2"), A("1 / 2", "2 / 3"), A("2 / 3", "2 / 3")],
+      };
+    case 5: {
+      const fc = flip ? "2 / 3" : "1 / 2", sc = flip ? "1 / 2" : "2 / 3";
+      const a = [A(fc, "1 / 5")];
+      for (let i = 0; i < 4; i++) a.push(A(sc, (i + 1) + " / " + (i + 2)));
+      return { cols: flip ? "1fr 1.5fr" : "1.5fr 1fr", rows: "repeat(4,1fr)", areas: a };
+    }
+    case 6: {
+      const a = [];
+      for (let i = 0; i < 6; i++) { const c = (i % 3) + 1, r = Math.floor(i / 3) + 1; a.push(A(c + " / " + (c + 1), r + " / " + (r + 1))); }
+      return { cols: "repeat(3,1fr)", rows: "1fr 1fr", areas: a };
+    }
+    case 7: {
+      const fc = flip ? "3 / 4" : "1 / 2";
+      const others = flip ? ["1 / 2", "2 / 3"] : ["2 / 3", "3 / 4"];
+      const a = [A(fc, "1 / 4")];
+      for (let k = 0; k < 6; k++) { const r = Math.floor(k / 2) + 1; a.push(A(others[k % 2], r + " / " + (r + 1))); }
+      return { cols: flip ? "1fr 1fr 1.5fr" : "1.5fr 1fr 1fr", rows: "repeat(3,1fr)", areas: a };
+    }
+    case 8:
+    default: {
+      const a = [];
+      const count = 8;
+      for (let i = 0; i < count; i++) { const c = (i % 4) + 1, r = Math.floor(i / 4) + 1; a.push(A(c + " / " + (c + 1), r + " / " + (r + 1))); }
+      return { cols: "repeat(4,1fr)", rows: "1fr 1fr", areas: a };
+    }
+  }
+}
+
+/** Layouts with a distinct featured cell that flip supports. */
+const FEATURED_LAYOUTS = new Set([3, 5, 7]);
 
 /** Safe localStorage helpers — silently swallow quota/security errors */
 function lsLoad(key, fallback = []) {
@@ -58,7 +114,6 @@ function notifyActivityChange(name, terminalId, prevState, currState) {
   }
 }
 
-const SIDEBAR_WIDTH_KEY = "cockpit-sidebar-width";
 // ZOOM_STORAGE_KEY/DEFAULT_ZOOM/MIN_ZOOM/MAX_ZOOM imported from utils/terminalFit —
 // PopoutTerminal.jsx (a separate window/document) reads the same constants
 // directly from localStorage, so both must stay in lockstep.
@@ -76,7 +131,27 @@ function findEmptySlot(ids, maxSlots) {
 export default function App() {
   const { toasts, toast, dismiss: dismissToast } = useToast();
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(() => lsLoad(SIDEBAR_WIDTH_KEY, 224));
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const v = parseInt(localStorage.getItem("cockpit-sidebar-width") || "", 10);
+    return Number.isFinite(v) ? Math.min(520, Math.max(236, v)) : 236;
+  });
+  const startSidebarResize = useCallback((e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMove = (ev) => {
+      const w = Math.min(520, Math.max(236, startW + (ev.clientX - startX)));
+      setSidebarWidth(w);
+    };
+    const onUp = (ev) => {
+      const w = Math.min(520, Math.max(236, startW + (ev.clientX - startX)));
+      localStorage.setItem("cockpit-sidebar-width", String(w));
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [sidebarWidth]);
   const [terminalZoom, setTerminalZoom] = useState(() => {
     const saved = lsLoad(ZOOM_STORAGE_KEY, DEFAULT_ZOOM);
     return (saved >= MIN_ZOOM && saved <= MAX_ZOOM) ? saved : DEFAULT_ZOOM;
@@ -91,7 +166,15 @@ export default function App() {
   useEffect(() => { lsSave(EFFORT_KEY, effort); }, [effort]);
   const [fast, setFast] = useState(() => lsLoad(FAST_KEY, false));
   useEffect(() => { lsSave(FAST_KEY, fast); }, [fast]);
-  const [layout, setLayout] = useState(4);
+  const [layout, setLayout] = useState(() => {
+    const v = lsLoad(LAYOUT_KEY, 4);
+    return typeof v === "number" && v >= 1 && v <= 8 ? v : 4;
+  });
+  useEffect(() => { lsSave(LAYOUT_KEY, layout); }, [layout]);
+  const [flipLayout, setFlipLayout] = useState(() => lsLoad(FLIP_KEY, false) === true);
+  useEffect(() => { lsSave(FLIP_KEY, flipLayout); }, [flipLayout]);
+  // Featured pane = currently-focused pane index (drives 3/5/7 featured slot)
+  const [focusedIndex, setFocusedIndex] = useState(0);
   const [user, setUser] = useState(null);
   const [backendReady, setBackendReady] = useState(false);
   const [backendError, setBackendError] = useState(false);
@@ -110,6 +193,9 @@ export default function App() {
   const [channels, setChannels] = useState([]); // array of channel dicts from /api/bridge/channel
   const [poppedOutIds, setPoppedOutIds] = useState(new Set()); // session IDs whose terminals are in a separate window
   const [workflowsByTerminal, setWorkflowsByTerminal] = useState({}); // { [terminalId]: { count, inProgressCount, items } }
+  const [usageByTerminal, setUsageByTerminal] = useState({}); // { [terminalId]: { ...session_summary, effort, tokensPerSec } }
+  const [dailyUsage, setDailyUsage] = useState(null); // usage_tracker.daily_summary() shape
+  const [showFleetView, setShowFleetView] = useState(false);
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -728,6 +814,60 @@ export default function App() {
     };
   }, [backendReady]);
 
+  // Poll /api/terminals/{id}/usage + /api/usage/daily every 3s — best-effort background polling
+  const sessionsForUsage = useRef(sessions);
+  sessionsForUsage.current = sessions;
+  const usageSamplesRef = useRef({}); // { [terminalId]: { output_tokens, t } } — previous sample for client-side tok/s
+  useEffect(() => {
+    if (!backendReady) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const fetchUsage = async () => {
+      const activeSessions = sessionsForUsage.current.filter((s) => s.terminalId);
+      await Promise.all(
+        activeSessions.map(async (s) => {
+          try {
+            const res = await fetch(`/api/terminals/${s.terminalId}/usage`, { signal });
+            if (!res.ok) return;
+            const data = await res.json();
+            const now = performance.now();
+            const prevSample = usageSamplesRef.current[s.terminalId];
+            let tokensPerSec = 0;
+            if (prevSample) {
+              const dt = (now - prevSample.t) / 1000;
+              if (dt > 0) {
+                tokensPerSec = Math.round(
+                  Math.max(0, (data.output_tokens - prevSample.output_tokens) / dt)
+                );
+              }
+            }
+            usageSamplesRef.current[s.terminalId] = { output_tokens: data.output_tokens, t: now };
+            setUsageByTerminal((prev) => ({ ...prev, [s.terminalId]: { ...data, tokensPerSec } }));
+          } catch (_) {
+            // silently swallow — usage polling is best-effort
+          }
+        })
+      );
+      try {
+        const res = await fetch("/api/usage/daily", { signal });
+        if (res.ok) {
+          const data = await res.json();
+          setDailyUsage(data);
+        }
+      } catch (_) {
+        // silently swallow — daily usage polling is best-effort
+      }
+    };
+
+    fetchUsage();
+    const id = setInterval(fetchUsage, 3000);
+    return () => {
+      clearInterval(id);
+      controller.abort();
+    };
+  }, [backendReady]);
+
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
     setBridgeModal({ open: true, fromSessionId: sessionId });
@@ -1091,9 +1231,25 @@ export default function App() {
         e.preventDefault();
         setLayout(2);
       }
+      if (e.ctrlKey && e.shiftKey && e.key === "#") {
+        e.preventDefault();
+        setLayout(3);
+      }
       if (e.ctrlKey && e.shiftKey && e.key === "$") {
         e.preventDefault();
         setLayout(4);
+      }
+      if (e.ctrlKey && e.shiftKey && e.key === "%") {
+        e.preventDefault();
+        setLayout(5);
+      }
+      if (e.ctrlKey && e.shiftKey && e.key === "^") {
+        e.preventDefault();
+        setLayout(6);
+      }
+      if (e.ctrlKey && e.shiftKey && e.key === "&") {
+        e.preventDefault();
+        setLayout(7);
       }
       if (e.ctrlKey && e.shiftKey && e.key === "*") {
         e.preventDefault();
@@ -1151,44 +1307,25 @@ export default function App() {
     });
   }, []);
 
-  const startSidebarResize = useCallback((e) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sidebarWidth;
-    let rafId = 0;
-    let latestX = startX;
-    const onMove = (ev) => {
-      latestX = ev.clientX;
-      if (!rafId) {
-        rafId = requestAnimationFrame(() => {
-          rafId = 0;
-          const newW = Math.min(Math.max(startW + latestX - startX, 140), 500);
-          setSidebarWidth(newW);
-        });
-      }
-    };
-    const onUp = () => {
-      cancelAnimationFrame(rafId);
-      const finalW = Math.min(Math.max(startW + latestX - startX, 140), 500);
-      setSidebarWidth(finalW);
-      lsSave(SIDEBAR_WIDTH_KEY, finalW);
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [sidebarWidth]);
-
-  const cols = layout === 8 ? 4 : layout >= 2 ? 2 : 1;
-  const rows = layout >= 4 ? 2 : 1;
-  const gridTemplate = `repeat(${cols}, 1fr)`;
-  const gridRows = `repeat(${rows}, 1fr)`;
+  const gridLayout = computeLayout(layout, flipLayout);
+  // Featured layouts (3/5/7) put the focused pane in the featured cell.
+  // Build a slot-render order: featured slot first, then the rest in order.
+  const paneOrder = useMemo(() => {
+    const order = [];
+    if (FEATURED_LAYOUTS.has(layout)) {
+      const f = focusedIndex >= 0 && focusedIndex < layout ? focusedIndex : 0;
+      order.push(f);
+      for (let i = 0; i < layout; i++) if (i !== f) order.push(i);
+    } else {
+      for (let i = 0; i < layout; i++) order.push(i);
+    }
+    return order;
+  }, [layout, focusedIndex]);
 
   // Splash screen while waiting for backend
   if (!backendReady) {
     return (
-      <div className="flex flex-col h-screen w-screen overflow-hidden relative">
-        <HexGrid />
+      <div className="flex flex-col h-screen w-screen overflow-hidden relative" style={{ background: "var(--cc-bg)" }}>
         <div className="relative z-10 flex items-center justify-center h-full">
           <div className="text-center" style={{ color: "var(--text-secondary)" }}>
             {backendError ? (
@@ -1227,9 +1364,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden relative">
-        <HexGrid />
-
+    <div className="flex flex-col h-screen w-screen overflow-hidden relative" style={{ background: "var(--cc-bg)" }}>
         <div className="relative z-10 flex flex-col h-full">
           <TopBar
             model={model}
@@ -1244,15 +1379,43 @@ export default function App() {
             setSidebarOpen={setSidebarOpen}
             user={user}
             onToast={toast}
+            showFleetView={showFleetView}
+            setShowFleetView={setShowFleetView}
           />
 
+          {showFleetView && (
+            <FleetView
+              sessions={sessions}
+              usageByTerminal={usageByTerminal}
+              dailyUsage={dailyUsage}
+              workflowsByTerminal={workflowsByTerminal}
+              onClose={() => setShowFleetView(false)}
+            />
+          )}
+
           <div className="flex flex-1 min-h-0">
+            <ActivityRail
+              onNew={() => setShowNewDialog(true)}
+              sidebarOpen={sidebarOpen}
+              onToggleSidebar={() => setSidebarOpen((p) => !p)}
+              showFleetView={showFleetView}
+              onToggleFleet={() => setShowFleetView((v) => !v)}
+              onSearch={() => {
+                setSidebarOpen(true);
+                // Focus the sidebar filter input if the Sidebar exposes one.
+                requestAnimationFrame(() => {
+                  const el = document.querySelector("[data-sidebar-filter]");
+                  if (el) el.focus();
+                });
+              }}
+              broadcastMode={broadcastMode}
+              onToggleBroadcast={() => setBroadcastMode((p) => !p)}
+            />
             {sidebarOpen && (
               <div
                 className="flex flex-shrink-0"
                 style={{
                   width: sidebarWidth,
-                  maxWidth: sidebarWidth,
                   borderRight: "1px solid var(--border-color)",
                   position: "relative",
                   overflow: "hidden",
@@ -1277,18 +1440,14 @@ export default function App() {
                   onLoadWorkspace={loadWorkspace}
                   onDeleteWorkspace={deleteWorkspace}
                 />
-                {/* Resize handle */}
                 <div
                   onMouseDown={startSidebarResize}
+                  title="Drag to resize sidebar"
                   style={{
-                    position: "absolute",
-                    top: 0,
-                    right: -2,
-                    width: 5,
-                    height: "100%",
-                    cursor: "col-resize",
-                    zIndex: 20,
+                    position: "absolute", top: 0, right: 0, bottom: 0, width: 5,
+                    cursor: "col-resize", zIndex: 5,
                   }}
+                  className="hover-bg-surface"
                 />
               </div>
             )}
@@ -1343,9 +1502,11 @@ export default function App() {
               className="flex-1 min-w-0"
               style={{
                 display: "grid",
-                gridTemplateColumns: gridTemplate,
-                gridTemplateRows: gridRows,
-                gap: 0,
+                gridTemplateColumns: gridLayout.cols,
+                gridTemplateRows: gridLayout.rows,
+                gap: 14,
+                padding: 14,
+                background: "var(--cc-bg)",
               }}
               onDragEnd={() => { setDragSource(null); setDragOverSlot(null); }}
             >
@@ -1353,16 +1514,10 @@ export default function App() {
               {Array.from({ length: layout }).map((_, idx) => {
                 const sessionId = idx < activeIds.length ? activeIds[idx] : null;
                 const session = sessionId != null ? sessions.find((s) => s.id === sessionId) : null;
-                const slotBorders = {
-                  borderRight:
-                    cols > 1 && (idx % cols) < cols - 1
-                      ? "1px solid var(--border-color)"
-                      : "none",
-                  borderBottom:
-                    rows > 1 && idx < cols
-                      ? "1px solid var(--border-color)"
-                      : "none",
-                };
+                // Grid placement from the adaptive layout engine. In featured
+                // layouts (3/5/7) the focused pane takes the featured cell.
+                const area = gridLayout.areas[paneOrder.indexOf(idx)] || gridLayout.areas[idx] || { col: "auto", row: "auto" };
+                const slotPlacement = { gridColumn: area.col, gridRow: area.row };
 
                 // Shared drop handlers for all slots
                 const dndHandlers = {
@@ -1436,15 +1591,29 @@ export default function App() {
                   // Find an active channel involving this session's terminalId
                   const activeChannel = getChannelForTerminal(session.terminalId);
 
+                  // Glow state lives on the SLOT wrapper, not inside TerminalPane:
+                  // the slot's overflow:hidden clips any child's outer box-shadow,
+                  // but an element's own overflow never clips its own shadow.
+                  const actState = session.activityState || (session.status === "running" ? "idle" : session.status);
+                  const glowState =
+                    actState === "busy" ? "working"
+                    : ["thinking", "waiting", "error"].includes(actState) ? actState
+                    : "idle";
+
                   return (
                     <div
                       key={session.id}
+                      data-glowable
+                      data-state={glowState}
+                      onFocusCapture={() => setFocusedIndex(idx)}
+                      onMouseDownCapture={() => setFocusedIndex(idx)}
                       style={{
+                        borderRadius: 10,
                         overflow: "hidden",
                         minHeight: 0,
                         minWidth: 0,
                         position: "relative",
-                        ...slotBorders,
+                        ...slotPlacement,
                         opacity: dragSource === idx ? 0.4 : 1,
                         transition: "opacity 0.2s ease",
                       }}
@@ -1499,6 +1668,7 @@ export default function App() {
                           onEndBridge={handleEndBridge}
                           onPopout={session.terminalId ? handlePopout : undefined}
                           workflowSummary={workflowsByTerminal[session.terminalId] || null}
+                          usage={usageByTerminal[session.terminalId] || null}
                           onRenameSession={(newName, syncClaude) => renameSession(session.id, newName, syncClaude)}
                         />
                       )}
@@ -1560,9 +1730,12 @@ export default function App() {
                     key={`empty-${idx}`}
                     className="flex items-center justify-center"
                     style={{
-                      color: "var(--text-muted)",
+                      color: "var(--cc-muted, var(--text-muted))",
                       position: "relative",
-                      ...slotBorders,
+                      ...slotPlacement,
+                      borderRadius: 12,
+                      border: "1px dashed var(--cc-border, var(--border-color))",
+                      background: "color-mix(in srgb, var(--cc-surface, var(--bg-surface)) 40%, transparent)",
                     }}
                     {...dndHandlers}
                   >
@@ -1570,7 +1743,7 @@ export default function App() {
                     <button
                       onClick={() => setShowNewDialog(true)}
                       className="text-sm px-4 py-2 rounded-md transition-colors hover-bg-surface"
-                      style={{ border: "1px solid var(--border-color)" }}
+                      style={{ border: "1px solid var(--cc-border, var(--border-color))" }}
                     >
                       + New Session
                     </button>
@@ -1585,6 +1758,8 @@ export default function App() {
           <StatusBar
             layout={layout}
             setLayout={setLayout}
+            flipLayout={flipLayout}
+            setFlipLayout={setFlipLayout}
             sessions={sessions}
             connected={sessions.some((s) => s.status === "running")}
             broadcastMode={broadcastMode}
@@ -1594,6 +1769,7 @@ export default function App() {
             onZoomOut={zoomOut}
             onZoomReset={zoomReset}
             systemStats={systemStats}
+            onShowOnboarding={() => setShowOnboarding(true)}
           />
 
           {/* Zoom toast */}

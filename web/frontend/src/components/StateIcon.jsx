@@ -11,8 +11,14 @@ const stateIconMap = {
   starting: { icon: Loader, color: "var(--text-muted)", className: "state-icon-spin" },
 };
 
-export default function StateIcon({ state }) {
+export default function StateIcon({ state, size = 12, color }) {
   const entry = stateIconMap[state] || stateIconMap.idle;
   const Icon = entry.icon;
-  return <Icon size={12} style={{ color: entry.color, flexShrink: 0 }} className={entry.className} />;
+  return (
+    <Icon
+      size={size}
+      style={{ color: color || entry.color, flexShrink: 0 }}
+      className={entry.className}
+    />
+  );
 }

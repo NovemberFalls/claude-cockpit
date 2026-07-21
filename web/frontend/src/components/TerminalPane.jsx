@@ -58,6 +58,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   onPopout,        // (session) => void — open terminal in separate window
   workflowSummary, // { count: number, inProgressCount: number, items: array } | null — recent workflows
   onRenameSession, // (newName: string, syncClaude: boolean) => Promise<void> — PATCH rename, owned by App.jsx (updates sidebar name)
+  usage,           // { total_tokens, est_cost_usd, effort, tokensPerSec } | null | undefined — live usage summary for this session
 }, ref) {
   const termRef = useRef(null);       // DOM ref
   const xtermRef = useRef(null);      // Terminal instance
@@ -87,6 +88,14 @@ const TerminalPane = forwardRef(function TerminalPane({
   // pill in the header — display the friendly label when the id is known,
   // falling back to the raw string (covers unrecognized/future model ids).
   const modelLabel = MODELS.find((m) => m.id === session.model)?.label || session.model;
+
+  // Compact number formatter for header usage stats: 1.2M / 45.3k / 812
+  const fmtTokens = useCallback((n) => {
+    if (n == null || Number.isNaN(n)) return "0";
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    return `${n}`;
+  }, []);
 
   // Expose focus() to parent via ref
   useImperativeHandle(ref, () => ({
@@ -637,20 +646,26 @@ const TerminalPane = forwardRef(function TerminalPane({
   const activityState = session.activityState || (session.status === "running" ? "idle" : session.status);
   const isBusy = activityState === "busy";
   const isBridged = !!activeBridge;
-  const isWaiting = activityState === "waiting";
-  const wrapperStyle = {
-    boxShadow: isBridged
-      ? "inset 0 0 0 2px #ff0033, 0 0 18px rgba(255, 0, 51, 0.55)"
-      : isWaiting
-        ? "inset 0 0 0 1px var(--yellow), 0 0 15px rgba(234, 179, 8, 0.3)"
-        : "none",
-    animation: isBridged
-      ? "bridge-active-glow 2s ease-in-out infinite"
-      : isWaiting
-        ? "attention-glow 2s ease-in-out infinite"
-        : "none",
-    transition: "box-shadow 0.3s ease",
-  };
+  // Map the app's fine-grained activity states onto the shared glow-state
+  // vocabulary (working|thinking|waiting|idle|error) consumed by the
+  // [data-glowable][data-state] CSS contract (SPEC-FACELIFT §A/§D).
+  const dataState =
+    activityState === "busy" ? "working"
+    : activityState === "thinking" ? "thinking"
+    : activityState === "waiting" ? "waiting"
+    : activityState === "error" ? "error"
+    : "idle"; // idle, running, starting, history
+  const stateWord = dataState.toUpperCase();
+
+  // Bridge overlays keep their own dedicated color (salmon/red) per spec,
+  // overriding the generic state glow via inline style precedence.
+  const wrapperStyle = isBridged
+    ? {
+        boxShadow: "inset 0 0 0 2px #ff0033, 0 0 18px rgba(255, 0, 51, 0.55)",
+        animation: "bridge-active-glow 2s ease-in-out infinite",
+        transition: "box-shadow 0.3s ease",
+      }
+    : { transition: "box-shadow 0.3s ease" };
 
   return (
     <div
@@ -659,9 +674,10 @@ const TerminalPane = forwardRef(function TerminalPane({
     >
       {/* Pane header */}
       <div
-        className="flex items-center justify-between px-3 h-9 flex-shrink-0"
+        className="flex items-center justify-between px-3 flex-shrink-0"
         style={{
-          borderBottom: "1px solid var(--border-color)",
+          height: 38,
+          borderBottom: "1px solid var(--cc-line, var(--border-color))",
           cursor: onSwap ? "grab" : "default",
         }}
         draggable={onSwap != null && !renaming}
@@ -695,7 +711,10 @@ const TerminalPane = forwardRef(function TerminalPane({
               style={{ color: "var(--text-muted)" }}
             />
           )}
-          <StateIcon state={activityState} />
+          <span className="cc-chip" data-state={dataState}>
+            <StateIcon state={activityState} size={10} color={`var(--cc-${dataState})`} />
+            {stateWord}
+          </span>
           {renaming ? (
             <div className="flex items-center gap-1.5 min-w-0" onMouseDown={(e) => e.stopPropagation()}>
               <input
@@ -736,8 +755,8 @@ const TerminalPane = forwardRef(function TerminalPane({
             </div>
           ) : (
             <span
-              className="text-xs font-medium truncate"
-              style={{ color: "var(--text-primary)" }}
+              className="truncate"
+              style={{ color: "var(--cc-fg, var(--text-primary))", fontSize: 13, fontWeight: 700 }}
               onDoubleClick={startRename}
               title="Double-click to rename"
             >
@@ -745,16 +764,89 @@ const TerminalPane = forwardRef(function TerminalPane({
             </span>
           )}
           <span
-            className="text-[10px] px-1.5 py-0.5 rounded-full"
+            className="text-[10px] px-1.5 py-0.5 rounded flex-shrink-0"
             style={{
-              color: "var(--text-muted)",
-              backgroundColor: "var(--bg-surface)",
+              color: "var(--cc-muted, var(--text-muted))",
+              border: "1px solid var(--cc-border, var(--border-color))",
             }}
           >
             {modelLabel}
           </span>
+          {session.bypassPermissions && (
+            <span
+              className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
+              style={{
+                color: "var(--cc-waiting, var(--yellow))",
+                backgroundColor: "color-mix(in srgb, var(--cc-waiting, var(--yellow)) 12%, transparent)",
+              }}
+              title="Bypass permissions is armed for this session"
+            >
+              BYPASS
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {usage && (
+            <div className="pane-usage-stats flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
+              {usage.effort && (
+                <span
+                  className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
+                  style={{
+                    color: "var(--text-muted)",
+                    backgroundColor: "var(--bg-surface)",
+                  }}
+                  title="Thinking effort"
+                >
+                  {usage.effort}
+                </span>
+              )}
+              <span
+                className="text-[10px] truncate"
+                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                title="Total tokens this session"
+              >
+                {"⏶"}{fmtTokens(usage.total_tokens)}
+                {typeof usage.est_cost_usd === "number" && ` · $${usage.est_cost_usd.toFixed(2)}`}
+              </span>
+              {usage.tokensPerSec > 0 && (
+                <span
+                  className="text-[10px] font-semibold flex-shrink-0"
+                  style={{ color: "var(--cc-fn, var(--accent))" }}
+                  title="Output tokens per second"
+                >
+                  {usage.tokensPerSec}t/s
+                </span>
+              )}
+            </div>
+          )}
+          {session.context_percent != null && (
+            <span
+              className="flex items-center gap-0.5 flex-shrink-0"
+              title={`Context used: ${Math.round(session.context_percent)}%`}
+            >
+              <svg width="17" height="17" viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="10" cy="10" r="7" fill="none" stroke="var(--cc-border, rgba(255,255,255,.1))" strokeWidth="2.5" />
+                <circle
+                  cx="10" cy="10" r="7" fill="none"
+                  stroke={
+                    session.context_percent > 75
+                      ? "var(--cc-error, var(--red))"
+                      : session.context_percent > 50
+                        ? "var(--cc-waiting, var(--yellow))"
+                        : "var(--cc-idle, var(--green))"
+                  }
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeDasharray="44"
+                  strokeDashoffset={44 - (44 * Math.min(100, Math.max(0, session.context_percent))) / 100}
+                  transform="rotate(-90 10 10)"
+                />
+              </svg>
+              <span className="text-[10px]" style={{ color: "var(--cc-dim, var(--text-muted))" }}>
+                {Math.round(session.context_percent)}%
+              </span>
+            </span>
+          )}
           {isBusy && (
             <button
               type="button"
@@ -897,22 +989,6 @@ const TerminalPane = forwardRef(function TerminalPane({
         </div>
       </div>
 
-      {/* Context gauge — shown only when context_percent is known */}
-      {session.context_percent != null && (
-        <div style={{ height: 2, backgroundColor: "var(--bg-elevated)", flexShrink: 0 }}>
-          <div style={{
-            height: "100%",
-            width: `${session.context_percent}%`,
-            backgroundColor: session.context_percent > 75
-              ? "var(--red)"
-              : session.context_percent > 50
-                ? "var(--yellow)"
-                : "var(--green)",
-            transition: "width 0.5s ease, background-color 0.3s ease",
-          }} />
-        </div>
-      )}
-
       {/* Search bar */}
       {searchVisible && (
         <div
@@ -1000,7 +1076,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         style={{
           position: "relative",
           padding: "4px 8px",
-          backgroundColor: theme.bg,
+          backgroundColor: "var(--cc-term, " + theme.bg + ")",
         }}
         onDrop={handleDrop}
         onDragOver={handleDragOver}

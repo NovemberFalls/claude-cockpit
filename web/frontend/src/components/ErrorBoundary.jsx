@@ -1,5 +1,4 @@
 import { Component } from "react";
-import HexGrid from "./HexGrid";
 
 export default class ErrorBoundary extends Component {
   constructor(props) {
@@ -26,7 +25,6 @@ export default class ErrorBoundary extends Component {
           fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
           color: "#e0e0e0",
         }}>
-          <HexGrid style={{ position: "absolute", inset: 0, zIndex: 0 }} />
           <div style={{ zIndex: 1, textAlign: "center", maxWidth: "600px", padding: "32px" }}>
             <h1 style={{ fontSize: "24px", color: "#ff6b6b", marginBottom: "12px" }}>
               Something went wrong

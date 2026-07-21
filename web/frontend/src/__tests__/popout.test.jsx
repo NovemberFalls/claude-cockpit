@@ -201,7 +201,6 @@ vi.mock("../components/StateIcon", () => ({
 // App can be imported without real network calls.
 // ---------------------------------------------------------------------------
 
-vi.mock("../components/HexGrid", () => ({ default: () => null }));
 // MODELS is exported alongside default — TerminalPane.jsx/PopoutTerminal.jsx
 // map session.model through it for display (falls back to the raw id when
 // not found, which is what these tests assert for ids like

@@ -2,9 +2,9 @@
    are re-exported here so PaneActionsMenu.jsx reuses the exact same model list
    instead of hardcoding a second copy (see CLAUDE.md model list conventions). */
 import { useState, useEffect } from "react";
-import { PanelLeft, ChevronDown, KeyRound } from "lucide-react";
-import { useTheme } from "../hooks/useTheme";
+import { PanelLeft, ChevronDown, KeyRound, LayoutGrid } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
+import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 
 export const MODEL_GROUPS = [
   {
@@ -102,11 +102,12 @@ export default function TopBar({
   setSidebarOpen,
   user,
   onToast,
+  showFleetView,
+  setShowFleetView,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
-  const { themeId, switchTheme, themes } = useTheme();
   const [themeOpen, setThemeOpen] = useState(false);
   const [openRouterOpen, setOpenRouterOpen] = useState(false);
   // tri-state: null = not yet checked, true/false = last known GET result
@@ -158,86 +159,81 @@ export default function TopBar({
 
   return (
     <header
-      className="flex items-center justify-between px-5 h-12 flex-shrink-0 relative z-30"
-      style={{ borderBottom: "1px solid var(--border-color)" }}
+      className="flex items-center justify-between flex-shrink-0 relative z-30"
+      style={{ padding: "0 16px", height: 48, borderBottom: "1px solid var(--cc-border, var(--border-color))" }}
     >
       {/* Left */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center" style={{ gap: 11 }}>
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
-          className="p-1.5 rounded-md transition-colors hover-bg-surface"
-          style={{ color: "var(--text-secondary)" }}
-          title="Toggle sidebar (Ctrl+B)"
+          className="transition-colors hover-bg-surface"
+          style={{ display: "flex", padding: 5, borderRadius: 7, color: "var(--cc-dim, var(--text-secondary))" }}
+          title="Toggle sidebar (Ctrl+Shift+B)"
           aria-label="Toggle sidebar"
         >
-          <PanelLeft size={18} />
+          <PanelLeft size={17} />
         </button>
-        <img src="/app-icon.png" alt="Claude Cockpit" width={22} height={22} style={{ borderRadius: 4 }} />
-        <span className="text-sm font-semibold tracking-tight" style={{ color: "var(--text-primary)" }}>
-          Cockpit
+        <div
+          style={{
+            width: 25, height: 25, borderRadius: 7,
+            background: "linear-gradient(140deg,#2a2f2a,#131311)",
+            border: "1px solid color-mix(in srgb, var(--cc-accent, #4ea1e8) 35%, transparent)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 0 12px color-mix(in srgb, var(--cc-accent, #4ea1e8) 25%, transparent)",
+          }}
+        >
+          <LogoMark size={15} />
+        </div>
+        <span style={{ fontSize: 14, fontWeight: 800, letterSpacing: ".1em", color: "var(--cc-fg, var(--text-primary))" }}>
+          COCKPIT
         </span>
       </div>
 
       {/* Right */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center" style={{ gap: 7 }}>
+        {/* Fleet view */}
+        {setShowFleetView && (
+          <button
+            onClick={() => { closeAll(); setShowFleetView((v) => !v); }}
+            className="transition-colors hover-bg-surface"
+            style={{ display: "flex", padding: 5, borderRadius: 7, color: showFleetView ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))" }}
+            title="Fleet view — all sessions"
+            aria-label="Toggle fleet view"
+            aria-pressed={showFleetView}
+          >
+            <LayoutGrid size={16} />
+          </button>
+        )}
+
         {/* OpenRouter settings */}
         <button
           onClick={() => { closeAll(); setOpenRouterOpen(true); }}
-          className="p-1.5 rounded-md transition-colors hover-bg-surface"
-          style={{ color: "var(--text-secondary)" }}
+          className="transition-colors hover-bg-surface"
+          style={{ display: "flex", padding: 5, borderRadius: 7, color: "var(--cc-dim, var(--text-secondary))" }}
           title="OpenRouter settings"
           aria-label="OpenRouter settings"
         >
           <KeyRound size={16} />
         </button>
 
-        {/* Theme picker (works in both modes) */}
+        {/* Theme settings (palette / accent / glow) */}
         <div className="relative">
           <button
             onClick={() => { closeAll(); setThemeOpen((v) => !v); }}
-            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full transition-colors hover-bg-surface"
+            className="flex items-center transition-colors hover-bg-surface"
             style={{
-              color: "var(--text-muted)",
-              border: "1px solid var(--border-color)",
+              gap: 4, padding: "4px 9px", borderRadius: 999,
+              color: "var(--cc-muted, var(--text-muted))",
+              border: "1px solid var(--cc-border, var(--border-color))",
             }}
-            aria-label="Choose theme"
+            aria-label="Theme settings"
             aria-expanded={themeOpen}
-            aria-haspopup="listbox"
+            aria-haspopup="dialog"
           >
-            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "var(--accent)" }} />
-            <ChevronDown size={10} />
+            <span style={{ width: 10, height: 10, borderRadius: 999, background: "var(--cc-accent, var(--accent))" }} />
+            <ChevronDown size={9} />
           </button>
-          {themeOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setThemeOpen(false)} aria-hidden="true" />
-              <div
-                role="listbox"
-                aria-label="Theme"
-                className="absolute right-0 mt-1 rounded-lg py-1 z-50 max-h-72 overflow-y-auto min-w-[180px]"
-                style={{
-                  backgroundColor: "var(--bg-elevated)",
-                  border: "1px solid var(--border-color)",
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                }}
-              >
-                {themes.map((t) => (
-                  <button
-                    key={t.id}
-                    role="option"
-                    aria-selected={t.id === themeId}
-                    onClick={() => { switchTheme(t.id); setThemeOpen(false); }}
-                    className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
-                    style={{
-                      color: t.id === themeId ? "var(--accent)" : "var(--text-secondary)",
-                      fontWeight: t.id === themeId ? 600 : 400,
-                    }}
-                  >
-                    {t.label} ({t.group})
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+          {themeOpen && <ThemePopover align="right" onClose={() => setThemeOpen(false)} />}
         </div>
 
         {/* Model picker */}

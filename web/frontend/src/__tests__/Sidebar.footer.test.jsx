@@ -6,8 +6,9 @@
  *      (backend opens the default browser; correct path in the Tauri app).
  *   2. Support button — falls back to window.open when the POST fails
  *      (plain-browser dev mode without the backend).
- *   3. MCP Servers button — still posts the registry URL after the shared
- *      openExternal() refactor (regression guard).
+ *
+ * Note: the "MCP Servers" footer link was removed in the visual redesign —
+ * the resources footer now only contains the Support button.
  */
 
 import React from "react";
@@ -63,15 +64,5 @@ describe("Sidebar — resources footer external links", () => {
     await waitFor(() => {
       expect(window.open).toHaveBeenCalledWith("https://desk.boord-its.com", "_blank");
     });
-  });
-
-  it("MCP Servers still posts the registry URL to /api/open-url", () => {
-    renderSidebar();
-    fireEvent.click(screen.getByText("MCP Servers"));
-
-    expect(fetch).toHaveBeenCalledTimes(1);
-    const [path, opts] = fetch.mock.calls[0];
-    expect(path).toBe("/api/open-url");
-    expect(JSON.parse(opts.body)).toEqual({ url: "https://registry.modelcontextprotocol.io/" });
   });
 });

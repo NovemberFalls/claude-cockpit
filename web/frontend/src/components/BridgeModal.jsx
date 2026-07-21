@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X, AlertTriangle, Loader } from "lucide-react";
+import { X, AlertTriangle, Loader, Merge, Minus, Plus, Check } from "lucide-react";
 import StateIcon from "./StateIcon.jsx";
 
 // ---------------------------------------------------------------------------
@@ -39,13 +39,100 @@ function SessionDot({ activityState }) {
 // ---------------------------------------------------------------------------
 function BusyHint({ reason }) {
     return (
-        <span className="bridge-busy-hint">
-            {reason === "channel" ? "in channel" : "in bridge"}
+        <span
+            className="text-[9px] font-bold uppercase"
+            style={{
+                color: "var(--cc-error)",
+                background: "color-mix(in srgb, var(--cc-error) 15%, transparent)",
+                borderRadius: 4,
+                padding: "2px 6px",
+                letterSpacing: ".04em",
+                flexShrink: 0,
+            }}
+        >
+            BUSY &middot; {reason === "channel" ? "in channel" : "in bridge"}
         </span>
     );
 }
 
-function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTerminalIds = EMPTY_BUSY_MAP }) {
+function PickerRow({ selected, disabled, onClick, accent, name, model, activityState, busy, busyReason, shape = "radio", checked }) {
+    return (
+        <button
+            type="button"
+            role={shape}
+            aria-checked={shape === "radio" ? selected : checked}
+            disabled={disabled}
+            onClick={onClick}
+            className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs text-left transition-colors"
+            style={{
+                border: `1px solid ${
+                    selected || checked
+                        ? `color-mix(in srgb, ${accent} 35%, transparent)`
+                        : "var(--cc-border, var(--border-color))"
+                }`,
+                backgroundColor:
+                    selected || checked
+                        ? `color-mix(in srgb, ${accent} 10%, transparent)`
+                        : "var(--cc-term, var(--bg-surface))",
+                color: "var(--cc-fg, var(--text-primary))",
+                cursor: disabled ? "not-allowed" : "pointer",
+                opacity: disabled ? 0.5 : 1,
+            }}
+        >
+            {shape === "radio" ? (
+                <span
+                    style={{
+                        width: 15,
+                        height: 15,
+                        borderRadius: 999,
+                        border: `2px solid ${selected ? accent : "var(--cc-muted, var(--text-muted))"}`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                    }}
+                >
+                    <span
+                        style={{
+                            width: 7,
+                            height: 7,
+                            borderRadius: 999,
+                            background: selected ? accent : "transparent",
+                        }}
+                    />
+                </span>
+            ) : (
+                <span
+                    style={{
+                        width: 15,
+                        height: 15,
+                        borderRadius: 4,
+                        border: `2px solid ${checked ? accent : "var(--cc-muted, var(--text-muted))"}`,
+                        background: checked ? accent : "transparent",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        color: "#0f1216",
+                    }}
+                >
+                    {checked && <Check size={9} strokeWidth={3.5} />}
+                </span>
+            )}
+            <SessionDot activityState={activityState} />
+            <span className="flex-1 truncate font-semibold">{name}</span>
+            {busy && <BusyHint reason={busyReason} />}
+            <span
+                className="text-[10px] truncate"
+                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+            >
+                {model}
+            </span>
+        </button>
+    );
+}
+
+function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTerminalIds = EMPTY_BUSY_MAP, accent }) {
     const eligible = sessions.filter(
         (s) =>
             s.id !== fromSessionId &&
@@ -57,7 +144,7 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTermina
         return (
             <p
                 className="text-xs py-2 px-1"
-                style={{ color: "var(--text-muted)" }}
+                style={{ color: "var(--cc-muted, var(--text-muted))" }}
             >
                 No other running sessions to bridge with.
             </p>
@@ -65,44 +152,86 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTermina
     }
 
     return (
-        <div className="flex flex-col gap-1" role="radiogroup" aria-label="Target session">
+        <div className="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto" role="radiogroup" aria-label="Target session">
             {eligible.map((s) => {
                 const isSelected = s.id === selected;
                 const busyReason = busyTerminalIds.get(s.terminalId);
                 const isBusy = Boolean(busyReason);
                 return (
-                    <button
+                    <PickerRow
                         key={s.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={isSelected}
+                        shape="radio"
+                        selected={isSelected}
                         disabled={isBusy}
                         onClick={() => onSelect(s.id)}
-                        className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
-                            isBusy ? "bridge-session-busy" : "hover-bg-surface"
-                        }`}
-                        style={{
-                            border: isSelected
-                                ? "1px solid var(--accent)"
-                                : "1px solid var(--border-color)",
-                            backgroundColor: isSelected
-                                ? "var(--bg-highlight)"
-                                : "transparent",
-                            color: "var(--text-primary)",
-                        }}
-                    >
-                        <SessionDot activityState={s.activityState} />
-                        <span className="flex-1 truncate">{s.name}</span>
-                        {isBusy && <BusyHint reason={busyReason} />}
-                        <span
-                            className="text-[10px] truncate"
-                            style={{ color: "var(--text-muted)" }}
-                        >
-                            {s.model}
-                        </span>
-                    </button>
+                        accent={accent}
+                        name={s.name}
+                        model={s.model}
+                        activityState={s.activityState}
+                        busy={isBusy}
+                        busyReason={busyReason}
+                    />
                 );
             })}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stepper — small +/- control used for max-turns
+// ---------------------------------------------------------------------------
+function Stepper({ value, onDec, onInc, min, max }) {
+    return (
+        <div
+            className="flex items-center gap-0.5 rounded-lg"
+            style={{
+                background: "var(--cc-term, var(--bg-surface))",
+                border: "1px solid var(--cc-border, var(--border-color))",
+                padding: 3,
+            }}
+        >
+            <button
+                type="button"
+                aria-label="Decrease max turns"
+                onClick={onDec}
+                disabled={value <= min}
+                className="flex items-center justify-center rounded-md"
+                style={{
+                    width: 26,
+                    height: 26,
+                    border: "none",
+                    background: "none",
+                    color: "var(--cc-dim, var(--text-secondary))",
+                    cursor: value <= min ? "not-allowed" : "pointer",
+                    opacity: value <= min ? 0.4 : 1,
+                }}
+            >
+                <Minus size={12} />
+            </button>
+            <span
+                className="text-[13px] font-bold text-center"
+                style={{ minWidth: 30, color: "var(--cc-fg, var(--text-primary))" }}
+            >
+                {value}
+            </span>
+            <button
+                type="button"
+                aria-label="Increase max turns"
+                onClick={onInc}
+                disabled={value >= max}
+                className="flex items-center justify-center rounded-md"
+                style={{
+                    width: 26,
+                    height: 26,
+                    border: "none",
+                    background: "none",
+                    color: "var(--cc-dim, var(--text-secondary))",
+                    cursor: value >= max ? "not-allowed" : "pointer",
+                    opacity: value >= max ? 0.4 : 1,
+                }}
+            >
+                <Plus size={12} />
+            </button>
         </div>
     );
 }
@@ -111,15 +240,15 @@ function ReceiverList({ sessions, fromSessionId, selected, onSelect, busyTermina
 // NeonWarningPanel — used in the Auto and Channel tabs
 // ---------------------------------------------------------------------------
 const NEON_PANEL_STYLE = {
-    background: "linear-gradient(135deg, #ff0033, #cc0028)",
-    border: "2px solid #ff5577",
-    color: "#ffffff",
+    background: "color-mix(in srgb, var(--cc-error, #e0698a) 16%, var(--cc-surface, var(--bg-elevated)))",
+    border: "1px solid color-mix(in srgb, var(--cc-error, #e0698a) 45%, transparent)",
+    color: "var(--cc-fg, var(--text-primary))",
     padding: "14px 16px",
-    borderRadius: "6px",
-    boxShadow: "0 0 18px rgba(255,0,51,0.55)",
+    borderRadius: "10px",
+    boxShadow: "0 0 18px color-mix(in srgb, var(--cc-error, #e0698a) 25%, transparent)",
     fontWeight: 600,
     marginBottom: "16px",
-    animation: "bridge-neon-pulse 2s ease-in-out infinite",
+    animation: "bridge-neon-pulse 2.6s ease-in-out infinite",
 };
 
 const NEON_PANEL_SMALL_STYLE = {
@@ -362,20 +491,35 @@ export default function BridgeModal({
 
     if (!open || !fromSession) return null;
 
+    // ---- mode accent: salmon (--cc-error) for manual/auto, gold (--cc-waiting) for channel ----
+    const isChannelTab = tab === "channel";
+    const accent = isChannelTab ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
+    const modeSubtitle =
+        tab === "manual"
+            ? "Relay one message to another session"
+            : tab === "auto"
+            ? "Let two sessions talk automatically"
+            : "One lead coordinates multiple workers";
+
+    const tabDefs = [
+        { id: "manual", label: "Manual" },
+        { id: "auto", label: "Auto-bridge" },
+        { id: "channel", label: "Channel" },
+    ];
+
     return (
         <>
             {/* Keyframe for neon pulse — scoped inline */}
             <style>{`
                 @keyframes bridge-neon-pulse {
-                    0%, 100% { box-shadow: 0 0 18px rgba(255,0,51,0.40); }
-                    50%       { box-shadow: 0 0 22px rgba(255,0,51,0.65); }
+                    0%, 100% { box-shadow: 0 0 18px color-mix(in srgb, var(--cc-error, #e0698a) 18%, transparent); }
+                    50%       { box-shadow: 0 0 24px color-mix(in srgb, var(--cc-error, #e0698a) 32%, transparent); }
                 }
             `}</style>
 
             {/* Overlay */}
             <div
-                className="fixed inset-0 z-50 flex items-center justify-center"
-                style={{ backgroundColor: "rgba(0,0,0,0.5)" }}
+                className="cc-modal-backdrop fixed inset-0 z-50 flex items-center justify-center"
                 aria-modal="true"
                 role="dialog"
                 aria-label={`Bridge from "${fromSession.name}"`}
@@ -383,898 +527,904 @@ export default function BridgeModal({
                 {/* Card */}
                 <div
                     ref={cardRef}
-                    className="rounded-lg flex flex-col"
+                    className="cc-modal flex flex-col"
                     style={{
                         width: "100%",
-                        maxWidth: "520px",
+                        maxWidth: "560px",
                         maxHeight: "90vh",
-                        backgroundColor: "var(--bg-elevated)",
-                        border: "1px solid var(--border-color)",
-                        padding: "20px",
-                        overflowY: "auto",
+                        borderRadius: 14,
+                        backgroundColor: "var(--cc-surface, var(--bg-elevated))",
+                        border: "1px solid var(--cc-border, var(--border-color))",
+                        boxShadow: `0 40px 120px rgba(0,0,0,.6), 0 0 0 1px color-mix(in srgb, ${accent} 22%, transparent)`,
+                        overflow: "hidden",
                     }}
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* Header */}
-                    <div className="flex items-center justify-between mb-4">
-                        <h3
-                            className="text-sm font-semibold"
-                            style={{ color: "var(--text-primary)" }}
-                        >
-                            Bridge from &quot;{fromSession.name}&quot;
-                        </h3>
+                    <div
+                        className="flex items-center justify-between"
+                        style={{
+                            padding: "16px 18px",
+                            borderBottom: "1px solid var(--cc-line, var(--border-color))",
+                        }}
+                    >
+                        <div className="flex items-center gap-2.5">
+                            <div
+                                className="flex items-center justify-center"
+                                style={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: 8,
+                                    background: `color-mix(in srgb, ${accent} 15%, transparent)`,
+                                    border: `1px solid color-mix(in srgb, ${accent} 35%, transparent)`,
+                                    color: accent,
+                                }}
+                            >
+                                <Merge size={15} />
+                            </div>
+                            <div className="flex flex-col" style={{ lineHeight: 1.15 }}>
+                                <h3
+                                    className="text-[15px] font-bold"
+                                    style={{ color: "var(--cc-fg, var(--text-primary))" }}
+                                >
+                                    Bridge from &quot;{fromSession.name}&quot;
+                                </h3>
+                                <span
+                                    className="text-[11px]"
+                                    style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                >
+                                    {modeSubtitle}
+                                </span>
+                            </div>
+                        </div>
                         <button
                             type="button"
                             aria-label="Close modal"
                             onClick={onClose}
-                            className="p-0.5 rounded hover-color-red"
-                            style={{ color: "var(--text-muted)" }}
+                            className="p-1.5 rounded-lg hover-color-red"
+                            style={{ color: "var(--cc-muted, var(--text-muted))", background: "none", border: "none" }}
                         >
-                            <X size={14} />
+                            <X size={16} />
                         </button>
                     </div>
 
-                    {/* Intro */}
-                    <p
-                        className="text-xs mb-4"
-                        style={{ color: "var(--text-muted)", lineHeight: 1.6 }}
-                    >
-                        Send a message from this session to another running session.{" "}
-                        <strong style={{ color: "var(--text-secondary)" }}>Manual</strong>{" "}
-                        relays a single message (your latest reply or a custom prompt).{" "}
-                        <strong style={{ color: "var(--text-secondary)" }}>Auto-relay</strong>{" "}
-                        lets two sessions exchange messages back and forth until a turn cap is reached.{" "}
-                        <strong style={{ color: "var(--text-secondary)" }}>Channel</strong>{" "}
-                        coordinates one lead session with multiple workers simultaneously.
-                    </p>
-
-                    {/* Tabs */}
-                    <div
-                        className="flex gap-0 mb-4 rounded overflow-hidden"
-                        style={{ border: "1px solid var(--border-color)" }}
-                        role="tablist"
-                    >
-                        <button
-                            type="button"
-                            role="tab"
-                            aria-selected={tab === "manual"}
-                            onClick={() => handleTabChange("manual")}
-                            className="flex-1 px-3 py-1.5 text-xs font-medium transition-colors"
-                            style={{
-                                color: tab === "manual" ? "var(--bg)" : "var(--text-muted)",
-                                backgroundColor:
-                                    tab === "manual" ? "var(--accent)" : "transparent",
-                                borderRight: "1px solid var(--border-color)",
-                            }}
-                        >
-                            Manual (recommended)
-                        </button>
-                        <button
-                            type="button"
-                            role="tab"
-                            aria-selected={tab === "auto"}
-                            onClick={() => handleTabChange("auto")}
-                            className="flex-1 px-3 py-1.5 text-xs font-medium transition-colors"
-                            style={{
-                                color: tab === "auto" ? "var(--bg)" : "var(--text-muted)",
-                                backgroundColor:
-                                    tab === "auto" ? "var(--accent)" : "transparent",
-                                borderRight: "1px solid var(--border-color)",
-                            }}
-                        >
-                            Auto-relay
-                        </button>
-                        <button
-                            type="button"
-                            role="tab"
-                            aria-selected={tab === "channel"}
-                            onClick={() => handleTabChange("channel")}
-                            className="flex-1 px-3 py-1.5 text-xs font-medium transition-colors"
-                            style={{
-                                color: tab === "channel" ? "var(--bg)" : "var(--text-muted)",
-                                backgroundColor:
-                                    tab === "channel" ? "var(--accent)" : "transparent",
-                            }}
-                        >
-                            Channel
-                        </button>
-                    </div>
-
-                    {/* Receiver picker — only visible for Manual and Auto tabs */}
-                    {tab !== "channel" && (
-                        <div className="mb-4">
-                            <label
-                                className="block text-[11px] uppercase tracking-wider font-medium mb-1.5"
-                                style={{ color: "var(--text-muted)" }}
+                    <div className="flex flex-col" style={{ padding: "14px 18px 0", gap: 14 }}>
+                        {/* From chip */}
+                        <div className="flex items-center gap-2 text-xs">
+                            <span style={{ color: "var(--cc-muted, var(--text-muted))" }}>From</span>
+                            <span
+                                className="cc-pill flex items-center gap-1.5"
+                                style={{
+                                    padding: "4px 10px",
+                                    background: "var(--cc-term, var(--bg-surface))",
+                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                    borderRadius: 999,
+                                }}
                             >
-                                Send to:
-                            </label>
-                            <ReceiverList
-                                sessions={allSessions}
-                                fromSessionId={fromSession.id}
-                                selected={toSessionId}
-                                onSelect={(id) => setToSessionId(id)}
-                                busyTerminalIds={busyTerminalIds}
-                            />
+                                <SessionDot activityState={fromSession.activityState} />
+                                <span className="font-bold" style={{ color: "var(--cc-fg, var(--text-primary))" }}>
+                                    {fromSession.name}
+                                </span>
+                                {fromSession.model && (
+                                    <span className="text-[10px]" style={{ color: "var(--cc-muted, var(--text-muted))" }}>
+                                        {fromSession.model}
+                                    </span>
+                                )}
+                            </span>
                         </div>
-                    )}
 
-                    {/* ---- MANUAL TAB ---- */}
-                    {tab === "manual" && (
-                        <div>
-                            {/* Mode toggle */}
-                            <div className="mb-3">
+                        {/* Segmented tabs */}
+                        <div
+                            className="flex"
+                            role="tablist"
+                            style={{
+                                background: "var(--cc-term, var(--bg-surface))",
+                                border: "1px solid var(--cc-border, var(--border-color))",
+                                borderRadius: 9,
+                                padding: 3,
+                                gap: 3,
+                            }}
+                        >
+                            {tabDefs.map((t) => {
+                                const active = tab === t.id;
+                                const tabAccent = t.id === "channel" ? "var(--cc-waiting, #e0b060)" : "var(--cc-error, #e0698a)";
+                                return (
+                                    <button
+                                        key={t.id}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={active}
+                                        onClick={() => handleTabChange(t.id)}
+                                        className="flex-1 flex items-center justify-center text-xs font-bold rounded-md transition-colors"
+                                        style={{
+                                            height: 32,
+                                            color: active ? "#0f1216" : "var(--cc-dim, var(--text-muted))",
+                                            background: active ? tabAccent : "transparent",
+                                            border: "none",
+                                        }}
+                                    >
+                                        {t.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col" style={{ padding: "16px 18px", gap: 16 }}>
+                        {/* Intro */}
+                        <p
+                            className="text-xs"
+                            style={{ color: "var(--cc-muted, var(--text-muted))", lineHeight: 1.6, margin: 0 }}
+                        >
+                            Send a message from this session to another running session.{" "}
+                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Manual</strong>{" "}
+                            relays a single message (your latest reply or a custom prompt).{" "}
+                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Auto-bridge</strong>{" "}
+                            lets two sessions exchange messages back and forth until a turn cap is reached.{" "}
+                            <strong style={{ color: "var(--cc-dim, var(--text-secondary))" }}>Channel</strong>{" "}
+                            coordinates one lead session with multiple workers simultaneously.
+                        </p>
+
+                        {/* Receiver picker — only visible for Manual and Auto tabs */}
+                        {tab !== "channel" && (
+                            <div>
                                 <label
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1.5"
-                                    style={{ color: "var(--text-muted)" }}
+                                    className="cc-label block mb-1.5"
+                                    style={{ color: "var(--cc-muted, var(--text-muted))" }}
                                 >
-                                    Message source
+                                    Send to
                                 </label>
-                                <div
-                                    className="flex gap-0 rounded overflow-hidden"
-                                    style={{ border: "1px solid var(--border-color)" }}
-                                    role="group"
-                                    aria-label="Message source"
-                                >
-                                    <button
-                                        type="button"
-                                        aria-pressed={manualMode === "latest"}
-                                        onClick={() => setManualMode("latest")}
-                                        className="flex-1 px-3 py-1.5 text-xs transition-colors"
-                                        style={{
-                                            color:
-                                                manualMode === "latest"
-                                                    ? "var(--bg)"
-                                                    : "var(--text-muted)",
-                                            backgroundColor:
-                                                manualMode === "latest"
-                                                    ? "var(--accent)"
-                                                    : "transparent",
-                                            borderRight: "1px solid var(--border-color)",
-                                        }}
-                                    >
-                                        Relay my latest reply
-                                    </button>
-                                    <button
-                                        type="button"
-                                        aria-pressed={manualMode === "custom"}
-                                        onClick={() => setManualMode("custom")}
-                                        className="flex-1 px-3 py-1.5 text-xs transition-colors"
-                                        style={{
-                                            color:
-                                                manualMode === "custom"
-                                                    ? "var(--bg)"
-                                                    : "var(--text-muted)",
-                                            backgroundColor:
-                                                manualMode === "custom"
-                                                    ? "var(--accent)"
-                                                    : "transparent",
-                                        }}
-                                    >
-                                        Custom message
-                                    </button>
-                                </div>
+                                <ReceiverList
+                                    sessions={allSessions}
+                                    fromSessionId={fromSession.id}
+                                    selected={toSessionId}
+                                    onSelect={(id) => setToSessionId(id)}
+                                    busyTerminalIds={busyTerminalIds}
+                                    accent="var(--cc-error, #e0698a)"
+                                />
                             </div>
+                        )}
 
-                            {/* Latest reply display */}
-                            {manualMode === "latest" && (
-                                <div className="mb-3">
-                                    {latestLoading ? (
-                                        <div
-                                            className="flex items-center gap-2 py-3 text-xs"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            <Loader
-                                                size={12}
-                                                className="state-icon-spin"
-                                                style={{ color: "var(--accent)" }}
-                                            />
-                                            Fetching latest reply...
-                                        </div>
-                                    ) : latestText ? (
-                                        <pre
-                                            className="text-xs rounded px-3 py-2"
+                        {/* ---- MANUAL TAB ---- */}
+                        {tab === "manual" && (
+                            <>
+                                {/* Mode toggle */}
+                                <div>
+                                    <label
+                                        className="cc-label block mb-1.5"
+                                        style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                    >
+                                        Message source
+                                    </label>
+                                    <div
+                                        className="flex rounded-lg overflow-hidden"
+                                        style={{ border: "1px solid var(--cc-border, var(--border-color))" }}
+                                        role="group"
+                                        aria-label="Message source"
+                                    >
+                                        <button
+                                            type="button"
+                                            aria-pressed={manualMode === "latest"}
+                                            onClick={() => setManualMode("latest")}
+                                            className="flex-1 px-3 py-1.5 text-xs font-semibold transition-colors"
                                             style={{
-                                                backgroundColor: "var(--bg-surface)",
-                                                border: "1px solid var(--border-color)",
-                                                color: "var(--text-secondary)",
-                                                fontFamily: "inherit",
-                                                maxHeight: "140px",
-                                                overflowY: "auto",
-                                                whiteSpace: "pre-wrap",
-                                                wordBreak: "break-word",
-                                                margin: 0,
+                                                color: manualMode === "latest" ? "#0f1216" : "var(--cc-muted, var(--text-muted))",
+                                                backgroundColor:
+                                                    manualMode === "latest" ? "var(--cc-error, #e0698a)" : "transparent",
+                                                borderRight: "1px solid var(--cc-border, var(--border-color))",
                                             }}
                                         >
-                                            {latestText}
-                                        </pre>
-                                    ) : (
-                                        <p
-                                            className="text-xs py-2"
-                                            style={{ color: "var(--text-muted)" }}
+                                            Relay my latest reply
+                                        </button>
+                                        <button
+                                            type="button"
+                                            aria-pressed={manualMode === "custom"}
+                                            onClick={() => setManualMode("custom")}
+                                            className="flex-1 px-3 py-1.5 text-xs font-semibold transition-colors"
+                                            style={{
+                                                color: manualMode === "custom" ? "#0f1216" : "var(--cc-muted, var(--text-muted))",
+                                                backgroundColor:
+                                                    manualMode === "custom" ? "var(--cc-error, #e0698a)" : "transparent",
+                                            }}
                                         >
-                                            {toSessionId
-                                                ? "(No assistant reply found yet for this session.)"
-                                                : "Select a target session above to load the latest reply."}
-                                        </p>
-                                    )}
+                                            Custom message
+                                        </button>
+                                    </div>
                                 </div>
-                            )}
 
-                            {/* Custom message */}
-                            {manualMode === "custom" && (
-                                <div className="mb-3">
-                                    {/* Preset chips */}
-                                    <div className="flex flex-wrap gap-1.5 mb-2">
-                                        {PRESET_CHIPS.map((chip) => (
-                                            <button
-                                                key={chip.label}
-                                                type="button"
-                                                onClick={() => setCustomText(chip.text)}
-                                                className="px-2 py-1 rounded text-[11px] transition-colors hover-bg-surface"
+                                {/* Latest reply display */}
+                                {manualMode === "latest" && (
+                                    <div>
+                                        {latestLoading ? (
+                                            <div
+                                                className="flex items-center gap-2 py-3 text-xs"
+                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                            >
+                                                <Loader
+                                                    size={12}
+                                                    className="state-icon-spin"
+                                                    style={{ color: "var(--cc-error, var(--accent))" }}
+                                                />
+                                                Fetching latest reply...
+                                            </div>
+                                        ) : latestText ? (
+                                            <pre
+                                                className="text-xs rounded-lg px-3 py-2"
                                                 style={{
-                                                    border: "1px solid var(--border-color)",
-                                                    color: "var(--text-secondary)",
-                                                    backgroundColor: "transparent",
+                                                    backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                                    color: "var(--cc-dim, var(--text-secondary))",
+                                                    fontFamily: "inherit",
+                                                    maxHeight: "140px",
+                                                    overflowY: "auto",
+                                                    whiteSpace: "pre-wrap",
+                                                    wordBreak: "break-word",
+                                                    margin: 0,
                                                 }}
                                             >
-                                                {chip.label}
-                                            </button>
-                                        ))}
+                                                {latestText}
+                                            </pre>
+                                        ) : (
+                                            <p
+                                                className="text-xs py-2"
+                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                            >
+                                                {toSessionId
+                                                    ? "(No assistant reply found yet for this session.)"
+                                                    : "Select a target session above to load the latest reply."}
+                                            </p>
+                                        )}
                                     </div>
+                                )}
+
+                                {/* Custom message */}
+                                {manualMode === "custom" && (
+                                    <div className="flex flex-col gap-2">
+                                        {/* Preset chips */}
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {PRESET_CHIPS.map((chip) => (
+                                                <button
+                                                    key={chip.label}
+                                                    type="button"
+                                                    onClick={() => setCustomText(chip.text)}
+                                                    className="cc-chip"
+                                                    style={{
+                                                        border: "1px solid var(--cc-border, var(--border-color))",
+                                                        color: "var(--cc-dim, var(--text-secondary))",
+                                                        backgroundColor: "transparent",
+                                                        borderRadius: 999,
+                                                        padding: "4px 10px",
+                                                        fontWeight: 600,
+                                                        textTransform: "none",
+                                                        letterSpacing: "normal",
+                                                    }}
+                                                >
+                                                    {chip.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <label
+                                            htmlFor="bridge-custom-text"
+                                            className="cc-label block"
+                                            style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                        >
+                                            Message
+                                        </label>
+                                        <textarea
+                                            id="bridge-custom-text"
+                                            ref={manualMode === "custom" ? firstFieldRef : null}
+                                            rows={4}
+                                            value={customText}
+                                            onChange={(e) => setCustomText(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                // Allow Enter for newlines; do not submit
+                                                e.stopPropagation();
+                                            }}
+                                            placeholder="Type a message to relay..."
+                                            className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none"
+                                            style={{
+                                                backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                                color: "var(--cc-fg, var(--text-primary))",
+                                                border: "1px solid var(--cc-border, var(--border-color))",
+                                                fontFamily: "inherit",
+                                                lineHeight: 1.5,
+                                            }}
+                                        />
+                                    </div>
+                                )}
+
+                                {/* Prefix input */}
+                                <div>
                                     <label
-                                        htmlFor="bridge-custom-text"
-                                        className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                        style={{ color: "var(--text-muted)" }}
+                                        htmlFor="bridge-prefix"
+                                        className="cc-label block mb-1"
+                                        style={{ color: "var(--cc-muted, var(--text-muted))" }}
                                     >
-                                        Message
+                                        Prefix (prepended to message)
                                     </label>
-                                    <textarea
-                                        id="bridge-custom-text"
-                                        ref={manualMode === "custom" ? firstFieldRef : null}
-                                        rows={4}
-                                        value={customText}
-                                        onChange={(e) => setCustomText(e.target.value)}
-                                        onKeyDown={(e) => {
-                                            // Allow Enter for newlines; do not submit
-                                            e.stopPropagation();
-                                        }}
-                                        placeholder="Type a message to relay..."
-                                        className="w-full px-3 py-1.5 rounded text-xs outline-none resize-none"
+                                    <input
+                                        id="bridge-prefix"
+                                        ref={manualMode === "latest" ? firstFieldRef : null}
+                                        type="text"
+                                        value={prefix}
+                                        onChange={(e) => setPrefix(e.target.value)}
+                                        className="w-full px-3 py-2 rounded-lg text-xs outline-none"
                                         style={{
-                                            backgroundColor: "var(--bg-surface)",
-                                            color: "var(--text-primary)",
-                                            border: "1px solid var(--border-color)",
+                                            backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                            color: "var(--cc-fg, var(--text-primary))",
+                                            border: "1px solid var(--cc-border, var(--border-color))",
                                             fontFamily: "inherit",
                                         }}
                                     />
                                 </div>
-                            )}
+                            </>
+                        )}
 
-                            {/* Prefix input */}
-                            <div className="mb-4">
-                                <label
-                                    htmlFor="bridge-prefix"
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                    style={{ color: "var(--text-muted)" }}
-                                >
-                                    Prefix (prepended to message)
-                                </label>
-                                <input
-                                    id="bridge-prefix"
-                                    ref={manualMode === "latest" ? firstFieldRef : null}
-                                    type="text"
-                                    value={prefix}
-                                    onChange={(e) => setPrefix(e.target.value)}
-                                    className="w-full px-3 py-1.5 rounded text-xs outline-none"
-                                    style={{
-                                        backgroundColor: "var(--bg-surface)",
-                                        color: "var(--text-primary)",
-                                        border: "1px solid var(--border-color)",
-                                        fontFamily: "inherit",
-                                    }}
-                                />
-                            </div>
-
-                            {/* Footer buttons */}
-                            <div className="flex justify-between items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={onClose}
-                                    className="px-3 py-1.5 rounded text-xs transition-colors"
-                                    style={{
-                                        color: "var(--text-muted)",
-                                        border: "1px solid var(--border-color)",
-                                    }}
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="button"
-                                    disabled={manualSendDisabled}
-                                    onClick={handleSendManual}
-                                    className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
-                                    style={{
-                                        backgroundColor: manualSendDisabled
-                                            ? "var(--bg-surface)"
-                                            : "var(--accent)",
-                                        color: manualSendDisabled
-                                            ? "var(--text-muted)"
-                                            : "var(--bg)",
-                                        cursor: manualSendDisabled ? "not-allowed" : "pointer",
-                                        border: manualSendDisabled
-                                            ? "1px solid var(--border-color)"
-                                            : "none",
-                                    }}
-                                >
-                                    {submitting ? (
-                                        <span className="flex items-center gap-1.5">
-                                            <Loader size={11} className="state-icon-spin" />
-                                            Sending...
-                                        </span>
-                                    ) : receiverSession ? (
-                                        `Send to "${receiverSession.name}"`
-                                    ) : (
-                                        "Send"
-                                    )}
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* ---- AUTO TAB ---- */}
-                    {tab === "auto" && (
-                        <div>
-                            {/* Neon red warning panel */}
-                            <div style={NEON_PANEL_STYLE} role="alert">
-                                <div className="flex items-start gap-2">
-                                    <AlertTriangle
-                                        size={16}
-                                        style={{ flexShrink: 0, marginTop: "1px" }}
-                                    />
-                                    <div>
-                                        <div style={{ fontSize: "13px", marginBottom: "4px" }}>
-                                            AUTONOMOUS BRIDGE
-                                        </div>
-                                        <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
-                                            Two agents will relay messages to each other without your
-                                            input until the turn cap is hit, one says BRIDGE-DONE, or
-                                            you click Stop. Token cost is doubled. Use Manual unless
-                                            you have a specific reason.
+                        {/* ---- AUTO TAB ---- */}
+                        {tab === "auto" && (
+                            <>
+                                {/* Neon warning panel */}
+                                <div style={NEON_PANEL_STYLE} role="alert">
+                                    <div className="flex items-start gap-2">
+                                        <AlertTriangle
+                                            size={16}
+                                            style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-error, #e0698a)" }}
+                                        />
+                                        <div>
+                                            <div style={{ fontSize: "13px", marginBottom: "4px" }}>
+                                                AUTONOMOUS BRIDGE
+                                            </div>
+                                            <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
+                                                Two agents will relay messages to each other without your
+                                                input until the turn cap is hit, one says BRIDGE-DONE, or
+                                                you click Stop. Token cost is doubled. Use Manual unless
+                                                you have a specific reason.
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
-                            </div>
 
-                            {/* Confirm step 0 — show form */}
-                            {confirmStep === 0 && (
-                                <>
-                                    {/* Lead session label (formerly "From session") */}
-                                    <div className="mb-2">
-                                        <span
-                                            className="block text-[11px] uppercase tracking-wider font-medium mb-0.5"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            Lead session
-                                        </span>
-                                        <span
-                                            className="text-xs"
-                                            style={{ color: "var(--text-secondary)" }}
-                                        >
-                                            {fromSession.name}
-                                        </span>
-                                    </div>
-
-                                    {/* Worker session label (formerly "To session") */}
-                                    <div className="mb-3">
-                                        <label
-                                            className="block text-[11px] uppercase tracking-wider font-medium mb-1.5"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            Worker session
-                                        </label>
-                                        {/* ReceiverList is rendered above the tabs section for non-channel tabs;
-                                            the worker selection reuses the already-rendered toSessionId picker */}
-                                        {receiverSession ? (
+                                {/* Confirm step 0 — show form */}
+                                {confirmStep === 0 && (
+                                    <>
+                                        {/* Lead session label */}
+                                        <div>
+                                            <span
+                                                className="cc-label block mb-0.5"
+                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                            >
+                                                Lead session
+                                            </span>
                                             <span
                                                 className="text-xs"
-                                                style={{ color: "var(--text-secondary)" }}
+                                                style={{ color: "var(--cc-dim, var(--text-secondary))" }}
                                             >
-                                                {receiverSession.name}
-                                            </span>
-                                        ) : (
-                                            <span
-                                                className="text-xs"
-                                                style={{ color: "var(--text-muted)" }}
-                                            >
-                                                Select a session above
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    {/* Kickoff prompt */}
-                                    <div className="mb-3">
-                                        <label
-                                            htmlFor="bridge-auto-prompt"
-                                            className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            Kickoff prompt
-                                        </label>
-                                        <textarea
-                                            id="bridge-auto-prompt"
-                                            ref={firstFieldRef}
-                                            rows={4}
-                                            value={autoPrompt}
-                                            onChange={(e) => setAutoPrompt(e.target.value)}
-                                            onKeyDown={(e) => e.stopPropagation()}
-                                            placeholder="Share your blast radius — files you intend to touch — and reconcile any overlap. End with BRIDGE-DONE when aligned."
-                                            className="w-full px-3 py-1.5 rounded text-xs outline-none resize-none"
-                                            style={{
-                                                backgroundColor: "var(--bg-surface)",
-                                                color: "var(--text-primary)",
-                                                border: "1px solid var(--border-color)",
-                                                fontFamily: "inherit",
-                                            }}
-                                        />
-                                    </div>
-
-                                    {/* Max turns */}
-                                    <div className="mb-4">
-                                        <label
-                                            htmlFor="bridge-max-turns"
-                                            className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                            style={{ color: "var(--text-muted)" }}
-                                        >
-                                            Max round-trips
-                                        </label>
-                                        <input
-                                            id="bridge-max-turns"
-                                            type="number"
-                                            min={1}
-                                            max={10}
-                                            value={maxTurns}
-                                            onChange={(e) =>
-                                                setMaxTurns(
-                                                    Math.min(10, Math.max(1, parseInt(e.target.value, 10) || 1))
-                                                )
-                                            }
-                                            className="w-20 px-3 py-1.5 rounded text-xs outline-none"
-                                            style={{
-                                                backgroundColor: "var(--bg-surface)",
-                                                color: "var(--text-primary)",
-                                                border: "1px solid var(--border-color)",
-                                                fontFamily: "inherit",
-                                            }}
-                                        />
-                                    </div>
-
-                                    {/* Footer buttons — step 0 */}
-                                    <div className="flex justify-between items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={onClose}
-                                            className="px-3 py-1.5 rounded text-xs transition-colors"
-                                            style={{
-                                                color: "var(--text-muted)",
-                                                border: "1px solid var(--border-color)",
-                                            }}
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            type="button"
-                                            disabled={autoContinueDisabled}
-                                            onClick={() => setConfirmStep(1)}
-                                            className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
-                                            style={{
-                                                backgroundColor: autoContinueDisabled
-                                                    ? "var(--bg-surface)"
-                                                    : "var(--accent)",
-                                                color: autoContinueDisabled
-                                                    ? "var(--text-muted)"
-                                                    : "var(--bg)",
-                                                cursor: autoContinueDisabled ? "not-allowed" : "pointer",
-                                                border: autoContinueDisabled
-                                                    ? "1px solid var(--border-color)"
-                                                    : "none",
-                                            }}
-                                        >
-                                            Continue to confirm
-                                        </button>
-                                    </div>
-                                </>
-                            )}
-
-                            {/* Confirm step 1 — replace form with second banner + buttons */}
-                            {confirmStep === 1 && (
-                                <>
-                                    <div style={NEON_PANEL_SMALL_STYLE} role="alert">
-                                        <div className="flex items-start gap-2">
-                                            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px" }} />
-                                            <span>
-                                                Are you absolutely sure? This will start an autonomous
-                                                loop between two agents.
+                                                {fromSession.name}
                                             </span>
                                         </div>
-                                    </div>
 
-                                    <div className="flex justify-between items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => setConfirmStep(0)}
-                                            className="px-3 py-1.5 rounded text-xs transition-colors"
-                                            style={{
-                                                color: "var(--text-muted)",
-                                                border: "1px solid var(--border-color)",
-                                            }}
-                                        >
-                                            Go back
-                                        </button>
-                                        <button
-                                            type="button"
-                                            disabled={submitting}
-                                            onClick={handleStartAuto}
-                                            className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
-                                            style={{
-                                                backgroundColor: submitting ? "#991122" : "#ff0033",
-                                                color: "#ffffff",
-                                                border: "2px solid #ff5577",
-                                                cursor: submitting ? "not-allowed" : "pointer",
-                                                boxShadow: "0 0 12px rgba(255,0,51,0.5)",
-                                            }}
-                                        >
-                                            {submitting ? (
-                                                <span className="flex items-center gap-1.5">
-                                                    <Loader size={11} className="state-icon-spin" />
-                                                    Starting...
+                                        {/* Worker session label */}
+                                        <div>
+                                            <label
+                                                className="cc-label block mb-1.5"
+                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                            >
+                                                Worker session
+                                            </label>
+                                            {/* ReceiverList is rendered above the tabs section for non-channel tabs;
+                                                the worker selection reuses the already-rendered toSessionId picker */}
+                                            {receiverSession ? (
+                                                <span
+                                                    className="text-xs"
+                                                    style={{ color: "var(--cc-dim, var(--text-secondary))" }}
+                                                >
+                                                    {receiverSession.name}
                                                 </span>
                                             ) : (
-                                                "I understand — start auto-relay"
+                                                <span
+                                                    className="text-xs"
+                                                    style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                                >
+                                                    Select a session above
+                                                </span>
                                             )}
+                                        </div>
+
+                                        {/* Kickoff prompt */}
+                                        <div>
+                                            <label
+                                                htmlFor="bridge-auto-prompt"
+                                                className="cc-label block mb-1"
+                                                style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                            >
+                                                Kickoff prompt
+                                            </label>
+                                            <textarea
+                                                id="bridge-auto-prompt"
+                                                ref={firstFieldRef}
+                                                rows={4}
+                                                value={autoPrompt}
+                                                onChange={(e) => setAutoPrompt(e.target.value)}
+                                                onKeyDown={(e) => e.stopPropagation()}
+                                                placeholder="Share your blast radius — files you intend to touch — and reconcile any overlap. End with BRIDGE-DONE when aligned."
+                                                className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none"
+                                                style={{
+                                                    backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                                    color: "var(--cc-fg, var(--text-primary))",
+                                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                                    fontFamily: "inherit",
+                                                    lineHeight: 1.5,
+                                                }}
+                                            />
+                                        </div>
+
+                                        {/* Max turns stepper */}
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex flex-col" style={{ gap: 1 }}>
+                                                <span className="text-xs font-semibold" style={{ color: "var(--cc-fg, var(--text-primary))" }}>
+                                                    Max turns
+                                                </span>
+                                                <span className="text-[10px]" style={{ color: "var(--cc-muted, var(--text-muted))" }}>
+                                                    Auto-stop after this many exchanges
+                                                </span>
+                                            </div>
+                                            <Stepper
+                                                value={maxTurns}
+                                                min={1}
+                                                max={10}
+                                                onDec={() => setMaxTurns((v) => Math.max(1, v - 1))}
+                                                onInc={() => setMaxTurns((v) => Math.min(10, v + 1))}
+                                            />
+                                        </div>
+
+                                        {/* Footer buttons — step 0 */}
+                                        <div className="flex justify-between items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={onClose}
+                                                className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
+                                                style={{
+                                                    color: "var(--cc-dim, var(--text-muted))",
+                                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                                    background: "none",
+                                                }}
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={autoContinueDisabled}
+                                                onClick={() => setConfirmStep(1)}
+                                                className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
+                                                style={{
+                                                    backgroundColor: autoContinueDisabled
+                                                        ? "var(--cc-elev, var(--bg-surface))"
+                                                        : "var(--cc-error, #e0698a)",
+                                                    color: autoContinueDisabled
+                                                        ? "var(--cc-muted, var(--text-muted))"
+                                                        : "#0f1216",
+                                                    cursor: autoContinueDisabled ? "not-allowed" : "pointer",
+                                                    border: autoContinueDisabled
+                                                        ? "1px solid var(--cc-border, var(--border-color))"
+                                                        : "none",
+                                                }}
+                                            >
+                                                Continue to confirm
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
+
+                                {/* Confirm step 1 — replace form with second banner + buttons */}
+                                {confirmStep === 1 && (
+                                    <>
+                                        <div style={NEON_PANEL_SMALL_STYLE} role="alert">
+                                            <div className="flex items-start gap-2">
+                                                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-error, #e0698a)" }} />
+                                                <span>
+                                                    Are you absolutely sure? This will start an autonomous
+                                                    loop between two agents.
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex justify-between items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setConfirmStep(0)}
+                                                className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
+                                                style={{
+                                                    color: "var(--cc-dim, var(--text-muted))",
+                                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                                    background: "none",
+                                                }}
+                                            >
+                                                Go back
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={submitting}
+                                                onClick={handleStartAuto}
+                                                className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
+                                                style={{
+                                                    backgroundColor: submitting
+                                                        ? "color-mix(in srgb, var(--cc-error, #e0698a) 55%, black)"
+                                                        : "var(--cc-error, #e0698a)",
+                                                    color: "#0f1216",
+                                                    border: "1px solid color-mix(in srgb, var(--cc-error, #e0698a) 60%, white)",
+                                                    cursor: submitting ? "not-allowed" : "pointer",
+                                                    boxShadow: "0 0 12px color-mix(in srgb, var(--cc-error, #e0698a) 45%, transparent)",
+                                                }}
+                                            >
+                                                {submitting ? (
+                                                    <span className="flex items-center gap-1.5">
+                                                        <Loader size={11} className="state-icon-spin" />
+                                                        Starting...
+                                                    </span>
+                                                ) : (
+                                                    "I understand — start auto-relay"
+                                                )}
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
+                            </>
+                        )}
+
+                        {/* ---- CHANNEL TAB ---- */}
+                        {tab === "channel" && (
+                            <>
+                                {/* Neon warning panel (gold for channel) */}
+                                <div
+                                    style={{
+                                        ...NEON_PANEL_STYLE,
+                                        background: "color-mix(in srgb, var(--cc-waiting, #e0b060) 16%, var(--cc-surface, var(--bg-elevated)))",
+                                        border: "1px solid color-mix(in srgb, var(--cc-waiting, #e0b060) 45%, transparent)",
+                                        boxShadow: "0 0 18px color-mix(in srgb, var(--cc-waiting, #e0b060) 25%, transparent)",
+                                    }}
+                                    role="alert"
+                                >
+                                    <div className="flex items-start gap-2">
+                                        <AlertTriangle
+                                            size={16}
+                                            style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-waiting, #e0b060)" }}
+                                        />
+                                        <div>
+                                            <div style={{ fontSize: "13px", marginBottom: "4px" }}>
+                                                AUTONOMOUS CHANNEL
+                                            </div>
+                                            <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
+                                                One lead and multiple workers will exchange messages without
+                                                your input until the turn cap is hit or you click Stop.
+                                                Token cost scales with the number of sessions. Use Manual
+                                                unless you have a specific reason.
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Lead session picker */}
+                                <div>
+                                    <label
+                                        className="cc-label block mb-1.5"
+                                        style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                    >
+                                        Lead session
+                                    </label>
+                                    {channelEligible.length === 0 ? (
+                                        <p
+                                            className="text-xs py-2 px-1"
+                                            style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                        >
+                                            No other running sessions available.
+                                        </p>
+                                    ) : (
+                                        <div className="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto" role="radiogroup" aria-label="Lead session">
+                                            {channelEligible.map((s) => {
+                                                const isSelected = s.id === channelLeadId;
+                                                const busyReason = busyTerminalIds.get(s.terminalId);
+                                                const isBusy = Boolean(busyReason);
+                                                return (
+                                                    <PickerRow
+                                                        key={s.id}
+                                                        shape="radio"
+                                                        selected={isSelected}
+                                                        disabled={isBusy}
+                                                        onClick={() => handleChannelLeadChange(s.id)}
+                                                        accent="var(--cc-waiting, #e0b060)"
+                                                        name={s.name}
+                                                        model={s.model}
+                                                        activityState={s.activityState}
+                                                        busy={isBusy}
+                                                        busyReason={busyReason}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Worker sessions picker */}
+                                <div>
+                                    <label
+                                        className="cc-label block mb-1.5"
+                                        style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                    >
+                                        Worker sessions{" "}
+                                        <span style={{ color: "var(--cc-waiting, #e0b060)" }}>
+                                            {channelWorkerIds.size > 0 ? `${channelWorkerIds.size} selected` : ""}
+                                        </span>
+                                    </label>
+                                    {!channelLeadId ? (
+                                        <p
+                                            className="text-xs py-2 px-1"
+                                            style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                        >
+                                            Select a lead session first.
+                                        </p>
+                                    ) : channelWorkerEligible.length === 0 ? (
+                                        <p
+                                            className="text-xs py-2 px-1"
+                                            style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                        >
+                                            No other running sessions available as workers.
+                                        </p>
+                                    ) : (
+                                        <div className="flex flex-col gap-1.5 max-h-[150px] overflow-y-auto" role="group" aria-label="Worker sessions">
+                                            {channelWorkerEligible.map((s) => {
+                                                const isChecked = channelWorkerIds.has(s.id);
+                                                const busyReason = busyTerminalIds.get(s.terminalId);
+                                                const isBusy = Boolean(busyReason);
+                                                return (
+                                                    <PickerRow
+                                                        key={s.id}
+                                                        shape="checkbox"
+                                                        checked={isChecked}
+                                                        disabled={isBusy}
+                                                        onClick={() => toggleChannelWorker(s.id)}
+                                                        accent="var(--cc-waiting, #e0b060)"
+                                                        name={s.name}
+                                                        model={s.model}
+                                                        activityState={s.activityState}
+                                                        busy={isBusy}
+                                                        busyReason={busyReason}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Kickoff prompt */}
+                                <div>
+                                    <label
+                                        htmlFor="channel-prompt"
+                                        className="cc-label block mb-1"
+                                        style={{ color: "var(--cc-muted, var(--text-muted))" }}
+                                    >
+                                        Kickoff prompt
+                                    </label>
+                                    <textarea
+                                        id="channel-prompt"
+                                        ref={firstFieldRef}
+                                        rows={4}
+                                        value={channelPrompt}
+                                        onChange={(e) => setChannelPrompt(e.target.value)}
+                                        onKeyDown={(e) => e.stopPropagation()}
+                                        placeholder="Describe the task and how each session should collaborate..."
+                                        className="w-full px-3 py-2 rounded-lg text-xs outline-none resize-none"
+                                        style={{
+                                            backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                            color: "var(--cc-fg, var(--text-primary))",
+                                            border: "1px solid var(--cc-border, var(--border-color))",
+                                            fontFamily: "inherit",
+                                            lineHeight: 1.5,
+                                        }}
+                                    />
+                                </div>
+
+                                {/* Max turns stepper */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex flex-col" style={{ gap: 1 }}>
+                                        <span className="text-xs font-semibold" style={{ color: "var(--cc-fg, var(--text-primary))" }}>
+                                            Max turns
+                                        </span>
+                                        <span className="text-[10px]" style={{ color: "var(--cc-muted, var(--text-muted))" }}>
+                                            Auto-stop after this many exchanges
+                                        </span>
+                                    </div>
+                                    <Stepper
+                                        value={channelMaxTurns}
+                                        min={1}
+                                        max={20}
+                                        onDec={() => setChannelMaxTurns((v) => Math.max(1, v - 1))}
+                                        onInc={() => setChannelMaxTurns((v) => Math.min(20, v + 1))}
+                                    />
+                                </div>
+
+                                {/* Confirm gate */}
+                                {!channelConfirmed ? (
+                                    <div>
+                                        <div
+                                            style={{
+                                                ...NEON_PANEL_SMALL_STYLE,
+                                                background: "color-mix(in srgb, var(--cc-waiting, #e0b060) 16%, var(--cc-surface, var(--bg-elevated)))",
+                                                border: "1px solid color-mix(in srgb, var(--cc-waiting, #e0b060) 45%, transparent)",
+                                                boxShadow: "0 0 18px color-mix(in srgb, var(--cc-waiting, #e0b060) 25%, transparent)",
+                                            }}
+                                            role="alert"
+                                        >
+                                            <div className="flex items-start gap-2">
+                                                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px", color: "var(--cc-waiting, #e0b060)" }} />
+                                                <span>
+                                                    This will start an autonomous loop across{" "}
+                                                    {channelWorkerIds.size > 0
+                                                        ? `1 lead + ${channelWorkerIds.size} worker${channelWorkerIds.size > 1 ? "s" : ""}`
+                                                        : "multiple sessions"}
+                                                    . Confirm to enable the Start button.
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setChannelConfirmed(true)}
+                                            className="w-full px-3 py-2 rounded-lg text-xs font-bold transition-colors"
+                                            style={{
+                                                backgroundColor: "transparent",
+                                                color: "var(--cc-waiting, #e0b060)",
+                                                border: "1px solid color-mix(in srgb, var(--cc-waiting, #e0b060) 60%, transparent)",
+                                                cursor: "pointer",
+                                            }}
+                                        >
+                                            I understand — confirm channel
                                         </button>
                                     </div>
-                                </>
-                            )}
+                                ) : (
+                                    <div
+                                        className="px-3 py-2 rounded-lg text-xs"
+                                        style={{
+                                            border: "1px solid var(--cc-border, var(--border-color))",
+                                            color: "var(--cc-muted, var(--text-muted))",
+                                            backgroundColor: "var(--cc-term, var(--bg-surface))",
+                                        }}
+                                    >
+                                        Confirmed. Click Start Channel to proceed.
+                                        <button
+                                            type="button"
+                                            onClick={() => setChannelConfirmed(false)}
+                                            className="ml-2 underline"
+                                            style={{ color: "var(--cc-muted, var(--text-muted))", background: "none", border: "none" }}
+                                        >
+                                            Undo
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Error display */}
+                                {channelError && (
+                                    <div
+                                        className="px-3 py-2 rounded-lg text-xs"
+                                        style={{
+                                            border: "1px solid var(--cc-error, #e0698a)",
+                                            color: "var(--cc-error, #e0698a)",
+                                            backgroundColor: "color-mix(in srgb, var(--cc-error, #e0698a) 10%, transparent)",
+                                        }}
+                                    >
+                                        {channelError}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+
+                    {/* Channel tab footer */}
+                    {tab === "channel" && (
+                        <div
+                            className="flex items-center justify-between gap-2"
+                            style={{
+                                padding: "14px 18px",
+                                borderTop: "1px solid var(--cc-line, var(--border-color))",
+                                background: "color-mix(in srgb, var(--cc-bg, var(--bg-primary)) 40%, transparent)",
+                            }}
+                        >
+                            <>
+                                    <button
+                                        type="button"
+                                        onClick={onClose}
+                                        className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
+                                        style={{
+                                            color: "var(--cc-dim, var(--text-muted))",
+                                            border: "1px solid var(--cc-border, var(--border-color))",
+                                            background: "none",
+                                        }}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={channelStartDisabled}
+                                        onClick={handleStartChannel}
+                                        className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
+                                        style={{
+                                            backgroundColor: channelStartDisabled
+                                                ? "var(--cc-elev, var(--bg-surface))"
+                                                : "var(--cc-waiting, #e0b060)",
+                                            color: channelStartDisabled
+                                                ? "var(--cc-muted, var(--text-muted))"
+                                                : "#0f1216",
+                                            cursor: channelStartDisabled ? "not-allowed" : "pointer",
+                                            border: channelStartDisabled
+                                                ? "1px solid var(--cc-border, var(--border-color))"
+                                                : "1px solid color-mix(in srgb, var(--cc-waiting, #e0b060) 60%, white)",
+                                            boxShadow: channelStartDisabled
+                                                ? "none"
+                                                : "0 0 12px color-mix(in srgb, var(--cc-waiting, #e0b060) 45%, transparent)",
+                                        }}
+                                    >
+                                        {submitting ? (
+                                            <span className="flex items-center gap-1.5">
+                                                <Loader size={11} className="state-icon-spin" />
+                                                Starting...
+                                            </span>
+                                        ) : (
+                                            "Start Channel"
+                                        )}
+                                    </button>
+                            </>
                         </div>
                     )}
 
-                    {/* ---- CHANNEL TAB ---- */}
-                    {tab === "channel" && (
-                        <div>
-                            {/* Neon red warning panel */}
-                            <div style={NEON_PANEL_STYLE} role="alert">
-                                <div className="flex items-start gap-2">
-                                    <AlertTriangle
-                                        size={16}
-                                        style={{ flexShrink: 0, marginTop: "1px" }}
-                                    />
-                                    <div>
-                                        <div style={{ fontSize: "13px", marginBottom: "4px" }}>
-                                            AUTONOMOUS CHANNEL
-                                        </div>
-                                        <div style={{ fontSize: "11px", fontWeight: 400, lineHeight: 1.5 }}>
-                                            One lead and multiple workers will exchange messages without
-                                            your input until the turn cap is hit or you click Stop.
-                                            Token cost scales with the number of sessions. Use Manual
-                                            unless you have a specific reason.
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Lead session picker */}
-                            <div className="mb-4">
-                                <label
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1.5"
-                                    style={{ color: "var(--text-muted)" }}
-                                >
-                                    Lead session
-                                </label>
-                                {channelEligible.length === 0 ? (
-                                    <p
-                                        className="text-xs py-2 px-1"
-                                        style={{ color: "var(--text-muted)" }}
-                                    >
-                                        No other running sessions available.
-                                    </p>
+                    {/* Manual tab footer */}
+                    {tab === "manual" && (
+                        <div
+                            className="flex items-center justify-between gap-2"
+                            style={{
+                                padding: "14px 18px",
+                                borderTop: "1px solid var(--cc-line, var(--border-color))",
+                                background: "color-mix(in srgb, var(--cc-bg, var(--bg-primary)) 40%, transparent)",
+                            }}
+                        >
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors"
+                                style={{
+                                    color: "var(--cc-dim, var(--text-muted))",
+                                    border: "1px solid var(--cc-border, var(--border-color))",
+                                    background: "none",
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                disabled={manualSendDisabled}
+                                onClick={handleSendManual}
+                                className="px-3.5 py-2 rounded-lg text-xs font-bold transition-colors"
+                                style={{
+                                    backgroundColor: manualSendDisabled
+                                        ? "var(--cc-elev, var(--bg-surface))"
+                                        : "var(--cc-error, #e0698a)",
+                                    color: manualSendDisabled
+                                        ? "var(--cc-muted, var(--text-muted))"
+                                        : "#0f1216",
+                                    cursor: manualSendDisabled ? "not-allowed" : "pointer",
+                                    border: manualSendDisabled
+                                        ? "1px solid var(--cc-border, var(--border-color))"
+                                        : "none",
+                                }}
+                            >
+                                {submitting ? (
+                                    <span className="flex items-center gap-1.5">
+                                        <Loader size={11} className="state-icon-spin" />
+                                        Sending...
+                                    </span>
+                                ) : receiverSession ? (
+                                    `Send to "${receiverSession.name}"`
                                 ) : (
-                                    <div className="flex flex-col gap-1" role="radiogroup" aria-label="Lead session">
-                                        {channelEligible.map((s) => {
-                                            const isSelected = s.id === channelLeadId;
-                                            const busyReason = busyTerminalIds.get(s.terminalId);
-                                            const isBusy = Boolean(busyReason);
-                                            return (
-                                                <button
-                                                    key={s.id}
-                                                    type="button"
-                                                    role="radio"
-                                                    aria-checked={isSelected}
-                                                    disabled={isBusy}
-                                                    onClick={() => handleChannelLeadChange(s.id)}
-                                                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
-                                                        isBusy ? "bridge-session-busy" : "hover-bg-surface"
-                                                    }`}
-                                                    style={{
-                                                        border: isSelected
-                                                            ? "1px solid var(--accent)"
-                                                            : "1px solid var(--border-color)",
-                                                        backgroundColor: isSelected
-                                                            ? "var(--bg-highlight)"
-                                                            : "transparent",
-                                                        color: "var(--text-primary)",
-                                                    }}
-                                                >
-                                                    <SessionDot activityState={s.activityState} />
-                                                    <span className="flex-1 truncate">{s.name}</span>
-                                                    {isBusy && <BusyHint reason={busyReason} />}
-                                                    <span
-                                                        className="text-[10px] truncate"
-                                                        style={{ color: "var(--text-muted)" }}
-                                                    >
-                                                        {s.model}
-                                                    </span>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
+                                    "Send"
                                 )}
-                            </div>
-
-                            {/* Worker sessions picker */}
-                            <div className="mb-4">
-                                <label
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1.5"
-                                    style={{ color: "var(--text-muted)" }}
-                                >
-                                    Worker sessions
-                                </label>
-                                {!channelLeadId ? (
-                                    <p
-                                        className="text-xs py-2 px-1"
-                                        style={{ color: "var(--text-muted)" }}
-                                    >
-                                        Select a lead session first.
-                                    </p>
-                                ) : channelWorkerEligible.length === 0 ? (
-                                    <p
-                                        className="text-xs py-2 px-1"
-                                        style={{ color: "var(--text-muted)" }}
-                                    >
-                                        No other running sessions available as workers.
-                                    </p>
-                                ) : (
-                                    <div className="flex flex-col gap-1" role="group" aria-label="Worker sessions">
-                                        {channelWorkerEligible.map((s) => {
-                                            const isChecked = channelWorkerIds.has(s.id);
-                                            const busyReason = busyTerminalIds.get(s.terminalId);
-                                            const isBusy = Boolean(busyReason);
-                                            return (
-                                                <button
-                                                    key={s.id}
-                                                    type="button"
-                                                    role="checkbox"
-                                                    aria-checked={isChecked}
-                                                    disabled={isBusy}
-                                                    onClick={() => toggleChannelWorker(s.id)}
-                                                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded text-xs text-left transition-colors ${
-                                                        isBusy ? "bridge-session-busy" : "hover-bg-surface"
-                                                    }`}
-                                                    style={{
-                                                        border: isChecked
-                                                            ? "1px solid var(--accent)"
-                                                            : "1px solid var(--border-color)",
-                                                        backgroundColor: isChecked
-                                                            ? "var(--bg-highlight)"
-                                                            : "transparent",
-                                                        color: "var(--text-primary)",
-                                                    }}
-                                                >
-                                                    {/* Checkbox visual */}
-                                                    <span
-                                                        style={{
-                                                            width: 12,
-                                                            height: 12,
-                                                            flexShrink: 0,
-                                                            border: isChecked
-                                                                ? "2px solid var(--accent)"
-                                                                : "2px solid var(--border-color)",
-                                                            borderRadius: 2,
-                                                            backgroundColor: isChecked
-                                                                ? "var(--accent)"
-                                                                : "transparent",
-                                                            display: "flex",
-                                                            alignItems: "center",
-                                                            justifyContent: "center",
-                                                        }}
-                                                    >
-                                                        {isChecked && (
-                                                            <svg width="8" height="6" viewBox="0 0 8 6" fill="none">
-                                                                <path d="M1 3L3 5L7 1" stroke="var(--bg)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                                                            </svg>
-                                                        )}
-                                                    </span>
-                                                    <SessionDot activityState={s.activityState} />
-                                                    <span className="flex-1 truncate">{s.name}</span>
-                                                    {isBusy && <BusyHint reason={busyReason} />}
-                                                    <span
-                                                        className="text-[10px] truncate"
-                                                        style={{ color: "var(--text-muted)" }}
-                                                    >
-                                                        {s.model}
-                                                    </span>
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Kickoff prompt */}
-                            <div className="mb-3">
-                                <label
-                                    htmlFor="channel-prompt"
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                    style={{ color: "var(--text-muted)" }}
-                                >
-                                    Kickoff prompt
-                                </label>
-                                <textarea
-                                    id="channel-prompt"
-                                    ref={firstFieldRef}
-                                    rows={4}
-                                    value={channelPrompt}
-                                    onChange={(e) => setChannelPrompt(e.target.value)}
-                                    onKeyDown={(e) => e.stopPropagation()}
-                                    placeholder="Describe the task and how each session should collaborate..."
-                                    className="w-full px-3 py-1.5 rounded text-xs outline-none resize-none"
-                                    style={{
-                                        backgroundColor: "var(--bg-surface)",
-                                        color: "var(--text-primary)",
-                                        border: "1px solid var(--border-color)",
-                                        fontFamily: "inherit",
-                                    }}
-                                />
-                            </div>
-
-                            {/* Max turns */}
-                            <div className="mb-4">
-                                <label
-                                    htmlFor="channel-max-turns"
-                                    className="block text-[11px] uppercase tracking-wider font-medium mb-1"
-                                    style={{ color: "var(--text-muted)" }}
-                                >
-                                    Max turns
-                                </label>
-                                <input
-                                    id="channel-max-turns"
-                                    type="number"
-                                    min={1}
-                                    max={20}
-                                    value={channelMaxTurns}
-                                    onChange={(e) =>
-                                        setChannelMaxTurns(
-                                            Math.min(20, Math.max(1, parseInt(e.target.value, 10) || 1))
-                                        )
-                                    }
-                                    className="w-20 px-3 py-1.5 rounded text-xs outline-none"
-                                    style={{
-                                        backgroundColor: "var(--bg-surface)",
-                                        color: "var(--text-primary)",
-                                        border: "1px solid var(--border-color)",
-                                        fontFamily: "inherit",
-                                    }}
-                                />
-                            </div>
-
-                            {/* Confirm gate */}
-                            {!channelConfirmed ? (
-                                <div className="mb-4">
-                                    <div style={NEON_PANEL_SMALL_STYLE} role="alert">
-                                        <div className="flex items-start gap-2">
-                                            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: "1px" }} />
-                                            <span>
-                                                This will start an autonomous loop across{" "}
-                                                {channelWorkerIds.size > 0
-                                                    ? `1 lead + ${channelWorkerIds.size} worker${channelWorkerIds.size > 1 ? "s" : ""}`
-                                                    : "multiple sessions"}
-                                                . Confirm to enable the Start button.
-                                            </span>
-                                        </div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => setChannelConfirmed(true)}
-                                        className="w-full px-3 py-1.5 rounded text-xs font-medium transition-colors"
-                                        style={{
-                                            backgroundColor: "transparent",
-                                            color: "#ff5577",
-                                            border: "2px solid #ff5577",
-                                            cursor: "pointer",
-                                        }}
-                                    >
-                                        I understand — confirm channel
-                                    </button>
-                                </div>
-                            ) : (
-                                <div
-                                    className="mb-4 px-3 py-2 rounded text-xs"
-                                    style={{
-                                        border: "1px solid var(--border-color)",
-                                        color: "var(--text-muted)",
-                                        backgroundColor: "var(--bg-surface)",
-                                    }}
-                                >
-                                    Confirmed. Click Start Channel to proceed.
-                                    <button
-                                        type="button"
-                                        onClick={() => setChannelConfirmed(false)}
-                                        className="ml-2 underline"
-                                        style={{ color: "var(--text-muted)" }}
-                                    >
-                                        Undo
-                                    </button>
-                                </div>
-                            )}
-
-                            {/* Error display */}
-                            {channelError && (
-                                <div
-                                    className="mb-3 px-3 py-2 rounded text-xs"
-                                    style={{
-                                        border: "1px solid var(--color-red, #ff0033)",
-                                        color: "var(--color-red, #ff0033)",
-                                        backgroundColor: "rgba(255,0,51,0.08)",
-                                    }}
-                                >
-                                    {channelError}
-                                </div>
-                            )}
-
-                            {/* Footer buttons */}
-                            <div className="flex justify-between items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={onClose}
-                                    className="px-3 py-1.5 rounded text-xs transition-colors"
-                                    style={{
-                                        color: "var(--text-muted)",
-                                        border: "1px solid var(--border-color)",
-                                    }}
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    type="button"
-                                    disabled={channelStartDisabled}
-                                    onClick={handleStartChannel}
-                                    className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
-                                    style={{
-                                        backgroundColor: channelStartDisabled
-                                            ? "var(--bg-surface)"
-                                            : "#ff0033",
-                                        color: channelStartDisabled
-                                            ? "var(--text-muted)"
-                                            : "#ffffff",
-                                        cursor: channelStartDisabled ? "not-allowed" : "pointer",
-                                        border: channelStartDisabled
-                                            ? "1px solid var(--border-color)"
-                                            : "2px solid #ff5577",
-                                        boxShadow: channelStartDisabled
-                                            ? "none"
-                                            : "0 0 12px rgba(255,0,51,0.5)",
-                                    }}
-                                >
-                                    {submitting ? (
-                                        <span className="flex items-center gap-1.5">
-                                            <Loader size={11} className="state-icon-spin" />
-                                            Starting...
-                                        </span>
-                                    ) : (
-                                        "Start Channel"
-                                    )}
-                                </button>
-                            </div>
+                            </button>
                         </div>
                     )}
                 </div>

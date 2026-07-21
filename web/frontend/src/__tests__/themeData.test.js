@@ -5,17 +5,17 @@ import {
   listThemes,
   getSavedTheme,
   applyThemeToDOM,
+  DEFAULT_THEME_ID,
 } from '../themes/themeData.js';
 
 const REQUIRED_PROPERTIES = [
   'id', 'label', 'group',
-  'bg', 'bgSurface', 'bgElevated', 'bgHighlight',
-  'fg', 'fgDim', 'fgMuted',
-  'accent', 'accentWarm',
-  'green', 'red', 'yellow', 'purple', 'cyan',
-  'border',
-  'hexBase', 'hexGlow', 'hexGlowIntensity',
-  'fontFamily', 'scanlines',
+  'bg', 'bg2', 'surface', 'elev', 'term',
+  'border', 'line',
+  'fg', 'dim', 'muted',
+  'accent',
+  'kw', 'fn', 'type', 'ok', 'macro', 'num',
+  'working', 'thinking', 'waiting', 'idle', 'error',
 ];
 
 describe('THEMES object', () => {
@@ -26,14 +26,12 @@ describe('THEMES object', () => {
     expect(keys.length).toBeGreaterThan(0);
   });
 
-  it('contains both dark and light variants', () => {
-    const groups = new Set(Object.values(THEMES).map((t) => t.group));
-    expect(groups.has('dark')).toBe(true);
-    expect(groups.has('light')).toBe(true);
+  it('has exactly 2 palettes (va-night, cockpit-blue)', () => {
+    expect(Object.keys(THEMES).sort()).toEqual(['cockpit-blue', 'va-night']);
   });
 
-  it('has 20 themes (10 palettes x 2 variants)', () => {
-    expect(Object.keys(THEMES)).toHaveLength(20);
+  it('defaults to va-night', () => {
+    expect(DEFAULT_THEME_ID).toBe('va-night');
   });
 });
 
@@ -50,13 +48,6 @@ describe('theme properties', () => {
   );
 
   it.each(themeEntries)(
-    '%s has a valid group value (dark or light)',
-    (_id, theme) => {
-      expect(['dark', 'light']).toContain(theme.group);
-    },
-  );
-
-  it.each(themeEntries)(
     '%s id matches its key in THEMES',
     (id, theme) => {
       expect(theme.id).toBe(id);
@@ -66,9 +57,9 @@ describe('theme properties', () => {
 
 describe('getTheme', () => {
   it('returns a theme object for a valid id', () => {
-    const theme = getTheme('tokyo-night-dark');
+    const theme = getTheme('va-night');
     expect(theme).toBeDefined();
-    expect(theme.id).toBe('tokyo-night-dark');
+    expect(theme.id).toBe('va-night');
   });
 
   it('returns null for an invalid id', () => {
@@ -101,13 +92,30 @@ describe('applyThemeToDOM', () => {
     expect(typeof applyThemeToDOM).toBe('function');
   });
 
-  it('sets CSS custom properties on document.documentElement', () => {
-    const theme = THEMES['tokyo-night-dark'];
+  it('sets --cc-* CSS custom properties on document.documentElement', () => {
+    const theme = THEMES['va-night'];
     applyThemeToDOM(theme);
     const style = document.documentElement.style;
-    expect(style.getPropertyValue('--bg')).toBe(theme.bg);
-    expect(style.getPropertyValue('--accent')).toBe(theme.accent);
-    expect(style.getPropertyValue('--text-primary')).toBe(theme.fg);
+    expect(style.getPropertyValue('--cc-bg')).toBe(theme.bg);
+    expect(style.getPropertyValue('--cc-accent')).toBe(theme.accent);
+    expect(style.getPropertyValue('--cc-fg')).toBe(theme.fg);
+    expect(style.getPropertyValue('--cc-working')).toBe(theme.accent);
+  });
+
+  it('applies an accent override to both --cc-accent and --cc-working', () => {
+    const theme = THEMES['va-night'];
+    applyThemeToDOM(theme, { accent: '#ff0000' });
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue('--cc-accent')).toBe('#ff0000');
+    expect(style.getPropertyValue('--cc-working')).toBe('#ff0000');
+  });
+
+  it('sets data-glow attribute based on glowEnabled option', () => {
+    const theme = THEMES['va-night'];
+    applyThemeToDOM(theme, { glowEnabled: false });
+    expect(document.documentElement.getAttribute('data-glow')).toBe('off');
+    applyThemeToDOM(theme, { glowEnabled: true });
+    expect(document.documentElement.getAttribute('data-glow')).toBe('on');
   });
 
   it('does nothing when called with a falsy value', () => {

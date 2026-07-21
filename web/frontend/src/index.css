@@ -1,24 +1,70 @@
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "@fontsource/jetbrains-mono/800.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg: #1a1b26;
-  --panel-bg: rgba(26, 27, 38, 0.85);
-  --panel-hover: rgba(41, 42, 58, 0.9);
-  --surface-bg: #24283b;
-  --accent: #7aa2f7;
-  --accent-glow: rgba(122, 162, 247, 0.3);
-  --text-primary: #c0caf5;
-  --text-secondary: #a9b1d6;
-  --text-muted: #565f89;
-  --border-color: rgba(122, 162, 247, 0.55);
-  --status-running: #9ece6a;
-  --status-idle: #565f89;
-  --status-error: #f7768e;
-  --hex-line: rgba(122, 162, 247, 0.08);
-  --hex-glow: rgba(122, 162, 247, 0.25);
-  --scrollbar-thumb: rgba(122, 162, 247, 0.2);
+  /* ── cc-* design tokens (values set at runtime by applyThemeToDOM) ── */
+  --cc-bg: #1a1a1a;
+  --cc-bg2: #151515;
+  --cc-surface: #212121;
+  --cc-elev: #262626;
+  --cc-term: #181818;
+  --cc-border: rgba(255, 255, 255, .08);
+  --cc-line: rgba(255, 255, 255, .06);
+  --cc-fg: #d7d6d3;
+  --cc-dim: #9a9a97;
+  --cc-muted: #666664;
+  --cc-accent: #4ea1e8;
+  --cc-kw: #cc7832;
+  --cc-fn: #ffc66d;
+  --cc-type: #4ec9b0;
+  --cc-ok: #7fb86a;
+  --cc-macro: #c497d6;
+  --cc-num: #6897bb;
+
+  /* state colors */
+  --cc-working: #4ea1e8;
+  --cc-thinking: #7cc7ff;
+  --cc-waiting: #e0b060;
+  --cc-idle: #5bbf9f;
+  --cc-error: #e0698a;
+
+  --cc-glow-size: 30px;
+
+  /* ── legacy var aliases — untouched components keep working ── */
+  --bg: var(--cc-bg);
+  --bg-base: var(--cc-bg);
+  --bg-primary: var(--cc-bg);
+  --panel-bg: var(--cc-surface);
+  --panel-hover: var(--cc-elev);
+  --surface-bg: var(--cc-surface);
+  --bg-surface: var(--cc-surface);
+  --bg-elevated: var(--cc-elev);
+  --bg-highlight: var(--cc-elev);
+  --accent: var(--cc-accent);
+  --accent-glow: color-mix(in srgb, var(--cc-accent) 30%, transparent);
+  --accent-warm: var(--cc-fn);
+  --text-primary: var(--cc-fg);
+  --text-secondary: var(--cc-dim);
+  --text-muted: var(--cc-muted);
+  --border-color: var(--cc-border);
+  --status-running: var(--cc-ok);
+  --status-idle: var(--cc-muted);
+  --status-error: var(--cc-error);
+  --green: var(--cc-ok);
+  --red: var(--cc-error);
+  --yellow: var(--cc-waiting);
+  --purple: var(--cc-macro);
+  --cyan: var(--cc-type);
+  --hex-line: var(--cc-line);
+  --hex-glow: color-mix(in srgb, var(--cc-accent) 25%, transparent);
+  --scrollbar-thumb: color-mix(in srgb, var(--cc-accent) 20%, transparent);
   --scrollbar-track: transparent;
 }
 
@@ -29,8 +75,8 @@
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text-primary);
+  background: var(--cc-bg);
+  color: var(--cc-fg);
   font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", monospace;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -52,7 +98,7 @@ body {
 /* Selection */
 ::selection {
   background: var(--accent-glow);
-  color: var(--text-primary);
+  color: var(--cc-fg);
 }
 
 /* Hover utilities — GPU-accelerated, no JS re-renders */
@@ -61,6 +107,15 @@ body {
 .hover-color-red:hover { color: var(--red); }
 .hover-color-secondary:hover { color: var(--text-secondary); }
 .hover-color-primary:hover { color: var(--text-primary); }
+
+/* Pane header usage stats — shrink/truncate gracefully on narrow panes instead of
+   wrapping or overflowing the header row (see App.jsx/TerminalPane.jsx usage tracking). */
+.pane-usage-stats {
+  white-space: nowrap;
+}
+.pane-usage-stats > span {
+  white-space: nowrap;
+}
 
 /* Icon tooltip — fast-appearing label, no native title delay */
 .icon-tooltip {
@@ -210,4 +265,145 @@ body {
   color: var(--bg-base);
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   Facelift shared tokens/classes (§A contract) — consumed by all panes,
+   chrome, and dialogs. Byte-exact class/attr names per SPEC-FACELIFT.
+   ══════════════════════════════════════════════════════════════════ */
 
+/* Focus glow — per-state box-shadow on any [data-glowable] element. */
+[data-glowable] {
+  box-shadow: 0 0 0 1px var(--cc-border);
+  transition: box-shadow 0.2s ease;
+}
+
+[data-glowable][data-state="working"],
+[data-glowable][data-state="thinking"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--cc-working) 60%, transparent),
+    0 0 var(--cc-glow-size) color-mix(in srgb, var(--cc-working) 30%, transparent);
+}
+[data-glowable][data-state="thinking"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--cc-thinking) 60%, transparent),
+    0 0 var(--cc-glow-size) color-mix(in srgb, var(--cc-thinking) 30%, transparent);
+}
+
+[data-glowable][data-state="waiting"] {
+  animation: cc-wait-glow 2.6s ease-in-out infinite;
+}
+
+[data-glowable][data-state="idle"] {
+  box-shadow: 0 0 0 1px var(--cc-border);
+}
+
+[data-glowable][data-state="error"] {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--cc-error) 60%, transparent),
+    0 0 var(--cc-glow-size) color-mix(in srgb, var(--cc-error) 30%, transparent);
+}
+
+@keyframes cc-wait-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--cc-waiting) 60%, transparent),
+      0 0 var(--cc-glow-size) color-mix(in srgb, var(--cc-waiting) 22%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--cc-waiting) 60%, transparent),
+      0 0 var(--cc-glow-size) color-mix(in srgb, var(--cc-waiting) 42%, transparent);
+  }
+}
+
+/* Global glow off-switch */
+[data-glow="off"] [data-glowable] {
+  box-shadow: 0 0 0 1px var(--cc-border) !important;
+  animation: none !important;
+}
+
+/* Pills — 999px rounded chrome buttons/badges */
+.cc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--cc-border);
+  background: var(--cc-surface);
+  color: var(--cc-fg);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+/* State chip — dot + uppercase label */
+.cc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  color: var(--cc-fg);
+  background: var(--cc-elev);
+  border: 1px solid var(--cc-border);
+}
+
+.cc-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.cc-chip[data-state="working"] { color: var(--cc-working); }
+.cc-chip[data-state="thinking"] { color: var(--cc-thinking); }
+.cc-chip[data-state="waiting"] { color: var(--cc-waiting); }
+.cc-chip[data-state="idle"] { color: var(--cc-idle); }
+.cc-chip[data-state="error"] { color: var(--cc-error); }
+
+/* Card — rounded-12 surface */
+.cc-card {
+  border-radius: 12px;
+  background: var(--cc-surface);
+  border: 1px solid var(--cc-border);
+}
+
+/* Modal backdrop + modal enter transition */
+.cc-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+
+.cc-modal {
+  border-radius: 14px;
+  background: var(--cc-surface);
+  border: 1px solid var(--cc-border);
+  animation: cc-modal-in 0.18s ease-out;
+}
+
+@keyframes cc-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Section labels */
+.cc-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--cc-muted);
+}

@@ -53,7 +53,6 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 // ---------------------------------------------------------------------------
 
 import ErrorBoundary from "../components/ErrorBoundary.jsx";
-import HexGrid from "../components/HexGrid.jsx";
 import { useThemeSafe, useTheme, ThemeProvider } from "../hooks/useTheme.jsx";
 import { renderHook } from "@testing-library/react";
 
@@ -120,22 +119,6 @@ describe("ErrorBoundary fallback (no ThemeProvider)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 2 — HexGrid renders without ThemeProvider
-// ---------------------------------------------------------------------------
-
-describe("HexGrid without ThemeProvider", () => {
-  // 3 — purely decorative, must never crash
-  it("mounts without throwing when there is no ThemeProvider ancestor", () => {
-    // If useThemeSafe is not used (or falls back incorrectly), this render
-    // would throw "useTheme must be used within ThemeProvider".
-    expect(() => {
-      const { unmount } = render(<HexGrid />);
-      unmount();
-    }).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Suite 3 — useThemeSafe hook contract
 // ---------------------------------------------------------------------------
 
@@ -145,7 +128,7 @@ describe("useThemeSafe", () => {
     const { result } = renderHook(() => useThemeSafe());
 
     expect(result.current).toBeDefined();
-    expect(result.current.themeId).toBe("tokyo-night-dark");
+    expect(result.current.themeId).toBe("va-night");
     expect(result.current.theme).toBeDefined();
     expect(result.current.theme).not.toBeNull();
     expect(typeof result.current.switchTheme).toBe("function");
