@@ -203,6 +203,7 @@ export default function App() {
   });
   const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
+  const [localSpill, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
   const [metricsWindow, setMetricsWindow] = useState("lifetime"); // lifetime | 24h | session
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
@@ -888,6 +889,7 @@ export default function App() {
     if (!backendReady || !localEnabled) {
       setLocalQueue(null);
       setLocalMetrics(null);
+      setLocalSpill(null);
       return;
     }
     const controller = new AbortController();
@@ -906,6 +908,12 @@ export default function App() {
       } catch (_) {
         // swallow — best-effort
       }
+      try {
+        const res = await fetch("/api/local/spill", { signal });
+        setLocalSpill(res.ok ? await res.json() : { reachable: false });
+      } catch (_) {
+        // swallow — best-effort
+      }
     };
 
     fetchLocal();
@@ -915,6 +923,26 @@ export default function App() {
       controller.abort();
     };
   }, [backendReady, localEnabled, metricsWindow]);
+
+  // Commit a single lane-class spill threshold (seconds, or null to disable).
+  // POSTs the partial map and applies the broker's echoed full state.
+  const commitSpill = useCallback(async (cls, value) => {
+    try {
+      const res = await fetch("/api/local/spill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [cls]: value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast(data.error || "Could not update spill threshold", "error");
+        return;
+      }
+      setLocalSpill(data);
+    } catch (_) {
+      toast("Broker unreachable — spill threshold not changed", "error");
+    }
+  }, [toast]);
 
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
@@ -1433,6 +1461,8 @@ export default function App() {
             setLocalEnabled={setLocalEnabled}
             localQueue={localQueue}
             localMetrics={localMetrics}
+            localSpill={localSpill}
+            onSpillChange={commitSpill}
             metricsWindow={metricsWindow}
             setMetricsWindow={setMetricsWindow}
           />

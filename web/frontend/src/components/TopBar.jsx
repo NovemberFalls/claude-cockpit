@@ -118,6 +118,8 @@ export default function TopBar({
   setLocalEnabled,
   localQueue,
   localMetrics,
+  localSpill,
+  onSpillChange,
   metricsWindow,
   setMetricsWindow,
 }) {
@@ -296,7 +298,7 @@ export default function TopBar({
 
                 {localEnabled ? (
                   <>
-                    <LaneQueuePanel queue={localQueue} />
+                    <LaneQueuePanel queue={localQueue} spillConfig={localSpill} onSpillChange={onSpillChange} />
                     <div style={{ borderTop: "1px solid var(--border-color)" }} />
                     <LocalMetricsPanel metrics={localMetrics} window={metricsWindow} setWindow={setMetricsWindow} />
                   </>

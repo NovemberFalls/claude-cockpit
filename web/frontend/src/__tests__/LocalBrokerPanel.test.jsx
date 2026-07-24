@@ -28,6 +28,13 @@ const QUEUE = {
   spill: 3,
 };
 
+const SPILL = {
+  spill_thresholds_s: { interactive: 30, worker: 300, batch: null },
+  spilled_total: 5,
+  spilled_by_class: { interactive: 5 },
+  persisted: false,
+};
+
 const METRICS = {
   window: "lifetime",
   window_start: "2026-07-01T00:00:00Z",
@@ -56,10 +63,36 @@ describe("LaneQueuePanel", () => {
     expect(screen.getByText(/Broker offline/)).toBeInTheDocument();
   });
 
-  it("disables the spill slider (write endpoint not wired)", () => {
-    render(<LaneQueuePanel queue={QUEUE} />);
-    const slider = screen.getByRole("slider");
-    expect(slider).toBeDisabled();
+  it("renders one spill slider per lane class from spillConfig", () => {
+    render(<LaneQueuePanel queue={QUEUE} spillConfig={SPILL} onSpillChange={() => {}} />);
+    // interactive + worker + batch = 3 sliders
+    expect(screen.getAllByRole("slider")).toHaveLength(3);
+    expect(screen.getByText("Interactive")).toBeInTheDocument();
+    expect(screen.getByText("Worker")).toBeInTheDocument();
+    expect(screen.getByText("Batch")).toBeInTheDocument();
+  });
+
+  it("enabled classes have an active slider; null classes are off", () => {
+    render(<LaneQueuePanel queue={QUEUE} spillConfig={SPILL} onSpillChange={() => {}} />);
+    const interactive = screen.getByLabelText(/Interactive spill threshold/);
+    const batch = screen.getByLabelText(/Batch spill threshold/);
+    expect(interactive).not.toBeDisabled(); // 30s → active
+    expect(batch).toBeDisabled();           // null → off
+  });
+
+  it("toggling a class off calls onSpillChange with null", () => {
+    const onSpillChange = vi.fn();
+    render(<LaneQueuePanel queue={QUEUE} spillConfig={SPILL} onSpillChange={onSpillChange} />);
+    // Interactive (30s) + Worker (300s) render as "on"; batch (null) is "off".
+    // Clicking the first "on" toggle disables interactive → onSpillChange(_, null).
+    const onButtons = screen.getAllByRole("button", { name: "on" });
+    fireEvent.click(onButtons[0]);
+    expect(onSpillChange).toHaveBeenCalledWith("interactive", null);
+  });
+
+  it("shows spill controls unavailable when broker offline", () => {
+    render(<LaneQueuePanel queue={QUEUE} spillConfig={{ reachable: false }} onSpillChange={() => {}} />);
+    expect(screen.getByText(/spill controls unavailable/)).toBeInTheDocument();
   });
 });
 

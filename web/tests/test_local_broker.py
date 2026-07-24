@@ -111,9 +111,73 @@ async def test_metrics_defaults_to_lifetime(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_spill_returns_501(client):
-    res = await client.post("/api/local/spill", json={"threshold": 12})
-    assert res.status_code == 501
-    body = res.json()
-    assert body["ok"] is False
-    assert "not yet available" in body["reason"]
+async def test_spill_get_proxies_broker(client, monkeypatch):
+    payload = {
+        "spill_thresholds_s": {"interactive": 30.0, "worker": 300.0, "batch": None},
+        "spilled_total": 5,
+        "spilled_by_class": {"interactive": 5},
+        "persisted": False,
+    }
+
+    def fake_get(path, query=""):
+        assert path == "/config/spill"
+        return payload
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/spill")
+    assert res.status_code == 200
+    assert res.json() == payload
+
+
+@pytest.mark.asyncio
+async def test_spill_put_forwards_partial_map(client, monkeypatch):
+    seen = {}
+
+    def fake_put(path, body):
+        seen["path"] = path
+        seen["body"] = body
+        return {"spill_thresholds_s": {"interactive": 45, "worker": 300.0, "batch": None}}
+
+    monkeypatch.setattr(server_module, "_broker_put", fake_put)
+    res = await client.post("/api/local/spill", json={"interactive": 45})
+    assert res.status_code == 200
+    assert seen["path"] == "/config/spill"
+    assert seen["body"] == {"interactive": 45}
+    assert res.json()["spill_thresholds_s"]["interactive"] == 45
+
+
+@pytest.mark.asyncio
+async def test_spill_put_accepts_null_to_disable(client, monkeypatch):
+    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: {"echo": body})
+    res = await client.post("/api/local/spill", json={"batch": None})
+    assert res.status_code == 200
+    assert res.json()["echo"] == {"batch": None}
+
+
+@pytest.mark.asyncio
+async def test_spill_put_rejects_unknown_class_not_forwarded(client, monkeypatch):
+    called = {"n": 0}
+
+    def fake_put(path, body):
+        called["n"] += 1
+        return {}
+
+    monkeypatch.setattr(server_module, "_broker_put", fake_put)
+    res = await client.post("/api/local/spill", json={"gpu": 10})
+    assert res.status_code == 400
+    assert called["n"] == 0  # invalid class never reaches the broker
+
+
+@pytest.mark.asyncio
+async def test_spill_put_rejects_out_of_range(client, monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: called.__setitem__("n", called["n"] + 1) or {})
+    res = await client.post("/api/local/spill", json={"interactive": 999999})
+    assert res.status_code == 400
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_spill_put_rejects_empty_body(client):
+    res = await client.post("/api/local/spill", json={})
+    assert res.status_code == 400

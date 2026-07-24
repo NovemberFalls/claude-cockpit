@@ -1903,6 +1903,10 @@ _LOCAL_BROKER_TIMEOUT = 3.0
 # The broker's documented window set (broker-team contract). Never forward an
 # unbounded client string through to the broker.
 _LOCAL_METRICS_WINDOWS = ("lifetime", "24h", "session")
+# Spill config = per-lane-class predicted-wait thresholds in SECONDS (broker
+# contract). A value may be null (spill disabled for that class) or 0..86400.
+_SPILL_CLASSES = ("interactive", "worker", "batch")
+_SPILL_MAX_S = 86400
 
 
 def _broker_get(path: str, query: str = "") -> dict:
@@ -1920,6 +1924,25 @@ def _broker_get(path: str, query: str = "") -> dict:
     if query:
         url += f"?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _broker_put(path: str, body: dict) -> dict:
+    """PUT a JSON body to {broker}{path} and return the parsed JSON echo.
+
+    Blocking (urllib) — run via ``asyncio.to_thread``. Same monkeypatch-friendly
+    free-function shape as ``_broker_get``.
+    """
+    import urllib.request
+
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{_LOCAL_BROKER_URL}{path}",
+        data=data,
+        method="PUT",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -1960,20 +1983,66 @@ async def get_local_metrics(window: str = "lifetime"):
         return JSONResponse({"reachable": False}, status_code=503)
 
 
+@app.get("/api/local/spill")
+async def get_local_spill():
+    """Proxy the broker's current per-class spill thresholds + spilled counters.
+
+    Broker shape: {spill_thresholds_s: {interactive, worker, batch}, spilled_total,
+    spilled_by_class, persisted}. 503 {reachable: false} when the broker is down.
+    """
+    try:
+        data = await asyncio.to_thread(_broker_get, "/config/spill")
+        return JSONResponse(data)
+    except Exception:
+        logger.debug("Local broker GET /config/spill unreachable", exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+
+
+@app.put("/api/local/spill")
 @app.post("/api/local/spill")
 async def set_local_spill(request: Request):
-    """Adjust the broker spill threshold — NOT YET WIRED.
+    """Set per-lane-class spill thresholds (seconds) on the broker.
 
-    The broker's confirmed contract is read-only (GET /queue, GET /metrics).
-    Spill control requires a broker-side mutation endpoint that does not exist
-    yet (pending a broker-team ask). This route returns 501 so the frontend
-    slider can be built and wired now, then light up the moment the broker
-    ships the control endpoint — with no frontend change required then.
+    Body is a PARTIAL map of {class: seconds|null} — any subset of the known
+    lane classes; ``null`` disables spill for that class. Validated all-or-
+    nothing BEFORE forwarding (defense in depth — the broker validates too):
+    unknown class or out-of-range value → 400 and nothing is forwarded. The
+    change is session-only on the broker (not persisted), so it is fully
+    reversible. Forwarded to the broker as ``PUT /config/spill``.
     """
-    return JSONResponse(
-        {"ok": False, "reason": "broker spill-control endpoint not yet available"},
-        status_code=501,
-    )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or not body:
+        return JSONResponse(
+            {"ok": False, "error": "body must be a non-empty {class: seconds|null} map"},
+            status_code=400,
+        )
+    for cls, val in body.items():
+        if cls not in _SPILL_CLASSES:
+            return JSONResponse(
+                {"ok": False, "error": f"unknown lane class '{cls}'; known: {list(_SPILL_CLASSES)}"},
+                status_code=400,
+            )
+        if val is None:
+            continue
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return JSONResponse(
+                {"ok": False, "error": f"'{cls}' must be a number of seconds or null"},
+                status_code=400,
+            )
+        if val < 0 or val > _SPILL_MAX_S:
+            return JSONResponse(
+                {"ok": False, "error": f"'{cls}' seconds must be in 0..{_SPILL_MAX_S}"},
+                status_code=400,
+            )
+    try:
+        data = await asyncio.to_thread(_broker_put, "/config/spill", body)
+        return JSONResponse(data)
+    except Exception:
+        logger.debug("Local broker PUT /config/spill failed", exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
 
 
 # ── Static files ─────────────────────────────────────────

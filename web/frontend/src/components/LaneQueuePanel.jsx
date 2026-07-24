@@ -13,6 +13,73 @@
  *   onSpillChange — (value:number) => void, called on slider commit (currently inert)
  */
 
+import { useState } from "react";
+
+// Per-lane-class spill sliders. Spill = seconds of PREDICTED WAIT for that
+// class at enqueue time (not queue depth). Ranges per broker guidance; batch
+// is typically disabled (null).
+const SPILL_CLASSES = [
+  { key: "interactive", label: "Interactive", min: 5, max: 120 },
+  { key: "worker", label: "Worker", min: 30, max: 1800 },
+  { key: "batch", label: "Batch", min: 0, max: 3600 },
+];
+
+/** One class row: a seconds slider + an off/on toggle (null = spill disabled). */
+function SpillRow({ cls, valueS, spilled, onCommit }) {
+  const off = valueS == null;
+  // dragVal is non-null only mid-drag; otherwise the committed prop is the
+  // source of truth (no setState-in-effect needed to sync when the poll updates).
+  const [dragVal, setDragVal] = useState(null);
+  const shown = dragVal != null ? dragVal : off ? cls.min : valueS;
+  const commit = (e) => {
+    onCommit(cls.key, Number(e.target.value));
+    setDragVal(null);
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+        <span style={{ fontSize: 11, color: "var(--text-primary)", fontWeight: 600 }}>
+          {cls.label}
+          {spilled > 0 && (
+            <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {spilled} spilled</span>
+          )}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 11, color: off ? "var(--text-muted)" : "var(--text-secondary)", minWidth: 34, textAlign: "right" }}>
+            {off ? "off" : `${shown}s`}
+          </span>
+          <button
+            onClick={() => onCommit(cls.key, off ? cls.min : null)}
+            className="text-[10px] px-1.5 py-0.5 rounded-full transition-colors"
+            style={{
+              color: off ? "var(--text-muted)" : "var(--accent)",
+              border: `1px solid ${off ? "var(--border-color)" : "var(--accent)"}`,
+              background: "var(--bg-surface)",
+            }}
+            aria-pressed={!off}
+            title={off ? "Enable spill for this class" : "Disable spill for this class"}
+          >
+            {off ? "off" : "on"}
+          </button>
+        </span>
+      </div>
+      <input
+        type="range"
+        min={cls.min}
+        max={cls.max}
+        value={shown}
+        disabled={off}
+        onChange={(e) => setDragVal(Number(e.target.value))}
+        onMouseUp={commit}
+        onKeyUp={commit}
+        aria-label={`${cls.label} spill threshold (seconds)`}
+        style={{ width: "100%", marginTop: 3, opacity: off ? 0.4 : 1 }}
+      />
+    </div>
+  );
+}
+
 /** Read the in-flight job from any of the broker's plausible field names. */
 function readInFlight(q) {
   return q?.in_flight ?? q?.inflight ?? q?.current ?? null;
@@ -62,7 +129,7 @@ function Row({ dotColor, primary, secondary }) {
   );
 }
 
-export default function LaneQueuePanel({ queue, onSpillChange }) {
+export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
   const offline = !queue || queue.reachable === false;
 
   if (offline) {
@@ -134,27 +201,41 @@ export default function LaneQueuePanel({ queue, onSpillChange }) {
         <span>spill: {spill}</span>
       </div>
 
-      {/* Spill threshold — inert until the broker ships a control endpoint. */}
+      {/* Spill thresholds — per lane class, in SECONDS of predicted wait. */}
       <div style={{ marginTop: 10 }}>
-        <label
+        <div
           className="text-[10px] uppercase tracking-wider"
-          style={{ color: "var(--text-muted)", display: "flex", justifyContent: "space-between" }}
+          style={{ color: "var(--text-muted)" }}
+          title="Spill = seconds of predicted wait for that class at enqueue time. null/off disables spill. Session-only on the broker (resets on restart)."
         >
-          <span>Spill threshold</span>
-          <span style={{ fontStyle: "italic", textTransform: "none", letterSpacing: 0 }}>
-            pending broker control endpoint
-          </span>
-        </label>
-        <input
-          type="range"
-          min={0}
-          max={32}
-          defaultValue={typeof queue.spill_threshold === "number" ? queue.spill_threshold : 8}
-          disabled
-          onChange={(e) => onSpillChange?.(Number(e.target.value))}
-          title="Read-only for now — the broker exposes no spill-control endpoint yet."
-          style={{ width: "100%", marginTop: 4, opacity: 0.4, cursor: "not-allowed" }}
-        />
+          Spill thresholds · predicted wait (s)
+        </div>
+        {(() => {
+          const offline = !spillConfig || spillConfig.reachable === false;
+          if (offline) {
+            return (
+              <div className="text-xs" style={{ color: "var(--text-muted)", marginTop: 4 }}>
+                Broker offline — spill controls unavailable.
+              </div>
+            );
+          }
+          const thresholds = spillConfig.spill_thresholds_s || {};
+          const spilledBy = spillConfig.spilled_by_class || {};
+          return SPILL_CLASSES.map((cls) => (
+            <SpillRow
+              key={cls.key}
+              cls={cls}
+              valueS={cls.key in thresholds ? thresholds[cls.key] : null}
+              spilled={spilledBy[cls.key] || 0}
+              onCommit={(k, v) => onSpillChange?.(k, v)}
+            />
+          ));
+        })()}
+        {spillConfig && spillConfig.reachable !== false && (
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+            Session-only — resets to CLI defaults on broker restart.
+          </div>
+        )}
       </div>
     </div>
   );
