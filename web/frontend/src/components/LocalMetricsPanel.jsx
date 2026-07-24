@@ -19,15 +19,15 @@ const WINDOWS = [
   { id: "session", label: "Session" },
 ];
 
-// Broker-team definitional contract — rendered verbatim, do not paraphrase.
+// Broker-team definitional contract — definitions rendered verbatim, terms
+// visually separated so run/prompt/session/agent are distinguishable at a glance.
 const DEFINITIONS = [
-  "run = one completion call to a lane (one jobs.jsonl record)",
-  "prompt = one client dispatch identified by distinct X-Trace-Id (untagged runs count as one prompt each, so runs==prompts for untagged clients)",
-  "session = X-Client-Id",
-  "agent = X-Agent-Id",
+  { term: "run", def: "one completion call to a lane (one jobs.jsonl record)" },
+  { term: "prompt", def: "one client dispatch identified by distinct X-Trace-Id (untagged runs count as one prompt each, so runs==prompts for untagged clients)" },
+  { term: "session", def: "X-Client-Id" },
+  { term: "agent", def: "X-Agent-Id" },
+  { term: "tokens/sec", def: "completion tokens ÷ wall clock (includes prompt-processing) — a floor on true decode speed, not LM Studio's stats number" },
 ];
-const TPS_NOTE =
-  "tps = completion tokens ÷ wall clock (includes prompt-processing) — a floor on true decode speed, not LM Studio's stats number.";
 
 function fmtInt(n) {
   if (typeof n !== "number" || !isFinite(n)) return "—";
@@ -216,12 +216,23 @@ export default function LocalMetricsPanel({ metrics, window, setWindow }) {
             >
               What these words mean
             </summary>
-            <ul style={{ margin: "6px 0 0", padding: "0 0 0 14px", fontSize: 10, color: "var(--text-muted)", lineHeight: 1.5 }}>
+            <dl style={{ margin: "8px 0 0" }}>
               {DEFINITIONS.map((d) => (
-                <li key={d}>{d}</li>
+                <div key={d.term} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "baseline" }}>
+                  <dt
+                    style={{
+                      fontSize: 11, fontWeight: 700, color: "var(--accent)",
+                      minWidth: 68, flexShrink: 0, textAlign: "right",
+                    }}
+                  >
+                    {d.term}
+                  </dt>
+                  <dd style={{ fontSize: 11, color: "var(--text-secondary)", margin: 0, lineHeight: 1.45 }}>
+                    {d.def}
+                  </dd>
+                </div>
               ))}
-              <li>{TPS_NOTE}</li>
-            </ul>
+            </dl>
           </details>
         </>
       )}

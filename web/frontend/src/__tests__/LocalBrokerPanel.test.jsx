@@ -111,9 +111,13 @@ describe("LocalMetricsPanel", () => {
     expect(setWindow).toHaveBeenCalledWith("24h");
   });
 
-  it("renders the verbatim broker definitions", () => {
+  it("renders the broker definitions as distinguishable term/definition rows", () => {
     render(<LocalMetricsPanel metrics={METRICS} window="lifetime" setWindow={() => {}} />);
-    expect(screen.getByText(/run = one completion call to a lane/)).toBeInTheDocument();
-    expect(screen.getByText(/session = X-Client-Id/)).toBeInTheDocument();
+    // Terms are separate elements from their definitions (not one crushed line).
+    expect(screen.getByText("run")).toBeInTheDocument();
+    expect(screen.getByText(/one completion call to a lane/)).toBeInTheDocument();
+    // "session" also appears as the by-session breakdown header — ≥1 is the dt.
+    expect(screen.getAllByText("session").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("X-Client-Id")).toBeInTheDocument();
   });
 });

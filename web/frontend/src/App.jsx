@@ -204,6 +204,7 @@ export default function App() {
   const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
   const [localSpill, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
+  const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
   const [metricsWindow, setMetricsWindow] = useState("lifetime"); // lifetime | 24h | session
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
@@ -890,12 +891,19 @@ export default function App() {
       setLocalQueue(null);
       setLocalMetrics(null);
       setLocalSpill(null);
+      setLocalStatus(null);
       return;
     }
     const controller = new AbortController();
     const { signal } = controller;
 
     const fetchLocal = async () => {
+      try {
+        const res = await fetch("/api/local/status", { signal });
+        if (res.ok) setLocalStatus(await res.json());
+      } catch (_) {
+        // swallow — best-effort
+      }
       try {
         const res = await fetch("/api/local/queue", { signal });
         setLocalQueue(res.ok ? await res.json() : { reachable: false });
@@ -1462,6 +1470,7 @@ export default function App() {
             localQueue={localQueue}
             localMetrics={localMetrics}
             localSpill={localSpill}
+            localStatus={localStatus}
             onSpillChange={commitSpill}
             metricsWindow={metricsWindow}
             setMetricsWindow={setMetricsWindow}

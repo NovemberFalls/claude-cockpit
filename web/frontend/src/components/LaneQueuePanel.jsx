@@ -46,12 +46,15 @@ function SpillRow({ cls, valueS, spilled, onCommit }) {
           )}
         </span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 11, color: off ? "var(--text-muted)" : "var(--text-secondary)", minWidth: 34, textAlign: "right" }}>
-            {off ? "off" : `${shown}s`}
-          </span>
+          {/* Seconds readout only when active — the toggle alone says off. */}
+          {!off && (
+            <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600, minWidth: 34, textAlign: "right" }}>
+              {shown}s
+            </span>
+          )}
           <button
             onClick={() => onCommit(cls.key, off ? cls.min : null)}
-            className="text-[10px] px-1.5 py-0.5 rounded-full transition-colors"
+            className="text-[10px] px-2 py-0.5 rounded-full transition-colors"
             style={{
               color: off ? "var(--text-muted)" : "var(--accent)",
               border: `1px solid ${off ? "var(--border-color)" : "var(--accent)"}`,

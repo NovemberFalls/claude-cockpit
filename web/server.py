@@ -1947,6 +1947,80 @@ def _broker_put(path: str, body: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# ── Service identity (the middleware layer) ──────────────
+#
+# LM Studio's dev server answers UNKNOWN paths with "200 anyway" + a non-broker
+# body, so a bare 200 proves nothing. Every proxy response is shape-validated
+# against the broker contract, and a detection probe fingerprints what is
+# actually listening at the configured URL so the UI can say "that's LM Studio,
+# not the lane broker" instead of rendering dashes.
+
+_QUEUE_SHAPE_KEYS = ("in_flight", "inflight", "current", "queued", "queue",
+                     "estimated_clear_seconds", "spill", "spill_count")
+_METRICS_SHAPE_KEYS = ("runs_total", "prompts_total", "tokens_total", "tokens_per_sec")
+_SPILL_SHAPE_KEYS = ("spill_thresholds_s", "spilled_total", "spilled_by_class")
+
+# Detection is cached so the 3s poller doesn't fire fingerprint probes each tick.
+_DETECT_CACHE_TTL = 30.0
+_detect_cache: dict = {"result": None, "at": 0.0}
+
+
+def _looks_like(data, keys) -> bool:
+    """True when *data* is a dict carrying at least one contract key."""
+    return isinstance(data, dict) and any(k in data for k in keys)
+
+
+def _detect_service() -> dict:
+    """Fingerprint whatever is listening at _LOCAL_BROKER_URL.
+
+    Returns {reachable, compatible, service, detail}. service is one of:
+    "lane-broker" | "lmstudio" | "vllm" | "ollama" | "openai-compatible" |
+    "unknown" | "offline". Blocking — run via asyncio.to_thread.
+    """
+    # 1. The real contract: /queue must return a queue-shaped dict.
+    try:
+        data = _broker_get("/queue")
+        if _looks_like(data, _QUEUE_SHAPE_KEYS):
+            return {"reachable": True, "compatible": True, "service": "lane-broker",
+                    "detail": "lane broker contract verified via /queue"}
+    except Exception:
+        return {"reachable": False, "compatible": False, "service": "offline",
+                "detail": f"nothing answering at {_LOCAL_BROKER_URL}"}
+
+    # Reachable but /queue is not broker-shaped — fingerprint what it really is.
+    probes = (
+        ("/api/v0/models", "lmstudio", "LM Studio REST API (/api/v0/models)"),
+        ("/version", "vllm", "vLLM (/version)"),
+        ("/api/version", "ollama", "Ollama (/api/version)"),
+        ("/v1/models", "openai-compatible", "OpenAI-compatible server (/v1/models)"),
+    )
+    for path, service, detail in probes:
+        try:
+            probe = _broker_get(path)
+        except Exception:
+            continue
+        if isinstance(probe, dict) and (probe.get("data") is not None or probe.get("version") is not None or probe.get("models") is not None):
+            return {"reachable": True, "compatible": False, "service": service,
+                    "detail": f"detected {detail} — not the lane broker"}
+    return {"reachable": True, "compatible": False, "service": "unknown",
+            "detail": "service answers but matches no known fingerprint"}
+
+
+def _cached_detect() -> dict:
+    now = _time.monotonic()
+    if _detect_cache["result"] is None or now - _detect_cache["at"] > _DETECT_CACHE_TTL:
+        _detect_cache["result"] = _detect_service()
+        _detect_cache["at"] = now
+    return _detect_cache["result"]
+
+
+@app.get("/api/local/status")
+async def get_local_status():
+    """Report what is actually connected at the configured broker URL."""
+    result = await asyncio.to_thread(_cached_detect)
+    return JSONResponse({**result, "url": _LOCAL_BROKER_URL})
+
+
 @app.get("/api/local/queue")
 async def get_local_queue():
     """Proxy the broker's read-only queue snapshot (GET :broker/queue).
@@ -1957,10 +2031,14 @@ async def get_local_queue():
     """
     try:
         data = await asyncio.to_thread(_broker_get, "/queue")
-        return JSONResponse(data)
     except Exception:
         logger.debug("Local broker /queue unreachable", exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
+    if not _looks_like(data, _QUEUE_SHAPE_KEYS):
+        # A 200 that isn't queue-shaped means we're NOT talking to the broker
+        # (LM Studio answers unknown paths with "200 anyway").
+        return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
+    return JSONResponse(data)
 
 
 @app.get("/api/local/metrics")
@@ -1977,10 +2055,12 @@ async def get_local_metrics(window: str = "lifetime"):
         )
     try:
         data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}")
-        return JSONResponse(data)
     except Exception:
         logger.debug("Local broker /metrics unreachable", exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
+    if not _looks_like(data, _METRICS_SHAPE_KEYS):
+        return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
+    return JSONResponse(data)
 
 
 @app.get("/api/local/spill")
@@ -1992,10 +2072,12 @@ async def get_local_spill():
     """
     try:
         data = await asyncio.to_thread(_broker_get, "/config/spill")
-        return JSONResponse(data)
     except Exception:
         logger.debug("Local broker GET /config/spill unreachable", exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
+    if not _looks_like(data, _SPILL_SHAPE_KEYS):
+        return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
+    return JSONResponse(data)
 
 
 @app.put("/api/local/spill")
@@ -2039,10 +2121,15 @@ async def set_local_spill(request: Request):
             )
     try:
         data = await asyncio.to_thread(_broker_put, "/config/spill", body)
-        return JSONResponse(data)
     except Exception:
         logger.debug("Local broker PUT /config/spill failed", exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
+    if not _looks_like(data, _SPILL_SHAPE_KEYS):
+        # "200 anyway" from a non-broker service — the write did NOT take.
+        return JSONResponse({"reachable": True, "compatible": False,
+                             "error": "connected service is not the lane broker"},
+                            status_code=502)
+    return JSONResponse(data)
 
 
 # ── Static files ─────────────────────────────────────────

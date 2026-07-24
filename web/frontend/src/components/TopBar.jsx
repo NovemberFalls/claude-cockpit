@@ -2,7 +2,7 @@
    are re-exported here so PaneActionsMenu.jsx reuses the exact same model list
    instead of hardcoding a second copy (see CLAUDE.md model list conventions). */
 import { useState, useEffect } from "react";
-import { PanelLeft, ChevronDown, KeyRound, LayoutGrid, Cpu } from "lucide-react";
+import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
 import LaneQueuePanel from "./LaneQueuePanel.jsx";
@@ -112,13 +112,12 @@ export default function TopBar({
   setSidebarOpen,
   user,
   onToast,
-  showFleetView,
-  setShowFleetView,
   localEnabled,
   setLocalEnabled,
   localQueue,
   localMetrics,
   localSpill,
+  localStatus,
   onSpillChange,
   metricsWindow,
   setMetricsWindow,
@@ -216,19 +215,8 @@ export default function TopBar({
 
       {/* Right */}
       <div className="flex items-center" style={{ gap: 7 }}>
-        {/* Fleet view */}
-        {setShowFleetView && (
-          <button
-            onClick={() => { closeAll(); setShowFleetView((v) => !v); }}
-            className="transition-colors hover-bg-surface"
-            style={{ display: "flex", padding: 5, borderRadius: 7, color: showFleetView ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))" }}
-            title="Fleet view — all sessions"
-            aria-label="Toggle fleet view"
-            aria-pressed={showFleetView}
-          >
-            <LayoutGrid size={16} />
-          </button>
-        )}
+        {/* Fleet view lives in the ActivityRail (left) — deliberately NOT
+            duplicated here; the top bar owns session levers + the broker. */}
 
         {/* Local broker — queue + metrics (machine-global). Compact live
             readout when enabled; dim icon otherwise. Click opens the drawer. */}
@@ -296,7 +284,49 @@ export default function TopBar({
                   </button>
                 </div>
 
-                {localEnabled ? (
+                {/* Connection identity — what is actually answering at the URL. */}
+                {localEnabled && localStatus && (
+                  <div
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "7px 12px", borderBottom: "1px solid var(--border-color)",
+                      fontSize: 11,
+                      color: localStatus.compatible ? "var(--text-secondary)" : "var(--red, #e5484d)",
+                    }}
+                    title={localStatus.detail || ""}
+                  >
+                    <span
+                      style={{
+                        width: 7, height: 7, borderRadius: 999, flexShrink: 0,
+                        background: localStatus.compatible
+                          ? "var(--green, #46a758)"
+                          : localStatus.reachable ? "var(--red, #e5484d)" : "var(--text-muted)",
+                      }}
+                    />
+                    {localStatus.compatible ? (
+                      <span>lane broker · {localStatus.url}</span>
+                    ) : localStatus.reachable ? (
+                      <span>
+                        {localStatus.service === "lmstudio" ? "LM Studio" :
+                         localStatus.service === "vllm" ? "vLLM" :
+                         localStatus.service === "ollama" ? "Ollama" :
+                         localStatus.service === "openai-compatible" ? "an OpenAI-compatible server" :
+                         "an unknown service"}
+                        {" at "}{localStatus.url} — not the lane broker
+                      </span>
+                    ) : (
+                      <span>nothing answering at {localStatus.url}</span>
+                    )}
+                  </div>
+                )}
+
+                {localEnabled && localStatus && !localStatus.compatible ? (
+                  <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px", lineHeight: 1.5 }}>
+                    {localStatus.reachable
+                      ? "Queue, metrics, and spill control need the lane broker in front of the model server. Point COCKPIT_BROKER_URL at the broker, or start it."
+                      : "Start the lane broker (or check COCKPIT_BROKER_URL) to see queue and metrics here."}
+                  </div>
+                ) : localEnabled ? (
                   <>
                     <LaneQueuePanel queue={localQueue} spillConfig={localSpill} onSpillChange={onSpillChange} />
                     <div style={{ borderTop: "1px solid var(--border-color)" }} />

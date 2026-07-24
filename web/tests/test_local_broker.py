@@ -102,7 +102,7 @@ async def test_metrics_defaults_to_lifetime(client, monkeypatch):
 
     def fake_get(path, query=""):
         seen["query"] = query
-        return {}
+        return {"runs_total": 0}
 
     monkeypatch.setattr(server_module, "_broker_get", fake_get)
     res = await client.get("/api/local/metrics")
@@ -148,10 +148,16 @@ async def test_spill_put_forwards_partial_map(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_spill_put_accepts_null_to_disable(client, monkeypatch):
-    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: {"echo": body})
+    seen = {}
+
+    def fake_put(path, body):
+        seen["body"] = body
+        return {"spill_thresholds_s": {"interactive": 30, "worker": 300, "batch": None}}
+
+    monkeypatch.setattr(server_module, "_broker_put", fake_put)
     res = await client.post("/api/local/spill", json={"batch": None})
     assert res.status_code == 200
-    assert res.json()["echo"] == {"batch": None}
+    assert seen["body"] == {"batch": None}
 
 
 @pytest.mark.asyncio
@@ -181,3 +187,86 @@ async def test_spill_put_rejects_out_of_range(client, monkeypatch):
 async def test_spill_put_rejects_empty_body(client):
     res = await client.post("/api/local/spill", json={})
     assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Service identity / shape validation — the "200 anyway" defense
+# ---------------------------------------------------------------------------
+
+# LM Studio's dev server answers unknown endpoints with 200 + an error body.
+_LMSTUDIO_GARBAGE = {"error": "Unexpected endpoint or method."}
+
+
+@pytest.fixture(autouse=True)
+def _reset_detect_cache():
+    """Detection results are cached 30s — reset between tests."""
+    server_module._detect_cache["result"] = None
+    server_module._detect_cache["at"] = 0.0
+    yield
+
+
+@pytest.mark.asyncio
+async def test_queue_garbage_200_returns_502_not_data(client, monkeypatch):
+    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="": _LMSTUDIO_GARBAGE)
+    res = await client.get("/api/local/queue")
+    assert res.status_code == 502
+    assert res.json() == {"reachable": True, "compatible": False}
+
+
+@pytest.mark.asyncio
+async def test_metrics_garbage_200_returns_502_not_data(client, monkeypatch):
+    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="": _LMSTUDIO_GARBAGE)
+    res = await client.get("/api/local/metrics")
+    assert res.status_code == 502
+    assert res.json()["compatible"] is False
+
+
+@pytest.mark.asyncio
+async def test_spill_put_garbage_echo_returns_502(client, monkeypatch):
+    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: _LMSTUDIO_GARBAGE)
+    res = await client.post("/api/local/spill", json={"interactive": 45})
+    assert res.status_code == 502
+    assert res.json()["compatible"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_detects_lane_broker(client, monkeypatch):
+    def fake_get(path, query=""):
+        if path == "/queue":
+            return {"queued": [], "estimated_clear_seconds": 0, "spill": 0}
+        raise OSError("no other endpoint")
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/status")
+    body = res.json()
+    assert body["compatible"] is True
+    assert body["service"] == "lane-broker"
+
+
+@pytest.mark.asyncio
+async def test_status_fingerprints_lmstudio(client, monkeypatch):
+    def fake_get(path, query=""):
+        if path == "/queue":
+            return _LMSTUDIO_GARBAGE  # 200 anyway, wrong shape
+        if path == "/api/v0/models":
+            return {"data": [{"id": "qwen3.6-27b"}]}
+        raise OSError("not served")
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/status")
+    body = res.json()
+    assert body["reachable"] is True
+    assert body["compatible"] is False
+    assert body["service"] == "lmstudio"
+
+
+@pytest.mark.asyncio
+async def test_status_offline(client, monkeypatch):
+    def fake_get(path, query=""):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/status")
+    body = res.json()
+    assert body["reachable"] is False
+    assert body["service"] == "offline"
