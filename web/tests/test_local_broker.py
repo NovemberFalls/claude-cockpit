@@ -44,7 +44,7 @@ async def test_queue_proxies_broker_json(client, monkeypatch):
         "spill": 0,
     }
 
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         assert path == "/queue"
         return payload
 
@@ -56,7 +56,7 @@ async def test_queue_proxies_broker_json(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_queue_offline_returns_503(client, monkeypatch):
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr(server_module, "_broker_get", fake_get)
@@ -69,7 +69,7 @@ async def test_queue_offline_returns_503(client, monkeypatch):
 async def test_metrics_proxies_and_forwards_window(client, monkeypatch):
     seen = {}
 
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         seen["path"] = path
         seen["query"] = query
         return {"runs_total": 10, "prompts_total": 8, "window": "24h"}
@@ -86,7 +86,7 @@ async def test_metrics_proxies_and_forwards_window(client, monkeypatch):
 async def test_metrics_invalid_window_400_not_forwarded(client, monkeypatch):
     called = {"n": 0}
 
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         called["n"] += 1
         return {}
 
@@ -100,7 +100,7 @@ async def test_metrics_invalid_window_400_not_forwarded(client, monkeypatch):
 async def test_metrics_defaults_to_lifetime(client, monkeypatch):
     seen = {}
 
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         seen["query"] = query
         return {"runs_total": 0}
 
@@ -119,7 +119,7 @@ async def test_spill_get_proxies_broker(client, monkeypatch):
         "persisted": False,
     }
 
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         assert path == "/config/spill"
         return payload
 
@@ -133,7 +133,7 @@ async def test_spill_get_proxies_broker(client, monkeypatch):
 async def test_spill_put_forwards_partial_map(client, monkeypatch):
     seen = {}
 
-    def fake_put(path, body):
+    def fake_put(path, body, base_url=None):
         seen["path"] = path
         seen["body"] = body
         return {"spill_thresholds_s": {"interactive": 45, "worker": 300.0, "batch": None}}
@@ -150,7 +150,7 @@ async def test_spill_put_forwards_partial_map(client, monkeypatch):
 async def test_spill_put_accepts_null_to_disable(client, monkeypatch):
     seen = {}
 
-    def fake_put(path, body):
+    def fake_put(path, body, base_url=None):
         seen["body"] = body
         return {"spill_thresholds_s": {"interactive": 30, "worker": 300, "batch": None}}
 
@@ -164,7 +164,7 @@ async def test_spill_put_accepts_null_to_disable(client, monkeypatch):
 async def test_spill_put_rejects_unknown_class_not_forwarded(client, monkeypatch):
     called = {"n": 0}
 
-    def fake_put(path, body):
+    def fake_put(path, body, base_url=None):
         called["n"] += 1
         return {}
 
@@ -177,7 +177,7 @@ async def test_spill_put_rejects_unknown_class_not_forwarded(client, monkeypatch
 @pytest.mark.asyncio
 async def test_spill_put_rejects_out_of_range(client, monkeypatch):
     called = {"n": 0}
-    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: called.__setitem__("n", called["n"] + 1) or {})
+    monkeypatch.setattr(server_module, "_broker_put", lambda path, body, base_url=None: called.__setitem__("n", called["n"] + 1) or {})
     res = await client.post("/api/local/spill", json={"interactive": 999999})
     assert res.status_code == 400
     assert called["n"] == 0
@@ -207,7 +207,7 @@ def _reset_detect_cache():
 
 @pytest.mark.asyncio
 async def test_queue_garbage_200_returns_502_not_data(client, monkeypatch):
-    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="": _LMSTUDIO_GARBAGE)
+    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="", base_url=None: _LMSTUDIO_GARBAGE)
     res = await client.get("/api/local/queue")
     assert res.status_code == 502
     assert res.json() == {"reachable": True, "compatible": False}
@@ -215,7 +215,7 @@ async def test_queue_garbage_200_returns_502_not_data(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_metrics_garbage_200_returns_502_not_data(client, monkeypatch):
-    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="": _LMSTUDIO_GARBAGE)
+    monkeypatch.setattr(server_module, "_broker_get", lambda path, query="", base_url=None: _LMSTUDIO_GARBAGE)
     res = await client.get("/api/local/metrics")
     assert res.status_code == 502
     assert res.json()["compatible"] is False
@@ -223,7 +223,7 @@ async def test_metrics_garbage_200_returns_502_not_data(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_spill_put_garbage_echo_returns_502(client, monkeypatch):
-    monkeypatch.setattr(server_module, "_broker_put", lambda path, body: _LMSTUDIO_GARBAGE)
+    monkeypatch.setattr(server_module, "_broker_put", lambda path, body, base_url=None: _LMSTUDIO_GARBAGE)
     res = await client.post("/api/local/spill", json={"interactive": 45})
     assert res.status_code == 502
     assert res.json()["compatible"] is False
@@ -231,7 +231,7 @@ async def test_spill_put_garbage_echo_returns_502(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_status_detects_lane_broker(client, monkeypatch):
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         if path == "/queue":
             return {"queued": [], "estimated_clear_seconds": 0, "spill": 0}
         raise OSError("no other endpoint")
@@ -245,7 +245,7 @@ async def test_status_detects_lane_broker(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_status_fingerprints_lmstudio(client, monkeypatch):
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         if path == "/queue":
             return _LMSTUDIO_GARBAGE  # 200 anyway, wrong shape
         if path == "/api/v0/models":
@@ -262,7 +262,7 @@ async def test_status_fingerprints_lmstudio(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_status_offline(client, monkeypatch):
-    def fake_get(path, query=""):
+    def fake_get(path, query="", base_url=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr(server_module, "_broker_get", fake_get)
@@ -270,3 +270,263 @@ async def test_status_offline(client, monkeypatch):
     body = res.json()
     assert body["reachable"] is False
     assert body["service"] == "offline"
+
+
+# ---------------------------------------------------------------------------
+# Provider registry + provider-keyed routes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_providers_list_shape_no_urls(client):
+    res = await client.get("/api/local/providers")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["providers"] == [
+        {
+            "id": "lmstudio-local",
+            "label": "LM Studio (local)",
+            "kind": "lmstudio",
+            "scope": "local",
+            "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+        }
+    ]
+    dumped = str(body)
+    assert "127.0.0.1" not in dumped  # no broker_url/management_url leaked
+    assert "auth" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_provider_queue_happy_path(client, monkeypatch):
+    payload = {"in_flight": None, "queued": [], "estimated_clear_seconds": 0, "spill": 0}
+
+    def fake_get(path, query="", base_url=None):
+        assert path == "/queue"
+        assert base_url == server_module._PROVIDERS["lmstudio-local"]["broker_url"]
+        return payload
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/lmstudio-local/queue")
+    assert res.status_code == 200
+    assert res.json() == payload
+
+
+@pytest.mark.asyncio
+async def test_provider_metrics_happy_path(client, monkeypatch):
+    def fake_get(path, query="", base_url=None):
+        assert path == "/metrics"
+        assert query == "window=24h"
+        return {"runs_total": 3, "prompts_total": 3}
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/lmstudio-local/metrics?window=24h")
+    assert res.status_code == 200
+    assert res.json()["runs_total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_provider_capability_absent_404(client, monkeypatch):
+    limited = dict(server_module._PROVIDERS["lmstudio-local"])
+    limited["capabilities"] = ["queue"]
+    monkeypatch.setitem(server_module._PROVIDERS, "lmstudio-local", limited)
+    res = await client.get("/api/local/lmstudio-local/traces")
+    assert res.status_code == 404
+    assert res.json() == {"error": "capability not available"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_404(client):
+    res = await client.get("/api/local/nope/queue")
+    assert res.status_code == 404
+    assert res.json() == {"error": "unknown provider"}
+
+
+@pytest.mark.asyncio
+async def test_provider_models_normalization(client, monkeypatch):
+    def fake_mgmt_get(provider, path):
+        assert path == "/api/v0/models"
+        return {"data": [
+            {"id": "qwen3", "type": "llm", "arch": "qwen3", "quantization": "q4",
+             "state": "loaded", "max_context_length": 8192, "loaded_context_length": 4096},
+            {"id": "sparse-model"},  # missing fields -> null
+        ]}
+
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/lmstudio-local/models")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["reachable"] is True
+    assert body["models"][0]["id"] == "qwen3"
+    assert body["models"][1] == {
+        "id": "sparse-model", "type": None, "arch": None, "quantization": None,
+        "state": None, "max_context_length": None, "loaded_context_length": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_models_unreachable_503(client, monkeypatch):
+    def fake_mgmt_get(provider, path):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/lmstudio-local/models")
+    assert res.status_code == 503
+    assert res.json() == {"reachable": False}
+
+
+@pytest.mark.asyncio
+async def test_provider_health_aggregates_both_probes(client, monkeypatch):
+    def fake_get(path, query="", base_url=None):
+        assert path == "/queue"
+        return {"queued": []}
+
+    def fake_mgmt_get(provider, path):
+        assert path == "/api/v0/models"
+        return {"data": [
+            {"id": "a", "state": "loaded"},
+            {"id": "b", "state": "not-loaded"},
+        ]}
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/lmstudio-local/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {
+        "broker": {"reachable": True},
+        "provider": {"reachable": True, "models_loaded": 1},
+        "ok": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_health_both_down(client, monkeypatch):
+    def fake_get(path, query="", base_url=None):
+        raise OSError("down")
+
+    def fake_mgmt_get(provider, path):
+        raise OSError("down")
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    monkeypatch.setattr(server_module, "_mgmt_get", fake_mgmt_get)
+    res = await client.get("/api/local/lmstudio-local/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["broker"]["reachable"] is False
+    assert body["provider"] == {"reachable": False, "models_loaded": 0}
+    assert body["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_provider_traces_limit_clamp(client, monkeypatch):
+    seen = {}
+
+    def fake_get(path, query="", base_url=None):
+        seen["query"] = query
+        return {"traces": [], "count": 0}
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/lmstudio-local/traces?limit=9999")
+    assert res.status_code == 200
+    assert seen["query"] == "limit=100"
+
+    res = await client.get("/api/local/lmstudio-local/traces?limit=0")
+    assert res.status_code == 200
+    assert seen["query"] == "limit=1"
+
+    res = await client.get("/api/local/lmstudio-local/traces")
+    assert res.status_code == 200
+    assert seen["query"] == "limit=20"
+
+
+@pytest.mark.asyncio
+async def test_provider_trace_id_regex_400(client):
+    res = await client.get("/api/local/lmstudio-local/trace/bad%20id%21")
+    assert res.status_code == 400
+    assert res.json() == {"error": "invalid trace_id"}
+
+
+@pytest.mark.asyncio
+async def test_provider_trace_happy_path(client, monkeypatch):
+    def fake_get(path, query="", base_url=None):
+        assert path == "/trace/abc-123"
+        return {"trace_id": "abc-123", "nodes": [], "edges": []}
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/lmstudio-local/trace/abc-123")
+    assert res.status_code == 200
+    assert res.json()["trace_id"] == "abc-123"
+
+
+@pytest.mark.asyncio
+async def test_provider_spill_put_remote_scope_403(client, monkeypatch):
+    remote = dict(server_module._PROVIDERS["lmstudio-local"])
+    remote["scope"] = "remote"
+    monkeypatch.setitem(server_module._PROVIDERS, "lmstudio-local", remote)
+    res = await client.put("/api/local/lmstudio-local/spill", json={"interactive": 30})
+    assert res.status_code == 403
+    assert res.json() == {"error": "read-only for remote providers"}
+
+
+@pytest.mark.asyncio
+async def test_provider_spill_put_local_scope_ok(client, monkeypatch):
+    seen = {}
+
+    def fake_put(path, body, base_url=None):
+        seen["path"] = path
+        seen["body"] = body
+        return {"spill_thresholds_s": {"interactive": 30, "worker": 300.0, "batch": None}}
+
+    monkeypatch.setattr(server_module, "_broker_put", fake_put)
+    res = await client.put("/api/local/lmstudio-local/spill", json={"interactive": 30})
+    assert res.status_code == 200
+    assert seen["path"] == "/config/spill"
+    assert seen["body"] == {"interactive": 30}
+
+
+@pytest.mark.asyncio
+async def test_legacy_queue_still_works(client, monkeypatch):
+    payload = {"queued": [], "estimated_clear_seconds": 0, "spill": 0}
+
+    def fake_get(path, query="", base_url=None):
+        assert path == "/queue"
+        return payload
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/queue")
+    assert res.status_code == 200
+    assert res.json() == payload
+
+
+@pytest.mark.asyncio
+async def test_legacy_metrics_still_works(client, monkeypatch):
+    def fake_get(path, query="", base_url=None):
+        return {"runs_total": 1, "prompts_total": 1}
+
+    monkeypatch.setattr(server_module, "_broker_get", fake_get)
+    res = await client.get("/api/local/metrics")
+    assert res.status_code == 200
+
+
+def test_providers_file_rejects_unsafe_scheme(tmp_path):
+    bad_file = tmp_path / "providers.json"
+    bad_file.write_text(
+        '{"providers": [{"id": "evil", "label": "Evil", "kind": "lmstudio", '
+        '"scope": "local", "broker_url": "file:///etc/passwd", "capabilities": ["queue"]}]}',
+        encoding="utf-8",
+    )
+    result = server_module._load_providers_from_file(str(bad_file))
+    assert result is None
+    # the default registry stays untouched
+    assert "lmstudio-local" in server_module._PROVIDERS
+    assert server_module._PROVIDERS["lmstudio-local"]["broker_url"].startswith("http")
+
+
+@pytest.mark.asyncio
+async def test_legacy_spill_put_still_works(client, monkeypatch):
+    def fake_put(path, body, base_url=None):
+        return {"spill_thresholds_s": {"interactive": 30, "worker": 300.0, "batch": None}}
+
+    monkeypatch.setattr(server_module, "_broker_put", fake_put)
+    res = await client.post("/api/local/spill", json={"interactive": 30})
+    assert res.status_code == 200

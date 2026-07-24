@@ -175,11 +175,22 @@ export default function LocalMetricsPanel({ metrics, window, setWindow }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
             <Stat label="Runs" value={fmtInt(runs)} />
             <Stat label="Prompts" value={fmtInt(prompts)} sub={runsPerPrompt != null ? `${fmtNum(runsPerPrompt, 2)} runs/prompt` : null} />
-            <Stat
-              label="Tokens"
-              value={fmtTokens(totalTokens)}
-              sub={`${fmtTokens(tokTot.prompt)} in · ${fmtTokens(tokTot.completion)} out`}
-            />
+            {typeof runs === "number" && runs > 0 && totalTokens === 0 ? (
+              // Runs happened but no token counts came back — the broker reads
+              // usage from relayed bytes, so streaming clients must send
+              // stream_options.include_usage or their runs carry null tokens.
+              <Stat
+                label="Tokens"
+                value="not reported"
+                sub="clients aren't sending usage (stream_options.include_usage)"
+              />
+            ) : (
+              <Stat
+                label="Tokens"
+                value={fmtTokens(totalTokens)}
+                sub={`${fmtTokens(tokTot.prompt)} in · ${fmtTokens(tokTot.completion)} out`}
+              />
+            )}
             <Stat label="Tokens/sec" value={fmtNum(tps.current, 0)} sub={`avg ${fmtNum(tps.avg, 1)}`} />
           </div>
 

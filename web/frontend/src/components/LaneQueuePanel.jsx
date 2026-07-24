@@ -204,42 +204,48 @@ export default function LaneQueuePanel({ queue, spillConfig, onSpillChange }) {
         <span>spill: {spill}</span>
       </div>
 
-      {/* Spill thresholds — per lane class, in SECONDS of predicted wait. */}
-      <div style={{ marginTop: 10 }}>
-        <div
-          className="text-[10px] uppercase tracking-wider"
-          style={{ color: "var(--text-muted)" }}
-          title="Spill = seconds of predicted wait for that class at enqueue time. null/off disables spill. Session-only on the broker (resets on restart)."
-        >
-          Spill thresholds · predicted wait (s)
-        </div>
-        {(() => {
-          const offline = !spillConfig || spillConfig.reachable === false;
-          if (offline) {
-            return (
-              <div className="text-xs" style={{ color: "var(--text-muted)", marginTop: 4 }}>
-                Broker offline — spill controls unavailable.
-              </div>
-            );
-          }
-          const thresholds = spillConfig.spill_thresholds_s || {};
-          const spilledBy = spillConfig.spilled_by_class || {};
-          return SPILL_CLASSES.map((cls) => (
-            <SpillRow
-              key={cls.key}
-              cls={cls}
-              valueS={cls.key in thresholds ? thresholds[cls.key] : null}
-              spilled={spilledBy[cls.key] || 0}
-              onCommit={(k, v) => onSpillChange?.(k, v)}
-            />
-          ));
-        })()}
-        {spillConfig && spillConfig.reachable !== false && (
-          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
-            Session-only — resets to CLI defaults on broker restart.
+      {/* Spill thresholds — per lane class, in SECONDS of predicted wait.
+          spillConfig is null (not just offline) when the caller has decided
+          the spill capability doesn't apply here (missing cap, or a remote
+          provider — spill controls require scope=="local"); in that case the
+          whole section is omitted rather than shown as "offline". */}
+      {spillConfig != null && (
+        <div style={{ marginTop: 10 }}>
+          <div
+            className="text-[10px] uppercase tracking-wider"
+            style={{ color: "var(--text-muted)" }}
+            title="Spill = seconds of predicted wait for that class at enqueue time. null/off disables spill. Session-only on the broker (resets on restart)."
+          >
+            Spill thresholds · predicted wait (s)
           </div>
-        )}
-      </div>
+          {(() => {
+            const offline = spillConfig.reachable === false;
+            if (offline) {
+              return (
+                <div className="text-xs" style={{ color: "var(--text-muted)", marginTop: 4 }}>
+                  Broker offline — spill controls unavailable.
+                </div>
+              );
+            }
+            const thresholds = spillConfig.spill_thresholds_s || {};
+            const spilledBy = spillConfig.spilled_by_class || {};
+            return SPILL_CLASSES.map((cls) => (
+              <SpillRow
+                key={cls.key}
+                cls={cls}
+                valueS={cls.key in thresholds ? thresholds[cls.key] : null}
+                spilled={spilledBy[cls.key] || 0}
+                onCommit={(k, v) => onSpillChange?.(k, v)}
+              />
+            ));
+          })()}
+          {spillConfig.reachable !== false && (
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+              Session-only — resets to CLI defaults on broker restart.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -5,8 +5,6 @@ import { useState, useEffect } from "react";
 import { PanelLeft, ChevronDown, KeyRound, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
-import LaneQueuePanel from "./LaneQueuePanel.jsx";
-import LocalMetricsPanel from "./LocalMetricsPanel.jsx";
 
 /** Queue depth = in-flight (0/1) + queued length, defensive over broker field names. */
 function queueDepth(q) {
@@ -116,11 +114,8 @@ export default function TopBar({
   setLocalEnabled,
   localQueue,
   localMetrics,
-  localSpill,
   localStatus,
-  onSpillChange,
-  metricsWindow,
-  setMetricsWindow,
+  onOpenLocalBroker,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -320,23 +315,51 @@ export default function TopBar({
                   </div>
                 )}
 
+                {/* Quick glance only — config + full reporting live in the
+                    Local Broker section (rail icon / button below). */}
                 {localEnabled && localStatus && !localStatus.compatible ? (
                   <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px", lineHeight: 1.5 }}>
                     {localStatus.reachable
-                      ? "Queue, metrics, and spill control need the lane broker in front of the model server. Point COCKPIT_BROKER_URL at the broker, or start it."
-                      : "Start the lane broker (or check COCKPIT_BROKER_URL) to see queue and metrics here."}
+                      ? "The connected service is not the lane broker — open Local Broker for details."
+                      : "Nothing answering at the broker URL — open Local Broker for details."}
                   </div>
                 ) : localEnabled ? (
-                  <>
-                    <LaneQueuePanel queue={localQueue} spillConfig={localSpill} onSpillChange={onSpillChange} />
-                    <div style={{ borderTop: "1px solid var(--border-color)" }} />
-                    <LocalMetricsPanel metrics={localMetrics} window={metricsWindow} setWindow={setMetricsWindow} />
-                  </>
+                  <div style={{ padding: "8px 12px", fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Queue</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                        {localDepth != null ? localDepth : "—"}
+                        {typeof localQueue?.estimated_clear_seconds === "number" && localDepth > 0 &&
+                          ` · clears ~${Math.round(localQueue.estimated_clear_seconds)}s`}
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span>Tokens/sec</span>
+                      <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                        {typeof localTps === "number" && localTps > 0 ? Math.round(localTps) : "—"}
+                      </span>
+                    </div>
+                  </div>
                 ) : (
                   <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px" }}>
-                    Enable to poll the local-lane broker for live queue depth and reporting metrics
-                    (tokens/sec, runs, prompts, run-time distribution, and per-session / agent / lane breakdowns).
+                    Enable to poll the local-lane broker for live queue depth and tokens/sec.
                   </div>
+                )}
+
+                {/* Footer: jump to the full section */}
+                {onOpenLocalBroker && (
+                  <button
+                    onClick={() => { setLocalOpen(false); onOpenLocalBroker(); }}
+                    className="text-xs w-full text-left transition-colors hover-bg-surface"
+                    style={{
+                      padding: "9px 12px",
+                      borderTop: "1px solid var(--border-color)",
+                      color: "var(--accent)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    Open Local Broker — config &amp; reporting →
+                  </button>
                 )}
               </div>
             </>

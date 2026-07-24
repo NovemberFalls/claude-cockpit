@@ -860,8 +860,22 @@ class PtyManager:
                 logger.info("Discovered JSONL (new file): %s for terminal %s", discovered_id, session.id)
                 return os.path.join(jsonl_dir, newest)
 
-        # No discovery succeeded. For /resume sessions, the user should use
-        # terminal mode — chat mode requires a discoverable JSONL file.
+        # Strategy 3 (the docstring's promised /resume fallback — previously
+        # unimplemented, leaving resumed sessions with claude_session_id=None
+        # and zero usage tracking forever): the resumed conversation's JSONL
+        # predates spawn, so Strategy 2's new-file diff never finds it. Claim
+        # the most recently *written* unclaimed JSONL instead — but only when
+        # this session has actually produced output (an idle pane must never
+        # grab another session's file: bug #15 mis-attribution family).
+        if session.last_output_time > 0:
+            found = self._rediscover_jsonl(session, jsonl_dir)
+            if found:
+                logger.info(
+                    "Discovered JSONL (resume fallback): %s for terminal %s",
+                    session.claude_session_id, session.id,
+                )
+                return found
+
         return None
 
     # Locked JSONL is considered stale when the session has produced PTY output

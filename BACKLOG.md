@@ -30,13 +30,21 @@ contract. Everything below is *not yet done*.
   `CLAUDE.md` but has no user-facing README section yet.
 
 ### Foundation / follow-ups
-- [ ] **Provider registry.** Today the broker base is a single env var
-  (`COCKPIT_BROKER_URL`), LM Studio only. The stated goal was a foundation for
-  *multiple* local providers (Ollama, vLLM, …) — promote to a real registry
-  (`{id, label, queue_url, metrics_url, capabilities}`) when the second provider
-  lands. Keep the browser out of URL selection (SSRF).
-- [ ] **Surface broker config in the UI.** Enablement is a `localStorage` flag with
-  no way to see/change the broker URL or reachability from the drawer.
+- [x] **Provider registry.** Module-level `_PROVIDERS` + optional
+  `COCKPIT_PROVIDERS_FILE` override. `GET /api/local/providers` surfaces metadata
+  (id, label, kind, scope, capabilities) to the frontend; ProviderPicker
+  persists selection to localStorage. URLs and auth stay server-side (SSRF
+  stance). Shipped 2026-07-24.
+- [x] **Surface broker config in the UI.** `ProviderPicker.jsx` in the drawer
+  (shows all registered providers, remote-scope entries tagged). Capability gating
+  via `GET /api/local/providers` — panels render only when their cap exists.
+  Spill sliders only when cap `spill` AND `scope=="local"`. Shipped 2026-07-24.
+- [ ] **Remote sharing (the expansion target):** Cloudflare Tunnel + Access
+  (owner-controlled auth — Access policies/service tokens; cockpit proxies with
+  `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers via registry
+  `auth: {type: 'cf-access'}`, secrets server-side only). Registry
+  `scope:"remote"` entry + broker `--readonly-remote` flag; writes stay
+  owner-only regardless of auth.
 - [ ] **Decouple metrics polling cadence.** Queue + metrics + spill all poll at 3s;
   metrics change slowly and could poll less often.
 - [ ] (Optional) **FleetView integration** — surface local queue depth / tps

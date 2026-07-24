@@ -1908,19 +1908,115 @@ _LOCAL_METRICS_WINDOWS = ("lifetime", "24h", "session")
 _SPILL_CLASSES = ("interactive", "worker", "batch")
 _SPILL_MAX_S = 86400
 
+# ── Provider registry ─────────────────────────────────────
+#
+# Multiple local/remote inference backends can be registered; the browser only
+# ever sees {id,label,kind,scope,capabilities} — broker_url/management_url/auth
+# are server-side only (same SSRF stance as _LOCAL_BROKER_URL above).
 
-def _broker_get(path: str, query: str = "") -> dict:
+_PROVIDERS = {
+    "lmstudio-local": {
+        "id": "lmstudio-local", "label": "LM Studio (local)", "kind": "lmstudio",
+        "scope": "local",
+        "broker_url": os.getenv("COCKPIT_BROKER_URL", "http://127.0.0.1:1235").rstrip("/"),
+        "management_url": os.getenv("COCKPIT_LMSTUDIO_URL", "http://127.0.0.1:1234").rstrip("/"),
+        "auth": {"type": "none"},
+        "capabilities": ["queue", "metrics", "spill", "models", "traces", "health"],
+    },
+}
+_DEFAULT_PROVIDER = "lmstudio-local"
+
+_PROVIDER_REQUIRED_KEYS = ("id", "label", "kind", "scope", "broker_url", "capabilities")
+
+
+def _is_safe_provider_url(url) -> bool:
+    """True when *url* parses to an http(s) scheme with a non-empty netloc.
+
+    Guards the proxy against a malformed/malicious COCKPIT_PROVIDERS_FILE
+    pointing broker_url/management_url at file://, gopher://, or other
+    schemes urllib would happily "fetch" for us.
+    """
+    import urllib.parse
+
+    if not isinstance(url, str):
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _load_providers_from_file(path: str) -> dict | None:
+    """Parse COCKPIT_PROVIDERS_FILE into a {id: provider} map, or None on failure.
+
+    Validated: each entry needs the required keys, and broker_url/
+    management_url (when present) must be http(s) URLs with a host — all-or-
+    nothing, same as the required-key check. Any parse/validation failure is
+    the caller's cue to log a warning and keep the default registry.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        entries = data["providers"]
+        providers = {}
+        for entry in entries:
+            if not all(k in entry for k in _PROVIDER_REQUIRED_KEYS):
+                return None
+            if not _is_safe_provider_url(entry["broker_url"]):
+                return None
+            if "management_url" in entry and not _is_safe_provider_url(entry["management_url"]):
+                return None
+            providers[entry["id"]] = entry
+        if not providers:
+            return None
+        return providers
+    except Exception:
+        return None
+
+
+_providers_file = os.getenv("COCKPIT_PROVIDERS_FILE")
+if _providers_file:
+    _loaded = _load_providers_from_file(_providers_file)
+    if _loaded is not None:
+        _PROVIDERS = _loaded
+        _DEFAULT_PROVIDER = next(iter(_PROVIDERS))
+    else:
+        logger.warning(
+            "COCKPIT_PROVIDERS_FILE=%s failed to parse/validate; keeping default provider registry",
+            _providers_file,
+        )
+
+
+@app.get("/api/local/providers")
+async def get_local_providers():
+    """List registered providers -- URLs and auth are never sent to the browser."""
+    return JSONResponse({
+        "providers": [
+            {
+                "id": p["id"],
+                "label": p["label"],
+                "kind": p["kind"],
+                "scope": p["scope"],
+                "capabilities": p["capabilities"],
+            }
+            for p in _PROVIDERS.values()
+        ]
+    })
+
+
+def _broker_get(path: str, query: str = "", base_url: str | None = None) -> dict:
     """GET {broker}{path}?{query} and return the parsed JSON.
 
-    Blocking (urllib) — callers run it via ``asyncio.to_thread`` so it never
-    blocks the event loop. Kept a free function so tests can monkeypatch it
-    directly instead of exercising a real broker. Raises on any transport/parse
-    error; the route handlers translate that into a 503 so the best-effort
-    frontend poller can silently swallow an offline broker.
+    ``base_url`` defaults to the legacy ``_LOCAL_BROKER_URL`` so existing
+    callers/monkeypatches are unaffected; provider-keyed routes pass the
+    registered provider's own ``broker_url``. Blocking (urllib) — callers run
+    it via ``asyncio.to_thread`` so it never blocks the event loop. Kept a
+    free function so tests can monkeypatch it directly instead of exercising
+    a real broker. Raises on any transport/parse error; the route handlers
+    translate that into a 503 so the best-effort frontend poller can silently
+    swallow an offline broker.
     """
     import urllib.request
 
-    url = f"{_LOCAL_BROKER_URL}{path}"
+    url = f"{base_url or _LOCAL_BROKER_URL}{path}"
     if query:
         url += f"?{query}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -1928,21 +2024,36 @@ def _broker_get(path: str, query: str = "") -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _broker_put(path: str, body: dict) -> dict:
+def _broker_put(path: str, body: dict, base_url: str | None = None) -> dict:
     """PUT a JSON body to {broker}{path} and return the parsed JSON echo.
 
-    Blocking (urllib) — run via ``asyncio.to_thread``. Same monkeypatch-friendly
-    free-function shape as ``_broker_get``.
+    ``base_url`` defaults to the legacy ``_LOCAL_BROKER_URL`` — see
+    ``_broker_get``. Blocking (urllib) — run via ``asyncio.to_thread``. Same
+    monkeypatch-friendly free-function shape as ``_broker_get``.
     """
     import urllib.request
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        f"{_LOCAL_BROKER_URL}{path}",
+        f"{base_url or _LOCAL_BROKER_URL}{path}",
         data=data,
         method="PUT",
         headers={"Accept": "application/json", "Content-Type": "application/json"},
     )
+    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _mgmt_get(provider: dict, path: str) -> dict:
+    """GET {provider[management_url]}{path} and return the parsed JSON.
+
+    Sibling of ``_broker_get`` for the management-plane URL (e.g. LM Studio's
+    REST API) rather than the broker. Same blocking/monkeypatch/timeout shape.
+    """
+    import urllib.request
+
+    url = f"{provider['management_url']}{path}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -2021,77 +2132,88 @@ async def get_local_status():
     return JSONResponse({**result, "url": _LOCAL_BROKER_URL})
 
 
-@app.get("/api/local/queue")
-async def get_local_queue():
-    """Proxy the broker's read-only queue snapshot (GET :broker/queue).
+# ── Provider-keyed local routes ───────────────────────────
+#
+# Thin wrappers around the same _broker_get/_broker_put/_mgmt_get machinery
+# above, parameterized by a registered provider instead of the hard-coded
+# _LOCAL_BROKER_URL. The legacy /api/local/{queue,metrics,spill} routes above
+# stay as-is and keep working unchanged -- only the write-refusal/model/health/
+# traces routes are new, all provider-keyed by construction.
 
-    Returns the broker JSON verbatim on success; 503 {reachable: false} when
-    the broker is down/unreachable so the frontend renders a dim 'offline'
-    state without console noise.
-    """
+_MODEL_FIELDS = ("id", "type", "arch", "quantization", "state",
+                  "max_context_length", "loaded_context_length")
+
+
+def _require_provider(provider_id: str):
+    """Look up a provider by id, or None if unknown."""
+    return _PROVIDERS.get(provider_id)
+
+
+@app.get("/api/local/{provider_id}/queue")
+async def get_provider_queue(provider_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "queue" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
     try:
-        data = await asyncio.to_thread(_broker_get, "/queue")
+        data = await asyncio.to_thread(_broker_get, "/queue", "", provider["broker_url"])
     except Exception:
-        logger.debug("Local broker /queue unreachable", exc_info=True)
+        logger.debug("Provider %s /queue unreachable", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _QUEUE_SHAPE_KEYS):
-        # A 200 that isn't queue-shaped means we're NOT talking to the broker
-        # (LM Studio answers unknown paths with "200 anyway").
         return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
     return JSONResponse(data)
 
 
-@app.get("/api/local/metrics")
-async def get_local_metrics(window: str = "lifetime"):
-    """Proxy the broker's read-only metrics aggregates for a time window.
-
-    ``window`` is validated against the broker's documented set BEFORE
-    forwarding — an unbounded client string is never passed to the broker.
-    """
+@app.get("/api/local/{provider_id}/metrics")
+async def get_provider_metrics(provider_id: str, window: str = "lifetime"):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "metrics" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
     if window not in _LOCAL_METRICS_WINDOWS:
         return JSONResponse(
             {"error": f"window must be one of {list(_LOCAL_METRICS_WINDOWS)}"},
             status_code=400,
         )
     try:
-        data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}")
+        data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}", provider["broker_url"])
     except Exception:
-        logger.debug("Local broker /metrics unreachable", exc_info=True)
+        logger.debug("Provider %s /metrics unreachable", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _METRICS_SHAPE_KEYS):
         return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
     return JSONResponse(data)
 
 
-@app.get("/api/local/spill")
-async def get_local_spill():
-    """Proxy the broker's current per-class spill thresholds + spilled counters.
-
-    Broker shape: {spill_thresholds_s: {interactive, worker, batch}, spilled_total,
-    spilled_by_class, persisted}. 503 {reachable: false} when the broker is down.
-    """
+@app.get("/api/local/{provider_id}/spill")
+async def get_provider_spill(provider_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "spill" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
     try:
-        data = await asyncio.to_thread(_broker_get, "/config/spill")
+        data = await asyncio.to_thread(_broker_get, "/config/spill", "", provider["broker_url"])
     except Exception:
-        logger.debug("Local broker GET /config/spill unreachable", exc_info=True)
+        logger.debug("Provider %s GET /config/spill unreachable", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _SPILL_SHAPE_KEYS):
         return JSONResponse({"reachable": True, "compatible": False}, status_code=502)
     return JSONResponse(data)
 
 
-@app.put("/api/local/spill")
-@app.post("/api/local/spill")
-async def set_local_spill(request: Request):
-    """Set per-lane-class spill thresholds (seconds) on the broker.
-
-    Body is a PARTIAL map of {class: seconds|null} — any subset of the known
-    lane classes; ``null`` disables spill for that class. Validated all-or-
-    nothing BEFORE forwarding (defense in depth — the broker validates too):
-    unknown class or out-of-range value → 400 and nothing is forwarded. The
-    change is session-only on the broker (not persisted), so it is fully
-    reversible. Forwarded to the broker as ``PUT /config/spill``.
-    """
+@app.put("/api/local/{provider_id}/spill")
+async def set_provider_spill(provider_id: str, request: Request):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "spill" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if provider["scope"] != "local":
+        return JSONResponse({"error": "read-only for remote providers"}, status_code=403)
     try:
         body = await request.json()
     except Exception:
@@ -2120,16 +2242,162 @@ async def set_local_spill(request: Request):
                 status_code=400,
             )
     try:
-        data = await asyncio.to_thread(_broker_put, "/config/spill", body)
+        data = await asyncio.to_thread(_broker_put, "/config/spill", body, provider["broker_url"])
     except Exception:
-        logger.debug("Local broker PUT /config/spill failed", exc_info=True)
+        logger.debug("Provider %s PUT /config/spill failed", provider_id, exc_info=True)
         return JSONResponse({"reachable": False}, status_code=503)
     if not _looks_like(data, _SPILL_SHAPE_KEYS):
-        # "200 anyway" from a non-broker service — the write did NOT take.
         return JSONResponse({"reachable": True, "compatible": False,
                              "error": "connected service is not the lane broker"},
                             status_code=502)
     return JSONResponse(data)
+
+
+@app.get("/api/local/{provider_id}/models")
+async def get_provider_models(provider_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "models" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    try:
+        data = await asyncio.to_thread(_mgmt_get, provider, "/api/v0/models")
+    except Exception:
+        logger.debug("Provider %s /models unreachable", provider_id, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    raw_models = data.get("data") if isinstance(data, dict) else None
+    if raw_models is None:
+        raw_models = []
+    models = [
+        {field: m.get(field) if isinstance(m, dict) else None for field in _MODEL_FIELDS}
+        for m in raw_models
+    ]
+    return JSONResponse({"reachable": True, "models": models})
+
+
+def _provider_models_loaded_count(data) -> int:
+    raw_models = data.get("data") if isinstance(data, dict) else None
+    if not raw_models:
+        return 0
+    return sum(1 for m in raw_models if isinstance(m, dict) and m.get("state") == "loaded")
+
+
+@app.get("/api/local/{provider_id}/health")
+async def get_provider_health(provider_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "health" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+
+    async def probe_broker():
+        try:
+            await asyncio.to_thread(_broker_get, "/queue", "", provider["broker_url"])
+            return True
+        except Exception:
+            return False
+
+    async def probe_provider():
+        try:
+            data = await asyncio.to_thread(_mgmt_get, provider, "/api/v0/models")
+            return True, _provider_models_loaded_count(data)
+        except Exception:
+            return False, 0
+
+    broker_reachable, (provider_reachable, models_loaded) = await asyncio.gather(
+        probe_broker(), probe_provider()
+    )
+    return JSONResponse({
+        "broker": {"reachable": broker_reachable},
+        "provider": {"reachable": provider_reachable, "models_loaded": models_loaded},
+        "ok": bool(broker_reachable and provider_reachable),
+    })
+
+
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+@app.get("/api/local/{provider_id}/traces")
+async def get_provider_traces(provider_id: str, limit: int = 20):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "traces" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if limit < 1 or limit > 100:
+        limit = max(1, min(100, limit))
+    try:
+        data = await asyncio.to_thread(_broker_get, "/traces", f"limit={limit}", provider["broker_url"])
+    except Exception:
+        logger.debug("Provider %s /traces unreachable", provider_id, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+@app.get("/api/local/{provider_id}/trace/{trace_id}")
+async def get_provider_trace(provider_id: str, trace_id: str):
+    provider = _require_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if "traces" not in provider["capabilities"]:
+        return JSONResponse({"error": "capability not available"}, status_code=404)
+    if not _TRACE_ID_RE.match(trace_id):
+        return JSONResponse({"error": "invalid trace_id"}, status_code=400)
+    try:
+        data = await asyncio.to_thread(_broker_get, f"/trace/{trace_id}", "", provider["broker_url"])
+    except Exception:
+        logger.debug("Provider %s /trace/%s unreachable", provider_id, trace_id, exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+    return JSONResponse(data)
+
+
+# Legacy routes: delegate to the default provider so old clients keep working.
+
+
+@app.get("/api/local/queue")
+async def get_local_queue():
+    """Proxy the broker's read-only queue snapshot (GET :broker/queue).
+
+    Returns the broker JSON verbatim on success; 503 {reachable: false} when
+    the broker is down/unreachable so the frontend renders a dim 'offline'
+    state without console noise.
+    """
+    return await get_provider_queue(_DEFAULT_PROVIDER)
+
+
+@app.get("/api/local/metrics")
+async def get_local_metrics(window: str = "lifetime"):
+    """Proxy the broker's read-only metrics aggregates for a time window.
+
+    ``window`` is validated against the broker's documented set BEFORE
+    forwarding — an unbounded client string is never passed to the broker.
+    """
+    return await get_provider_metrics(_DEFAULT_PROVIDER, window)
+
+
+@app.get("/api/local/spill")
+async def get_local_spill():
+    """Proxy the broker's current per-class spill thresholds + spilled counters.
+
+    Broker shape: {spill_thresholds_s: {interactive, worker, batch}, spilled_total,
+    spilled_by_class, persisted}. 503 {reachable: false} when the broker is down.
+    """
+    return await get_provider_spill(_DEFAULT_PROVIDER)
+
+
+@app.put("/api/local/spill")
+@app.post("/api/local/spill")
+async def set_local_spill(request: Request):
+    """Set per-lane-class spill thresholds (seconds) on the broker.
+
+    Body is a PARTIAL map of {class: seconds|null} — any subset of the known
+    lane classes; ``null`` disables spill for that class. Validated all-or-
+    nothing BEFORE forwarding (defense in depth — the broker validates too):
+    unknown class or out-of-range value → 400 and nothing is forwarded. The
+    change is session-only on the broker (not persisted), so it is fully
+    reversible. Forwarded to the broker as ``PUT /config/spill``.
+    """
+    return await set_provider_spill(_DEFAULT_PROVIDER, request)
 
 
 # ── Static files ─────────────────────────────────────────

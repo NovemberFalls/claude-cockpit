@@ -80,3 +80,61 @@ def test_rediscover_returns_none_when_only_claimed_or_old(tmp_path):
     _touch(tmp_path / "ddd.jsonl", age_seconds=9999)
     assert mgr._rediscover_jsonl(s, str(tmp_path)) is None
     assert s.claude_session_id == "aaa"
+
+
+# ---------------------------------------------------------------------------
+# Strategy 3 — resume fallback in _get_jsonl_path (the "resumed session shows
+# $0.00 forever" bug: the resumed conversation's JSONL predates spawn, so the
+# new-file diff never finds it and claude_session_id stays None).
+# ---------------------------------------------------------------------------
+
+def _resume_session(sid, working_dir, pre_spawn_files):
+    s = _fake_session(sid, None)
+    s.working_dir = working_dir
+    s._pre_spawn_files = pre_spawn_files
+    return s
+
+
+def _project_dir(tmp_path, monkeypatch, working_dir):
+    """Build the ~/.claude/projects/<id> dir _get_jsonl_path derives."""
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path))
+    project_id = working_dir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+    d = tmp_path / ".claude" / "projects" / project_id
+    d.mkdir(parents=True)
+    return d
+
+
+def test_resume_fallback_claims_live_preexisting_jsonl(tmp_path, monkeypatch):
+    """csid=None + no new files + recent output → claim the live unclaimed file."""
+    wd = "C:/proj/x"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "resumed.jsonl", age_seconds=3)    # the resumed convo, being written
+    _touch(d / "ancient.jsonl", age_seconds=9999)
+    s = _resume_session("t1", wd, pre_spawn_files={"resumed.jsonl", "ancient.jsonl"})
+    mgr = _manager_with_sessions({"t1": s})
+    got = mgr._get_jsonl_path(s)
+    assert got == str(d / "resumed.jsonl")
+    assert s.claude_session_id == "resumed"
+
+
+def test_resume_fallback_requires_output_activity(tmp_path, monkeypatch):
+    """An idle pane must never grab another session's file (mis-attribution)."""
+    wd = "C:/proj/y"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "someone-elses.jsonl", age_seconds=3)
+    s = _resume_session("t1", wd, pre_spawn_files={"someone-elses.jsonl"})
+    s.last_output_time = 0.0  # no output ever produced
+    mgr = _manager_with_sessions({"t1": s})
+    assert mgr._get_jsonl_path(s) is None
+    assert s.claude_session_id is None
+
+
+def test_resume_fallback_skips_files_claimed_by_other_sessions(tmp_path, monkeypatch):
+    wd = "C:/proj/z"
+    d = _project_dir(tmp_path, monkeypatch, wd)
+    _touch(d / "claimed.jsonl", age_seconds=2)
+    s = _resume_session("t1", wd, pre_spawn_files={"claimed.jsonl"})
+    other = _fake_session("t2", "claimed")
+    mgr = _manager_with_sessions({"t1": s, "t2": other})
+    assert mgr._get_jsonl_path(s) is None
+    assert s.claude_session_id is None

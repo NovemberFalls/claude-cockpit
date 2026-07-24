@@ -17,6 +17,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import LaneQueuePanel from "../components/LaneQueuePanel.jsx";
 import LocalMetricsPanel from "../components/LocalMetricsPanel.jsx";
+import LocalBrokerView from "../components/LocalBrokerView.jsx";
 
 const QUEUE = {
   in_flight: { id: "abc1234567890", class: "workhorse" },
@@ -119,5 +120,78 @@ describe("LocalMetricsPanel", () => {
     // "session" also appears as the by-session breakdown header — ≥1 is the dt.
     expect(screen.getAllByText("session").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("X-Client-Id")).toBeInTheDocument();
+  });
+});
+
+describe("LocalMetricsPanel — token honesty", () => {
+  it("shows 'not reported' when runs exist but tokens are zero", () => {
+    const m = { ...METRICS, tokens_total: { prompt: 0, completion: 0 } };
+    render(<LocalMetricsPanel metrics={m} window="lifetime" setWindow={() => {}} />);
+    expect(screen.getByText("not reported")).toBeInTheDocument();
+    expect(screen.getByText(/stream_options\.include_usage/)).toBeInTheDocument();
+  });
+});
+
+describe("LocalBrokerView", () => {
+  const STATUS_OK = { reachable: true, compatible: true, service: "lane-broker", url: "http://127.0.0.1:1235" };
+  const STATUS_LMS = { reachable: true, compatible: false, service: "lmstudio", url: "http://127.0.0.1:1235" };
+
+  it("renders connection + queue + reporting when broker connected", () => {
+    render(
+      <LocalBrokerView
+        localEnabled={true}
+        setLocalEnabled={() => {}}
+        localStatus={STATUS_OK}
+        localQueue={QUEUE}
+        localSpill={SPILL}
+        localMetrics={METRICS}
+        metricsWindow="lifetime"
+        setMetricsWindow={() => {}}
+        onSpillChange={() => {}}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.getByText("Lane broker connected")).toBeInTheDocument();
+    expect(screen.getByText("Queue & Spill")).toBeInTheDocument();
+    expect(screen.getByText("Reporting")).toBeInTheDocument();
+  });
+
+  it("names the wrong service and hides queue/reporting when incompatible", () => {
+    render(
+      <LocalBrokerView
+        localEnabled={true}
+        setLocalEnabled={() => {}}
+        localStatus={STATUS_LMS}
+        localQueue={null}
+        localSpill={null}
+        localMetrics={null}
+        metricsWindow="lifetime"
+        setMetricsWindow={() => {}}
+        onSpillChange={() => {}}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.getByText(/LM Studio is answering/)).toBeInTheDocument();
+    expect(screen.queryByText("Queue & Spill")).not.toBeInTheDocument();
+  });
+
+  it("close button calls onClose", () => {
+    const onClose = vi.fn();
+    render(
+      <LocalBrokerView
+        localEnabled={false}
+        setLocalEnabled={() => {}}
+        localStatus={null}
+        localQueue={null}
+        localSpill={null}
+        localMetrics={null}
+        metricsWindow="lifetime"
+        setMetricsWindow={() => {}}
+        onSpillChange={() => {}}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByLabelText("Close Local Broker view"));
+    expect(onClose).toHaveBeenCalled();
   });
 });

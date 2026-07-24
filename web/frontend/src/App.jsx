@@ -10,6 +10,10 @@ import { useToast, ToastContainer } from "./components/Toast";
 import OnboardingModal from "./components/OnboardingModal";
 import BridgeModal from "./components/BridgeModal";
 import FleetView from "./components/FleetView";
+import ProviderPicker from "./components/ProviderPicker";
+import LocalModelsPanel from "./components/LocalModelsPanel";
+import TracesPanel from "./components/TracesPanel";
+import LocalBrokerView from "./components/LocalBrokerView.jsx";
 import { ZOOM_STORAGE_KEY, DEFAULT_ZOOM, MIN_ZOOM, MAX_ZOOM } from "./utils/terminalFit";
 import { computeEndEvents, formatEndEventToast, BRIDGE_KIND, CHANNEL_KIND } from "./utils/bridgeEvents";
 
@@ -205,7 +209,14 @@ export default function App() {
   const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
   const [localSpill, setLocalSpill] = useState(null);   // GET /api/local/spill (per-class thresholds + counters)
   const [localStatus, setLocalStatus] = useState(null); // GET /api/local/status — what's actually connected
+  const [showLocalBroker, setShowLocalBroker] = useState(false); // full-page Local Broker section (rail-opened)
   const [metricsWindow, setMetricsWindow] = useState("lifetime"); // lifetime | 24h | session
+  // Provider registry (ProviderPicker owns the fetch + localStorage selection;
+  // this mirrors the full selected provider object back up so App can gate
+  // per-capability polling and panel rendering).
+  const [selectedProvider, setSelectedProvider] = useState(null); // {id,label,kind,scope,capabilities} | null
+  const [localModels, setLocalModels] = useState(null); // GET /api/local/{id}/models
+  const [localTraces, setLocalTraces] = useState(null); // GET /api/local/{id}/traces
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -883,61 +894,148 @@ export default function App() {
     try { localStorage.setItem("cockpit-local-enabled", String(localEnabled)); } catch (_) { /* ignore */ }
   }, [localEnabled]);
 
-  // Poll the local broker (queue + metrics) every 3s while enabled — gated so a
-  // disabled feature costs nothing. Best-effort: errors/offline are swallowed and
-  // surfaced as a null (offline) state the panels render as "broker offline".
+  // Poll the local broker's status (unaffected by provider selection — a
+  // machine-global compatibility probe) every 3s while enabled.
   useEffect(() => {
     if (!backendReady || !localEnabled) {
-      setLocalQueue(null);
-      setLocalMetrics(null);
-      setLocalSpill(null);
       setLocalStatus(null);
       return;
     }
     const controller = new AbortController();
     const { signal } = controller;
-
-    const fetchLocal = async () => {
+    const fetchStatus = async () => {
       try {
         const res = await fetch("/api/local/status", { signal });
         if (res.ok) setLocalStatus(await res.json());
       } catch (_) {
         // swallow — best-effort
       }
-      try {
-        const res = await fetch("/api/local/queue", { signal });
-        setLocalQueue(res.ok ? await res.json() : { reachable: false });
-      } catch (_) {
-        // swallow — best-effort; leave prior state
-      }
-      try {
-        const res = await fetch(`/api/local/metrics?window=${encodeURIComponent(metricsWindow)}`, { signal });
-        setLocalMetrics(res.ok ? await res.json() : { reachable: false });
-      } catch (_) {
-        // swallow — best-effort
-      }
-      try {
-        const res = await fetch("/api/local/spill", { signal });
-        setLocalSpill(res.ok ? await res.json() : { reachable: false });
-      } catch (_) {
-        // swallow — best-effort
-      }
     };
-
-    fetchLocal();
-    const id = setInterval(fetchLocal, 3000);
+    fetchStatus();
+    const id = setInterval(fetchStatus, 3000);
     return () => {
       clearInterval(id);
       controller.abort();
     };
-  }, [backendReady, localEnabled, metricsWindow]);
+  }, [backendReady, localEnabled]);
 
-  // Commit a single lane-class spill threshold (seconds, or null to disable).
-  // POSTs the partial map and applies the broker's echoed full state.
+  // Poll the selected provider's queue (3s) and metrics + spill (10s) — gated
+  // so a disabled feature or unselected provider costs nothing. Best-effort:
+  // errors/offline are swallowed and surfaced as a null (offline) state the
+  // panels render as "broker offline". Each fetch is additionally gated on
+  // the provider actually listing that capability; spill also requires
+  // scope=="local" (PUT is 403 for remote providers, so the read-only sliders
+  // are withheld there too) — spillConfig === null tells LaneQueuePanel to
+  // omit the section entirely rather than show a false "offline" state.
+  useEffect(() => {
+    if (!backendReady || !localEnabled || !selectedProvider) {
+      setLocalQueue(null);
+      setLocalMetrics(null);
+      setLocalSpill(null);
+      return;
+    }
+    const providerId = selectedProvider.id;
+    const caps = selectedProvider.capabilities || [];
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const fetchQueue = async () => {
+      if (!caps.includes("queue")) { setLocalQueue(null); return; }
+      try {
+        const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/queue`, { signal });
+        setLocalQueue(res.ok ? await res.json() : { reachable: false });
+      } catch (_) {
+        // swallow — best-effort; leave prior state
+      }
+    };
+
+    const fetchMetricsAndSpill = async () => {
+      if (caps.includes("metrics")) {
+        try {
+          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/metrics?window=${encodeURIComponent(metricsWindow)}`, { signal });
+          setLocalMetrics(res.ok ? await res.json() : { reachable: false });
+        } catch (_) {
+          // swallow — best-effort
+        }
+      } else {
+        setLocalMetrics(null);
+      }
+      if (caps.includes("spill") && selectedProvider.scope === "local") {
+        try {
+          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/spill`, { signal });
+          setLocalSpill(res.ok ? await res.json() : { reachable: false });
+        } catch (_) {
+          // swallow — best-effort
+        }
+      } else {
+        setLocalSpill(null);
+      }
+    };
+
+    fetchQueue();
+    fetchMetricsAndSpill();
+    const queueId = setInterval(fetchQueue, 3000);
+    const slowId = setInterval(fetchMetricsAndSpill, 10000);
+    return () => {
+      clearInterval(queueId);
+      clearInterval(slowId);
+      controller.abort();
+    };
+  }, [backendReady, localEnabled, selectedProvider, metricsWindow]);
+
+  // Poll the selected provider's models + traces every 10s — only when the
+  // capability is present (mirrors the queue/metrics gating above). Renders
+  // nothing (panel omitted) when the capability is absent for this provider.
+  useEffect(() => {
+    if (!backendReady || !localEnabled || !selectedProvider) {
+      setLocalModels(null);
+      setLocalTraces(null);
+      return;
+    }
+    const providerId = selectedProvider.id;
+    const caps = selectedProvider.capabilities || [];
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const fetchModelsAndTraces = async () => {
+      if (caps.includes("models")) {
+        try {
+          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/models`, { signal });
+          setLocalModels(res.ok ? await res.json() : { reachable: false });
+        } catch (_) {
+          // swallow — best-effort
+        }
+      } else {
+        setLocalModels(null);
+      }
+      if (caps.includes("traces")) {
+        try {
+          const res = await fetch(`/api/local/${encodeURIComponent(providerId)}/traces`, { signal });
+          setLocalTraces(res.ok ? await res.json() : { reachable: false });
+        } catch (_) {
+          // swallow — best-effort
+        }
+      } else {
+        setLocalTraces(null);
+      }
+    };
+
+    fetchModelsAndTraces();
+    const id = setInterval(fetchModelsAndTraces, 10000);
+    return () => {
+      clearInterval(id);
+      controller.abort();
+    };
+  }, [backendReady, localEnabled, selectedProvider]);
+
+  // Commit a single lane-class spill threshold (seconds, or null to disable),
+  // scoped to the selected provider. PUTs the partial map and applies the
+  // broker's echoed full state.
   const commitSpill = useCallback(async (cls, value) => {
+    if (!selectedProvider) return;
     try {
-      const res = await fetch("/api/local/spill", {
-        method: "POST",
+      const res = await fetch(`/api/local/${encodeURIComponent(selectedProvider.id)}/spill`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [cls]: value }),
       });
@@ -950,7 +1048,7 @@ export default function App() {
     } catch (_) {
       toast("Broker unreachable — spill threshold not changed", "error");
     }
-  }, [toast]);
+  }, [toast, selectedProvider]);
 
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
@@ -1469,11 +1567,8 @@ export default function App() {
             setLocalEnabled={setLocalEnabled}
             localQueue={localQueue}
             localMetrics={localMetrics}
-            localSpill={localSpill}
             localStatus={localStatus}
-            onSpillChange={commitSpill}
-            metricsWindow={metricsWindow}
-            setMetricsWindow={setMetricsWindow}
+            onOpenLocalBroker={() => setShowLocalBroker(true)}
           />
 
           {showFleetView && (
@@ -1484,6 +1579,53 @@ export default function App() {
               workflowsByTerminal={workflowsByTerminal}
               onClose={() => setShowFleetView(false)}
             />
+          )}
+
+          {showLocalBroker && (
+            <LocalBrokerView
+              localEnabled={localEnabled}
+              setLocalEnabled={setLocalEnabled}
+              localStatus={localStatus}
+              localQueue={localQueue}
+              localSpill={localSpill}
+              localMetrics={localMetrics}
+              metricsWindow={metricsWindow}
+              setMetricsWindow={setMetricsWindow}
+              onSpillChange={commitSpill}
+              onClose={() => setShowLocalBroker(false)}
+            />
+          )}
+
+          {/* Provider picker + capability-gated models/traces panels — kept
+              as a standalone overlay (rather than inside LocalBrokerView,
+              which is outside this worker's ownership) so provider switching
+              and the new panels are available whenever the Local Broker
+              section is open. Each panel renders nothing when its capability
+              is absent from the selected provider. */}
+          {showLocalBroker && localEnabled && (
+            <div
+              style={{
+                position: "fixed",
+                top: 60,
+                right: 20,
+                zIndex: 60,
+                width: 300,
+                maxHeight: "80vh",
+                overflowY: "auto",
+                background: "var(--cc-surface, var(--bg-elevated))",
+                border: "1px solid var(--cc-border, var(--border-color))",
+                borderRadius: 12,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+              }}
+            >
+              <ProviderPicker enabled={localEnabled} onSelect={setSelectedProvider} />
+              {selectedProvider?.capabilities?.includes("models") && (
+                <LocalModelsPanel models={localModels} />
+              )}
+              {selectedProvider?.capabilities?.includes("traces") && (
+                <TracesPanel traces={localTraces} providerId={selectedProvider.id} />
+              )}
+            </div>
           )}
 
           <div className="flex flex-1 min-h-0">
@@ -1503,6 +1645,8 @@ export default function App() {
               }}
               broadcastMode={broadcastMode}
               onToggleBroadcast={() => setBroadcastMode((p) => !p)}
+              showLocalBroker={showLocalBroker}
+              onToggleLocalBroker={() => setShowLocalBroker((v) => !v)}
             />
             {sidebarOpen && (
               <div

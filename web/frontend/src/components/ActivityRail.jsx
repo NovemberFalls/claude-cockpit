@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, List, LayoutGrid, Search, Radio, Settings } from "lucide-react";
+import { Plus, List, LayoutGrid, Search, Radio, Settings, Cpu } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 
 const ACCENT_PRESETS = ["#4ea1e8", "#5bbf9f", "#e0b060", "#c497d6"];
@@ -187,6 +187,8 @@ export default function ActivityRail({
   onSearch,
   broadcastMode,
   onToggleBroadcast,
+  showLocalBroker,
+  onToggleLocalBroker,
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -209,6 +211,9 @@ export default function ActivityRail({
       <RailButton icon={LayoutGrid} label="Fleet view" active={showFleetView} onClick={onToggleFleet} />
       <RailButton icon={Search} label="Search sessions" onClick={onSearch} />
       <RailButton icon={Radio} label="Broadcast (Ctrl+Shift+Enter)" active={broadcastMode} onClick={onToggleBroadcast} />
+      {onToggleLocalBroker && (
+        <RailButton icon={Cpu} label="Local Broker — config & reporting" active={showLocalBroker} onClick={onToggleLocalBroker} />
+      )}
 
       <div style={{ flex: 1 }} />
 
