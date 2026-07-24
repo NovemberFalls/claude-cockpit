@@ -2,9 +2,19 @@
    are re-exported here so PaneActionsMenu.jsx reuses the exact same model list
    instead of hardcoding a second copy (see CLAUDE.md model list conventions). */
 import { useState, useEffect } from "react";
-import { PanelLeft, ChevronDown, KeyRound, LayoutGrid } from "lucide-react";
+import { PanelLeft, ChevronDown, KeyRound, LayoutGrid, Cpu } from "lucide-react";
 import OpenRouterModal from "./OpenRouterModal.jsx";
 import { ThemePopover, LogoMark } from "./ActivityRail.jsx";
+import LaneQueuePanel from "./LaneQueuePanel.jsx";
+import LocalMetricsPanel from "./LocalMetricsPanel.jsx";
+
+/** Queue depth = in-flight (0/1) + queued length, defensive over broker field names. */
+function queueDepth(q) {
+  if (!q || q.reachable === false) return null;
+  const inFlight = q.in_flight ?? q.inflight ?? q.current ?? null;
+  const queued = q.queued ?? q.queue ?? [];
+  return (inFlight ? 1 : 0) + (Array.isArray(queued) ? queued.length : 0);
+}
 
 export const MODEL_GROUPS = [
   {
@@ -104,12 +114,19 @@ export default function TopBar({
   onToast,
   showFleetView,
   setShowFleetView,
+  localEnabled,
+  setLocalEnabled,
+  localQueue,
+  localMetrics,
+  metricsWindow,
+  setMetricsWindow,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [openRouterOpen, setOpenRouterOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
   // tri-state: null = not yet checked, true/false = last known GET result
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
@@ -155,7 +172,13 @@ export default function TopBar({
     setPermissionOpen(false);
     setEffortOpen(false);
     setThemeOpen(false);
+    setLocalOpen(false);
   }
+
+  const localDepth = queueDepth(localQueue);
+  const localTps = localMetrics && localMetrics.reachable !== false
+    ? localMetrics.tokens_per_sec?.current
+    : null;
 
   return (
     <header
@@ -204,6 +227,89 @@ export default function TopBar({
             <LayoutGrid size={16} />
           </button>
         )}
+
+        {/* Local broker — queue + metrics (machine-global). Compact live
+            readout when enabled; dim icon otherwise. Click opens the drawer. */}
+        <div className="relative">
+          <button
+            onClick={() => { const wasOpen = localOpen; closeAll(); setLocalOpen(!wasOpen); }}
+            className="flex items-center transition-colors hover-bg-surface"
+            style={{
+              gap: 5, padding: localEnabled ? "4px 9px" : 5, borderRadius: localEnabled ? 999 : 7,
+              color: localEnabled ? "var(--cc-accent, var(--accent))" : "var(--cc-dim, var(--text-secondary))",
+              border: localEnabled ? "1px solid var(--border-color)" : "none",
+            }}
+            title="Local model broker — queue & metrics"
+            aria-label="Local broker queue and metrics"
+            aria-expanded={localOpen}
+            aria-haspopup="dialog"
+          >
+            <Cpu size={15} />
+            {localEnabled && localDepth != null && (
+              <span style={{ fontSize: 11, fontWeight: 600 }}>
+                {localDepth}
+                {typeof localTps === "number" && localTps > 0 && (
+                  <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {Math.round(localTps)} tps</span>
+                )}
+              </span>
+            )}
+          </button>
+          {localOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setLocalOpen(false)} aria-hidden="true" />
+              <div
+                role="dialog"
+                aria-label="Local broker"
+                className="absolute right-0 mt-1 rounded-lg z-50"
+                style={{
+                  width: 340,
+                  maxHeight: "70vh",
+                  overflowY: "auto",
+                  backgroundColor: "var(--bg-elevated)",
+                  border: "1px solid var(--border-color)",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                }}
+              >
+                {/* Enable toggle */}
+                <div
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "8px 12px", borderBottom: "1px solid var(--border-color)",
+                  }}
+                >
+                  <span className="text-[11px] uppercase tracking-wider" style={{ color: "var(--text-secondary)", fontWeight: 600 }}>
+                    Local Broker
+                  </span>
+                  <button
+                    onClick={() => setLocalEnabled?.((v) => !v)}
+                    className="text-[11px] px-2 py-0.5 rounded-full transition-colors"
+                    style={{
+                      color: localEnabled ? "var(--accent)" : "var(--text-muted)",
+                      border: `1px solid ${localEnabled ? "var(--accent)" : "var(--border-color)"}`,
+                      background: "var(--bg-surface)",
+                    }}
+                    aria-pressed={!!localEnabled}
+                  >
+                    {localEnabled ? "Enabled" : "Disabled"}
+                  </button>
+                </div>
+
+                {localEnabled ? (
+                  <>
+                    <LaneQueuePanel queue={localQueue} />
+                    <div style={{ borderTop: "1px solid var(--border-color)" }} />
+                    <LocalMetricsPanel metrics={localMetrics} window={metricsWindow} setWindow={setMetricsWindow} />
+                  </>
+                ) : (
+                  <div className="text-xs" style={{ color: "var(--text-muted)", padding: "10px 12px" }}>
+                    Enable to poll the local-lane broker for live queue depth and reporting metrics
+                    (tokens/sec, runs, prompts, run-time distribution, and per-session / agent / lane breakdowns).
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
 
         {/* OpenRouter settings */}
         <button

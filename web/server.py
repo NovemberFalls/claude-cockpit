@@ -1892,6 +1892,90 @@ async def delete_openrouter_settings():
     return JSONResponse({"ok": True, "configured": key is not None, "source": source})
 
 
+# ── Local model broker (LM Studio lane broker) ───────────
+
+# Base URL of the local-lane broker (queue + metrics). Read-only endpoints.
+# The browser NEVER supplies this — proxying an arbitrary client-supplied URL
+# would be an SSRF hole, so the base is fixed server-side (env-overridable) and
+# only the *validated* window query param is ever forwarded to the broker.
+_LOCAL_BROKER_URL = os.getenv("COCKPIT_BROKER_URL", "http://127.0.0.1:1235").rstrip("/")
+_LOCAL_BROKER_TIMEOUT = 3.0
+# The broker's documented window set (broker-team contract). Never forward an
+# unbounded client string through to the broker.
+_LOCAL_METRICS_WINDOWS = ("lifetime", "24h", "session")
+
+
+def _broker_get(path: str, query: str = "") -> dict:
+    """GET {broker}{path}?{query} and return the parsed JSON.
+
+    Blocking (urllib) — callers run it via ``asyncio.to_thread`` so it never
+    blocks the event loop. Kept a free function so tests can monkeypatch it
+    directly instead of exercising a real broker. Raises on any transport/parse
+    error; the route handlers translate that into a 503 so the best-effort
+    frontend poller can silently swallow an offline broker.
+    """
+    import urllib.request
+
+    url = f"{_LOCAL_BROKER_URL}{path}"
+    if query:
+        url += f"?{query}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=_LOCAL_BROKER_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+@app.get("/api/local/queue")
+async def get_local_queue():
+    """Proxy the broker's read-only queue snapshot (GET :broker/queue).
+
+    Returns the broker JSON verbatim on success; 503 {reachable: false} when
+    the broker is down/unreachable so the frontend renders a dim 'offline'
+    state without console noise.
+    """
+    try:
+        data = await asyncio.to_thread(_broker_get, "/queue")
+        return JSONResponse(data)
+    except Exception:
+        logger.debug("Local broker /queue unreachable", exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+
+
+@app.get("/api/local/metrics")
+async def get_local_metrics(window: str = "lifetime"):
+    """Proxy the broker's read-only metrics aggregates for a time window.
+
+    ``window`` is validated against the broker's documented set BEFORE
+    forwarding — an unbounded client string is never passed to the broker.
+    """
+    if window not in _LOCAL_METRICS_WINDOWS:
+        return JSONResponse(
+            {"error": f"window must be one of {list(_LOCAL_METRICS_WINDOWS)}"},
+            status_code=400,
+        )
+    try:
+        data = await asyncio.to_thread(_broker_get, "/metrics", f"window={window}")
+        return JSONResponse(data)
+    except Exception:
+        logger.debug("Local broker /metrics unreachable", exc_info=True)
+        return JSONResponse({"reachable": False}, status_code=503)
+
+
+@app.post("/api/local/spill")
+async def set_local_spill(request: Request):
+    """Adjust the broker spill threshold — NOT YET WIRED.
+
+    The broker's confirmed contract is read-only (GET /queue, GET /metrics).
+    Spill control requires a broker-side mutation endpoint that does not exist
+    yet (pending a broker-team ask). This route returns 501 so the frontend
+    slider can be built and wired now, then light up the moment the broker
+    ships the control endpoint — with no frontend change required then.
+    """
+    return JSONResponse(
+        {"ok": False, "reason": "broker spill-control endpoint not yet available"},
+        status_code=501,
+    )
+
+
 # ── Static files ─────────────────────────────────────────
 
 

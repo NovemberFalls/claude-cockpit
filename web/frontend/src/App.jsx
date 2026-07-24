@@ -196,6 +196,14 @@ export default function App() {
   const [usageByTerminal, setUsageByTerminal] = useState({}); // { [terminalId]: { ...session_summary, effort, tokensPerSec } }
   const [dailyUsage, setDailyUsage] = useState(null); // usage_tracker.daily_summary() shape
   const [showFleetView, setShowFleetView] = useState(false);
+  // Local model broker (machine-global): queue + metrics. Polling is gated on
+  // localEnabled so a disabled feature does zero background work.
+  const [localEnabled, setLocalEnabled] = useState(() => {
+    try { return localStorage.getItem("cockpit-local-enabled") === "true"; } catch (_) { return false; }
+  });
+  const [localQueue, setLocalQueue] = useState(null);   // GET /api/local/queue, or null/offline
+  const [localMetrics, setLocalMetrics] = useState(null); // GET /api/local/metrics
+  const [metricsWindow, setMetricsWindow] = useState("lifetime"); // lifetime | 24h | session
   // Drag-and-drop state for pane reordering
   const [dragSource, setDragSource] = useState(null);   // pane index being dragged
   const [dragOverSlot, setDragOverSlot] = useState(null); // slot index being hovered
@@ -868,6 +876,46 @@ export default function App() {
     };
   }, [backendReady]);
 
+  // Persist the local-broker enable flag.
+  useEffect(() => {
+    try { localStorage.setItem("cockpit-local-enabled", String(localEnabled)); } catch (_) { /* ignore */ }
+  }, [localEnabled]);
+
+  // Poll the local broker (queue + metrics) every 3s while enabled — gated so a
+  // disabled feature costs nothing. Best-effort: errors/offline are swallowed and
+  // surfaced as a null (offline) state the panels render as "broker offline".
+  useEffect(() => {
+    if (!backendReady || !localEnabled) {
+      setLocalQueue(null);
+      setLocalMetrics(null);
+      return;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const fetchLocal = async () => {
+      try {
+        const res = await fetch("/api/local/queue", { signal });
+        setLocalQueue(res.ok ? await res.json() : { reachable: false });
+      } catch (_) {
+        // swallow — best-effort; leave prior state
+      }
+      try {
+        const res = await fetch(`/api/local/metrics?window=${encodeURIComponent(metricsWindow)}`, { signal });
+        setLocalMetrics(res.ok ? await res.json() : { reachable: false });
+      } catch (_) {
+        // swallow — best-effort
+      }
+    };
+
+    fetchLocal();
+    const id = setInterval(fetchLocal, 3000);
+    return () => {
+      clearInterval(id);
+      controller.abort();
+    };
+  }, [backendReady, localEnabled, metricsWindow]);
+
   // Bridge modal handlers
   const handleOpenBridge = useCallback((sessionId) => {
     setBridgeModal({ open: true, fromSessionId: sessionId });
@@ -1381,6 +1429,12 @@ export default function App() {
             onToast={toast}
             showFleetView={showFleetView}
             setShowFleetView={setShowFleetView}
+            localEnabled={localEnabled}
+            setLocalEnabled={setLocalEnabled}
+            localQueue={localQueue}
+            localMetrics={localMetrics}
+            metricsWindow={metricsWindow}
+            setMetricsWindow={setMetricsWindow}
           />
 
           {showFleetView && (
