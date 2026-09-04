@@ -2,9 +2,31 @@
  * NewSessionDialog — Phase 9 (screen 3b): the typed-path field is replaced by a
  * real folder browser, but every capability of the previous dialog survives.
  *
- * WHAT DID NOT CHANGE (drop-in for App.jsx, which is untouched):
+ * THE CONFIG SELECTS ARE WIRED (changed — they used to be decorative).
+ *   This header previously asserted that Model / Permission / Effort were
+ *   "deliberately NOT passed to onConfirm so the contract stays byte-identical".
+ *   That was a defect wearing a design's clothes: a user who picked "Opus 5"
+ *   here got whatever the TopBar happened to be set to, and the dialog said
+ *   nothing about it. A control that does not control is a lie in the same
+ *   class as a pill naming a model the session will not spawn on.
+ *
+ *   · props ADD: { defaultModel, defaultPermissionMode, defaultEffort,
+ *                  defaultHarness } — the TopBar's current settings, so the
+ *     dialog OPENS on them and a user who changes nothing gets exactly what the
+ *     command bar already showed. They are NOT catalog[0]: substituting a
+ *     plausible first entry is the very defect this wiring removes.
+ *   · callback: onConfirm(name.trim(), workdir.trim(), bypassPermissions,
+ *                         { model, permissionMode, effort, harness })
+ *     App.jsx treats the 4th argument as per-session OVERRIDES; any key it
+ *     omits falls back to the global setting.
+ *   · A Harness select (Claude Code | Codex) now sits beside Model, so a Codex
+ *     session can be created from here at all — previously impossible. Harness
+ *     and model are ORTHOGONAL to provider; the Model list is narrowed by
+ *     groupsForHarness() exactly as the TopBar picker narrows it.
+ *
+ * WHAT DID NOT CHANGE:
  *   · props: { recentLocations, savedLocations, onConfirm, onCancel }
- *   · callback: onConfirm(name.trim(), workdir.trim(), bypassPermissions)
+ *   · The first three onConfirm arguments, in order and meaning.
  *   · Escape cancels; backdrop click cancels.
  *   · Typing a path STILL WORKS — the working-directory summary bar holds a live
  *     editable path input (Enter navigates the browser there), and the browser's
@@ -12,9 +34,6 @@
  *   · Bypass still resolves from savedLocations by normalised path, with the
  *     same one-way `manualBypassOverride` latch: once the user flips the toggle
  *     themselves, folder changes no longer overwrite their choice.
- *   · Model / Permission / Effort selects remain display-only (App.jsx applies
- *     the global TopBar settings) — deliberately NOT wired into onConfirm so the
- *     contract stays byte-identical.
  *   · The CLAUDE_CLI_PATH escape-hatch note is retained.
  *
  * WHAT CHANGED: the dialog is 880px, hosts <FolderBrowser/>, and the bypass
@@ -39,29 +58,31 @@ import {
   GitBranch,
 } from "lucide-react";
 import FolderBrowser from "./FolderBrowser";
-// Shared vocabularies — see sessionVocabulary.js / modelCatalog.js. These lists
-// are display-only here, but a decorative select that lists a smaller set of
-// effort levels than a session actually supports is still a menu that lies.
+// Shared vocabularies — see sessionVocabulary.js / modelCatalog.js. Now that
+// these selects actually drive the spawn, a list that is a subset of what a
+// session supports is not merely a menu that lies, it is a capability the user
+// cannot reach; hence the shared sources, never a local copy.
 import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
-import { useModelCatalog } from "../modelCatalog";
+import {
+  useModelCatalog,
+  HARNESSES,
+  DEFAULT_HARNESS,
+  groupsForHarness,
+  getModelHarness,
+  defaultModelForHarness,
+} from "../modelCatalog";
 import { normPath, baseName, parentOf } from "./folderPath";
 import { computeSelectPlacement, PANEL_MAX } from "./selectPlacement";
 
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
 
 /**
- * The Model / Permission / Effort selects are display-only: App.jsx applies the
- * global command-bar settings, and these are NOT passed to onConfirm, so the
- * (name, workdir, bypassPermissions) contract stays byte-identical. That is
- * deliberate and unchanged — see the file header.
- *
- * What DID change: all three lists used to be local copies, and two of them were
- * wrong. The effort list stopped at "high", offering four of the six levels, so
- * this dialog showed a menu claiming a session could not be set to `xhigh` or
- * `max`. The model list still named "Sonnet 4.6" / "Opus 4.6", which are not in
- * Plexar Studio's catalog at all. Both now come from the shared sources
- * (sessionVocabulary.js, modelCatalog.js) so a decorative select cannot go on
- * misdescribing what a session can be.
+ * All four lists come from shared sources, and that mattered even while these
+ * selects were decorative: the local copies they replaced were WRONG. The
+ * effort list stopped at "high", offering four of the six levels; the model
+ * list still named "Sonnet 4.6" / "Opus 4.6", which are not in Plexar Studio's
+ * catalog at all. Now that the selects drive the spawn, a stale local copy
+ * would not just misdescribe a session — it would create the wrong one.
  *
  * PERMISSION_OPTIONS is imported under the canonical name; the local alias is
  * kept so the JSX below is untouched.
@@ -92,11 +113,21 @@ export function ConfigSelect({ label, value, options, onChange }) {
   const [activeIndex, setActiveIndex] = useState(-1);
   const triggerRef = useRef(null);
   const optionRefs = useRef([]);
-  // The model options now come from the shared catalog rather than a literal, so
-  // an empty list is reachable (a caller supplying an empty catalog). Falling
-  // back to a placeholder keeps the dialog open instead of crashing it on
+  // The model options come from the shared catalog rather than a literal, so an
+  // empty list is reachable (a caller supplying an empty catalog). Falling back
+  // to a placeholder keeps the dialog open instead of crashing it on
   // `current.label` — this modal is the only way to create a session.
-  const current = options.find((o) => o.id === value) || options[0] || { id: "", label: "—" };
+  //
+  // An id that is SET but not in the list renders AS ITSELF, never as the first
+  // option. Substituting a plausible neighbour is exactly the defect that let
+  // the TopBar pill read "Opus 5" while the session spawned on something else;
+  // now that this select drives the spawn, the same substitution here would put
+  // a wrong model name on the button the user is about to click. Only an unset
+  // value falls through to options[0], which is a genuine "nothing chosen yet".
+  const current =
+    options.find((o) => o.id === value) ||
+    (value ? { id: value, label: value } : null) ||
+    options[0] || { id: "", label: "—" };
 
   const measure = useCallback(() => {
     const el = triggerRef.current;
@@ -180,8 +211,13 @@ export function ConfigSelect({ label, value, options, onChange }) {
     }
   };
 
-  const select = (id) => {
-    onChange(id);
+  // An option may be present-but-unselectable (a local engine listed under the
+  // Codex harness — up, publishing models, and unreachable by that CLI). It is
+  // still RENDERED, because omitting it is what "down" looks like and the
+  // engine is not down; it just cannot be chosen, and the row says why.
+  const select = (o) => {
+    if (o.disabled) return;
+    onChange(o.id);
     close();
   };
 
@@ -250,19 +286,28 @@ export function ConfigSelect({ label, value, options, onChange }) {
                   key={o.id}
                   ref={(el) => { optionRefs.current[i] = el; }}
                   type="button"
-                  onClick={() => select(o.id)}
+                  onClick={() => select(o)}
                   onKeyDown={(e) => onOptionKeyDown(e, i)}
                   onFocus={() => setActiveIndex(i)}
                   aria-current={o.id === value ? "true" : undefined}
+                  aria-disabled={o.disabled ? "true" : undefined}
+                  title={o.reason || undefined}
                   className="w-full text-left hover-bg-surface"
                   style={{
                     fontSize: 12,
                     fontWeight: o.id === value ? 600 : 400,
                     padding: "6px 11px",
-                    color: o.id === value ? "var(--cc-accent)" : "var(--cc-dim)",
+                    color: o.disabled
+                      ? "var(--cc-muted)"
+                      : o.id === value
+                        ? "var(--cc-accent)"
+                        : "var(--cc-dim)",
                     background: "none",
                     border: "none",
-                    cursor: "pointer",
+                    // `not-allowed` rather than `pointer`: the row is reachable
+                    // by keyboard and mouse and answers with its reason, but
+                    // clicking it will not change the selection.
+                    cursor: o.disabled ? "not-allowed" : "pointer",
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -280,6 +325,14 @@ export function ConfigSelect({ label, value, options, onChange }) {
 export default function NewSessionDialog({
   recentLocations = [],
   savedLocations = [],
+  // The TopBar's CURRENT settings. The dialog opens on them so that creating a
+  // session without touching these selects produces exactly what the command bar
+  // already advertised — the selects are per-session overrides, not a second,
+  // competing set of defaults.
+  defaultModel,
+  defaultPermissionMode,
+  defaultEffort,
+  defaultHarness,
   onConfirm,
   onCancel,
 }) {
@@ -297,13 +350,43 @@ export default function NewSessionDialog({
   // ModelCatalogProvider), the static shared fallback otherwise — the same list
   // the command bar's model picker shows, never a fifth hand-written copy.
   const catalog = useModelCatalog();
-  const modelOptions =
-    catalog?.models?.length > 0
-      ? catalog.models.map((m) => ({ id: m.id, label: m.label || m.id }))
-      : [];
-  const [modelSel, setModelSel] = useState(catalog?.models?.[0]?.id ?? "");
-  const [permissionSel, setPermissionSel] = useState(PERMISSION_OPTIONS[0].id);
-  const [effortSel, setEffortSel] = useState(EFFORT_OPTIONS[0].id);
+  const [harnessSel, setHarnessSel] = useState(defaultHarness || DEFAULT_HARNESS);
+  // NOT `catalog.models[0].id`. That was the same "substitute a plausible
+  // model" defect the TopBar pill had: the dialog silently proposed whichever
+  // model happened to sort first, and (while these selects were decorative) the
+  // session then spawned on something else entirely. The initial value is the
+  // caller's actual current model, full stop.
+  const [modelSel, setModelSel] = useState(defaultModel || "");
+  const [permissionSel, setPermissionSel] = useState(
+    defaultPermissionMode || PERMISSION_OPTIONS[0].id
+  );
+  const [effortSel, setEffortSel] = useState(defaultEffort || EFFORT_OPTIONS[0].id);
+
+  // Narrowed by harness through the SAME pure function the TopBar picker uses,
+  // so the two surfaces cannot drift into offering different model lists for
+  // one harness. Flattened because ConfigSelect is a flat listbox; a group's
+  // `note` rides down onto each of its rows so the reason survives flattening.
+  const modelOptions = groupsForHarness(catalog?.groups, harnessSel).flatMap((g) =>
+    (g?.models || []).map((m) => ({
+      id: m.id,
+      label: m.label || m.id,
+      disabled: m.selectable === false,
+      reason: m.unavailableReason || g?.note,
+    }))
+  );
+
+  /**
+   * Switching harness resets the model ONLY when the current one cannot run on
+   * the new harness. A blanket reset would stomp a perfectly valid OpenRouter or
+   * local selection — those are `getModelHarness() === "any"` precisely because
+   * both CLIs can reach them — and silently re-pick a model the user did not ask
+   * for, which is the class of substitution this whole change removes.
+   */
+  const changeHarness = (next) => {
+    setHarnessSel(next);
+    const owner = getModelHarness(modelSel);
+    if (owner !== "any" && owner !== next) setModelSel(defaultModelForHarness(next));
+  };
   const [validation, setValidation] = useState({ state: "unknown", error: "" });
   const [git, setGit] = useState(null);
   const pathInputRef = useRef(null);
@@ -365,9 +448,17 @@ export default function NewSessionDialog({
   const handleSubmit = useCallback(
     (e) => {
       e?.preventDefault?.();
-      onConfirm(name.trim(), workdir.trim(), bypassPermissions);
+      // The 4th argument is per-session OVERRIDES. The first three are byte-for
+      // -byte what they always were, so any caller that ignores the 4th keeps
+      // working — but App.jsx reads it, which is what makes these selects real.
+      onConfirm(name.trim(), workdir.trim(), bypassPermissions, {
+        model: modelSel,
+        permissionMode: permissionSel,
+        effort: effortSel,
+        harness: harnessSel,
+      });
     },
-    [bypassPermissions, name, onConfirm, workdir]
+    [bypassPermissions, effortSel, harnessSel, modelSel, name, onConfirm, permissionSel, workdir]
   );
 
   const handleKeyDown = (e) => {
@@ -610,6 +701,15 @@ export default function NewSessionDialog({
                   }}
                 />
               </div>
+              {/* Harness sits LEFT of Model, matching the TopBar's ordering:
+                  it decides which CLI runs, and therefore which models the next
+                  select may offer. */}
+              <ConfigSelect
+                label="Harness"
+                value={harnessSel}
+                options={HARNESSES}
+                onChange={changeHarness}
+              />
               <ConfigSelect label="Model" value={modelSel} options={modelOptions} onChange={setModelSel} />
               <ConfigSelect
                 label="Permission"
