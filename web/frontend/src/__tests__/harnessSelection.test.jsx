@@ -26,6 +26,7 @@ import {
   CODEX_MODEL_GROUPS,
   CODEX_LOCAL_UNSUPPORTED_NOTE,
   DEFAULT_HARNESS,
+  DEFAULT_MODEL_ID,
   FALLBACK_MODEL_GROUPS,
   HARNESSES,
   OPENROUTER_GROUP,
@@ -174,7 +175,13 @@ describe("Codex catalog — retired ids are absent", () => {
     expect(getModelHarness("deepseek/deepseek-v4-pro")).toBe("any");
     expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("any");
     expect(defaultModelForHarness("codex")).toBe("gpt-5.6-terra");
-    expect(defaultModelForHarness("claude-code")).toBe("sonnet");
+    // WAS "sonnet". That bare alias is exactly the id GET /api/models never
+    // returns, which is how the pill came to render "Opus 5" for a Sonnet
+    // session; the Claude Code fallback is now the REAL catalog id, and it is
+    // the SAME constant as the fresh-install default (see
+    // modelHonesty.test.jsx for the drift guard).
+    expect(defaultModelForHarness("claude-code")).toBe(DEFAULT_MODEL_ID);
+    expect(DEFAULT_MODEL_ID).toBe("claude-sonnet-5");
     expect(DEFAULT_HARNESS).toBe("claude-code");
   });
 });

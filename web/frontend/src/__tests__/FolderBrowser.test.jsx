@@ -33,6 +33,19 @@ import NewSessionDialog from "../components/NewSessionDialog";
 // which is how it came to offer only four of the six effort levels.
 import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
 
+/* The 4th onConfirm argument, as it looks when the caller passes NO default*
+ * props and the user touches none of the four selects. Spelled out (not
+ * expect.anything()) because the whole point of the contract change is WHICH
+ * values travel: a test that accepts any object would keep passing if the
+ * dialog started submitting a substituted model. `model: ""` is the honest
+ * "nothing chosen here" -- App.jsx then falls back to the command bar's model. */
+const DEFAULT_OVERRIDES = {
+  model: "",
+  permissionMode: PERMISSION_MODES[0].id,
+  effort: EFFORT_OPTIONS[0].id,
+  harness: "claude-code",
+};
+
 const entry = (name, over = {}) => ({
   name,
   path: `C:\\Code\\${name}`,
@@ -368,7 +381,7 @@ describe("NewSessionDialog", () => {
     return { ...utils, onConfirm, onCancel };
   };
 
-  it("fires onConfirm with the same (name, workdir, bypass) shape as before", async () => {
+  it("fires onConfirm with the trimmed (name, workdir, bypass) plus per-session overrides", async () => {
     const { onConfirm } = await renderDialog({
       savedLocations: [],
       recentLocations: ["C:\\Code\\web"],
@@ -376,7 +389,7 @@ describe("NewSessionDialog", () => {
     fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "  api  " } });
     fireEvent.click(screen.getByRole("button", { name: "Create session" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
-    expect(onConfirm.mock.calls[0]).toEqual(["api", "C:\\Code\\web", false]);
+    expect(onConfirm.mock.calls[0]).toEqual(["api", "C:\\Code\\web", false, DEFAULT_OVERRIDES]);
   });
 
   it("inherits bypass from a saved location and labels it as inherited", async () => {
@@ -386,7 +399,7 @@ describe("NewSessionDialog", () => {
       "true"
     );
     fireEvent.click(screen.getByRole("button", { name: "Create session" }));
-    expect(onConfirm.mock.calls[0]).toEqual(["", "C:\\Code\\web", true]);
+    expect(onConfirm.mock.calls[0]).toEqual(["", "C:\\Code\\web", true, DEFAULT_OVERRIDES]);
   });
 
   it("a manual bypass flip wins over folder inheritance", async () => {
@@ -407,7 +420,7 @@ describe("NewSessionDialog", () => {
       )
     );
     fireEvent.click(screen.getByRole("button", { name: "Create session" }));
-    expect(onConfirm.mock.calls[0]).toEqual(["", "C:\\Other\\repo", false]);
+    expect(onConfirm.mock.calls[0]).toEqual(["", "C:\\Other\\repo", false, DEFAULT_OVERRIDES]);
   });
 
   it("validates the selected folder as exists · git repo", async () => {
@@ -499,10 +512,13 @@ describe("NewSessionDialog", () => {
     expect(screen.getByRole("button", { name: "Opus 5" })).toBeInTheDocument();
   });
 
-  it("still passes ONLY (name, workdir, bypass) after the vocabulary migration", async () => {
-    // The selects remain display-only on purpose: App.jsx destructures onConfirm
-    // positionally and applies the global command-bar settings itself. Widening
-    // the menus must not start submitting them.
+  it("passes the first THREE args unchanged and a 4th overrides object carrying the selects", async () => {
+    // THIS TEST'S PURPOSE INVERTED. It used to pin that the Model / Permission /
+    // Effort selects were display-only -- "widening the menus must not start
+    // submitting them". That was a defect wearing a design's clothes: a user who
+    // picked Max effort here got whatever the command bar was set to, silently.
+    // What still must not change is the first three arguments, in order and
+    // meaning; the 4th is ADDITIVE, so every pre-existing caller is unaffected.
     const { onConfirm } = await renderDialog({
       savedLocations: [],
       recentLocations: ["C:\\Code\\web"],
@@ -511,8 +527,14 @@ describe("NewSessionDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Max" }));
     fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "api" } });
     fireEvent.click(screen.getByRole("button", { name: "Create session" }));
-    expect(onConfirm.mock.calls[0]).toEqual(["api", "C:\\Code\\web", false]);
-    expect(onConfirm.mock.calls[0]).toHaveLength(3);
+
+    const call = onConfirm.mock.calls[0];
+    expect(call).toHaveLength(4);
+    // The unchanged half of the contract.
+    expect(call.slice(0, 3)).toEqual(["api", "C:\\Code\\web", false]);
+    // The new half, pinned as an exact shape rather than expect.anything(): the
+    // user chose Max, so "max" -- not the default -- is what must travel.
+    expect(call[3]).toEqual({ ...DEFAULT_OVERRIDES, effort: "max" });
   });
 
   it("does not crash with no recent or saved locations", async () => {
