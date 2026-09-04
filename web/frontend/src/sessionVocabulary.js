@@ -69,3 +69,28 @@ export const EFFORT_OPTIONS = [
   { id: "xhigh", label: "XHigh" },
   { id: "max", label: "Max" },
 ];
+
+/**
+ * Resolve a stored vocabulary id to something safe to DISPLAY.
+ *
+ * The same defect the model pill carried for weeks (R-169: `modelList.find(...)
+ * || modelList[0]` rendered "Opus 5" while the session spawned `sonnet`) applies
+ * verbatim to these lists, and it is NOT hypothetical here. `pty_manager.py`'s
+ * _ALLOWED_PERMISSION_MODES accepts `auto` and `dontAsk`; PERMISSION_MODES above
+ * lists neither. A workspace holding `cockpit-permission-mode: "auto"` therefore
+ * rendered "Ask" — the FIRST entry — while every session it launched carried
+ * "auto". Same shape, one vocabulary over, and these values all come from
+ * localStorage, which survives restart and has no recovery UI.
+ *
+ * So: `|| options[0]` is banned for a SET value. An unrecognised id is returned
+ * AS ITSELF with `known: false`, and the caller flags it. An EMPTY id is a
+ * genuine "nothing chosen" and still resolves to the first option — that is what
+ * EFFORT_OPTIONS' `{ id: "" }` entry means, and it is a real choice, not a miss.
+ */
+export function resolveVocabChoice(id, options) {
+  const option = options.find((o) => o.id === id);
+  if (option) return { option, label: option.label, known: true };
+  // "" (and null/undefined) are unset, not unrecognised — no lie is possible.
+  if (!id) return { option: options[0], label: options[0].label, known: true };
+  return { option: null, label: id, known: false };
+}

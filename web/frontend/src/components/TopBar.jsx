@@ -18,6 +18,7 @@ import {
   HARNESSES,
   DEFAULT_HARNESS,
   groupsForHarness,
+  resolveModelSelection,
 } from "../modelCatalog";
 // Lane math lives in utils/laneMath.js so the Workspace lane meter, this
 // quick-glance pill and Engine > Live all read the same arithmetic (see the
@@ -27,7 +28,7 @@ import { fmtEta, laneLive } from "../utils/laneMath";
 // Permission modes + effort levels live in a plain module for the same reason
 // the model list lives in modelCatalog: four files had forked them and two had
 // drifted. See sessionVocabulary.js for the full history.
-import { PERMISSION_MODES, EFFORT_OPTIONS } from "../sessionVocabulary";
+import { PERMISSION_MODES, EFFORT_OPTIONS, resolveVocabChoice } from "../sessionVocabulary";
 
 // Re-exported for back-compat: PaneActionsMenu and the test suite import the
 // static model list from here. The LIVE, account-accurate catalog flows through
@@ -43,6 +44,15 @@ export { isOpusModel, getModelProvider };
 // without pulling in the TopBar tree). New consumers should import from
 // sessionVocabulary directly; these names stay so existing imports keep working.
 export { PERMISSION_MODES, EFFORT_OPTIONS };
+
+/** Title for a pill whose model id is in no catalog, for any harness. It states
+ *  the one fact that matters — the id is passed through VERBATIM — rather than
+ *  implying the selection is broken: an id newer than this build is unknown here
+ *  and perfectly launchable, and the pill has no way to tell those apart. What
+ *  it must never do is show a different model's name, which is what the old
+ *  `|| modelList[0]` fallback did. */
+export const MODEL_UNKNOWN_TITLE =
+  "This id is not in the model catalog. A new session will be spawned on it exactly as written.";
 
 export default function TopBar({
   // Which CLI a new session is spawned against ("claude-code" | "codex"). The
@@ -107,21 +117,38 @@ export default function TopBar({
   const [openRouterConfigured, setOpenRouterConfigured] = useState(null);
 
   // Live, account-accurate catalog (falls back to the static list offline).
-  const { groups: modelGroups, models: modelList } = useModelCatalog();
+  const { groups: modelGroups } = useModelCatalog();
   // The picker only OFFERS what the selected harness can run, but the pill's
   // label is looked up against the FULL list: a selection the harness cannot
   // run must still render its own name rather than silently reading as the
   // first model in the filtered list, which is a different session entirely.
   const visibleGroups = groupsForHarness(modelGroups, harness);
-  const currentHarness = HARNESSES.find((h) => h.id === harness) || HARNESSES[0];
-  const isCodexHarness = currentHarness.id === "codex";
-  const currentModel = modelList.find((m) => m.id === model) || modelList[0];
-  const currentPermission = PERMISSION_MODES.find((p) => p.id === permissionMode) || PERMISSION_MODES[0];
-  const currentEffort = EFFORT_OPTIONS.find((e) => e.id === effort) || EFFORT_OPTIONS[0];
+  // Same rule as the model pill below, for the same measured reason (R-169):
+  // never render a DIFFERENT entry for an id we do not recognise. These three
+  // all come from localStorage, and the permission vocabulary genuinely drifts
+  // -- pty_manager accepts `auto`/`dontAsk`, which PERMISSION_MODES omits.
+  const currentHarness = resolveVocabChoice(harness, HARNESSES);
+  const isCodexHarness = harness === "codex";
+  // NOT `modelList.find(...) || modelList[0]`. That fallback rendered the first
+  // catalog entry ("Opus 5") whenever the id was unrecognized — which the bare
+  // alias "sonnet" always is, since /api/models returns only dated ids — so the
+  // pill named a model the session was NOT spawning on. resolveModelSelection
+  // searches every harness (Codex ids are excluded from modelList by design) and
+  // otherwise reports the id AS ITSELF with known:false. See modelCatalog.
+  const modelSelection = resolveModelSelection(model, modelGroups);
+  const currentModel = modelSelection.entry;
+  const modelUnknown = !modelSelection.known;
+  const currentPermission = resolveVocabChoice(permissionMode, PERMISSION_MODES);
+  const currentEffort = resolveVocabChoice(effort, EFFORT_OPTIONS);
   // The selected default names a local model the engine is not serving. Any
   // session spawned on it fails at request time, so the pill has to say so
   // where the selection lives — a neutral "· not loaded" suffix reads as trivia.
+  // Keys off the resolved ENTRY: a null entry means "not in the catalog", which
+  // is a different statement from "in the catalog and not being served".
   const selectionUnserved = isUnservedSelection(currentModel);
+  // Both states get the same warning treatment on the pill: something about
+  // this selection needs the user's eye before they spawn on it.
+  const modelFlagged = selectionUnserved || modelUnknown;
   const modelProvider = getModelProvider(model);
   const isOpenRouterModel = modelProvider === "openrouter";
   // Codex exposes no fast mode at all, so the toggle is dead there for the same
@@ -525,26 +552,30 @@ export default function TopBar({
           onClick={() => { closeAll(); setModelOpen((v) => !v); }}
           className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
           style={{
-            color: selectionUnserved ? "var(--cc-waiting, var(--text-secondary))" : "var(--text-secondary)",
-            border: `1px solid ${selectionUnserved ? "var(--cc-waiting, var(--border-color))" : "var(--border-color)"}`,
-            backgroundColor: selectionUnserved
+            color: modelFlagged ? "var(--cc-waiting, var(--text-secondary))" : "var(--text-secondary)",
+            border: `1px solid ${modelFlagged ? "var(--cc-waiting, var(--border-color))" : "var(--border-color)"}`,
+            backgroundColor: modelFlagged
               ? "color-mix(in srgb, var(--cc-waiting, #0f1216) 12%, var(--bg-surface))"
               : "var(--bg-surface)",
           }}
           aria-label={
             selectionUnserved
-              ? `Model: ${currentModel.label} — not being served, sessions will fail`
-              : `Model: ${currentModel.label}`
+              ? `Model: ${modelSelection.label} — not being served, sessions will fail`
+              : modelUnknown
+                ? `Model: ${modelSelection.label} — not in the model catalog`
+                : `Model: ${modelSelection.label}`
           }
           title={
             selectionUnserved
               ? "The engine is not serving this model — a new session on it will fail. Pick the served model, or restart the engine with this one."
-              : undefined
+              : modelUnknown
+                ? MODEL_UNKNOWN_TITLE
+                : undefined
           }
           aria-expanded={modelOpen}
           aria-haspopup="listbox"
         >
-          {currentModel.label}
+          {modelSelection.label}
           <ChevronDown size={10} />
         </button>
         {modelOpen && (

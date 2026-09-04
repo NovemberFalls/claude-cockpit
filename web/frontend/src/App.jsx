@@ -1,7 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
 import TopBar, { getModelProvider, MODELS } from "./components/TopBar";
-import { parseLocalModelId, DEFAULT_HARNESS, getModelHarness, defaultModelForHarness } from "./modelCatalog";
+import {
+  parseLocalModelId,
+  DEFAULT_HARNESS,
+  getModelHarness,
+  defaultModelForHarness,
+  useModelCatalog,
+  findModelEntry,
+  MODEL_ALIASES,
+  DEFAULT_MODEL_ID,
+} from "./modelCatalog";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
 import NewSessionDialog from "./components/NewSessionDialog";
@@ -37,6 +46,12 @@ const SESSIONS_KEY = "cockpit-sessions";
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 const WORKSPACES_KEY = "cockpit-workspaces";
 const MODEL_KEY = "cockpit-model";
+/* Fresh-install default. A REAL catalog id, not the bare alias "sonnet" this
+ * used to be: the alias is a legitimate CLI value but appears in no catalog, so
+ * every display surface had to substitute something — and the substitute it
+ * picked was "Opus 5". Same FAMILY as the old default on purpose; silently
+ * upgrading a new user to Opus would change what their sessions cost. */
+
 const HARNESS_KEY = "cockpit-harness";
 const PERMISSION_MODE_KEY = "cockpit-permission-mode";
 const EFFORT_KEY = "cockpit-effort";
@@ -250,8 +265,43 @@ export default function App() {
   });
   const [zoomToast, setZoomToast] = useState(null);
   const zoomToastTimer = useRef(null);
-  const [model, setModel] = useState(() => lsLoad(MODEL_KEY, "sonnet"));
+  const [model, setModel] = useState(() => lsLoad(MODEL_KEY, DEFAULT_MODEL_ID));
   useEffect(() => { lsSave(MODEL_KEY, model); }, [model]);
+  // The live catalog, read here ONLY to sanity-check the persisted selection —
+  // the picker itself still owns display. `source` is what makes the check safe
+  // to run at all (see the migration below).
+  const { groups: modelGroups, source: modelCatalogSource } = useModelCatalog();
+  const modelMigrationDone = useRef(false);
+  // ONE-TIME REPAIR of a stored id that names no model anywhere.
+  //
+  // Deliberately narrow, because getting it wrong silently changes which model
+  // the user's sessions run on:
+  //   - It NEVER runs against the fallback catalog. FALLBACK_MODEL_GROUPS is a
+  //     small static list; a perfectly valid live-only id looks unknown to it,
+  //     and "migrating" would throw away a working selection while offline.
+  //   - A bare alias ("sonnet") is LEFT ALONE. `claude --model sonnet` works;
+  //     rewriting it to a dated id changes which model the user gets, which is
+  //     the same class of silent substitution this whole change removes.
+  //   - local:/openrouter ids are left alone: their catalog groups come and go
+  //     with provider reachability, so absence is not evidence of invalidity.
+  //   - The ref guards a second run, so a catalog refresh mid-session cannot
+  //     stomp a selection the user made in the meantime.
+  useEffect(() => {
+    if (modelMigrationDone.current) return;
+    if (modelCatalogSource === "fallback") return;
+    if (getModelProvider(model) !== "anthropic") { modelMigrationDone.current = true; return; }
+    if (MODEL_ALIASES[model] || findModelEntry(model, modelGroups)) {
+      modelMigrationDone.current = true;
+      return;
+    }
+    modelMigrationDone.current = true;
+    const replacement = defaultModelForHarness(harness);
+    setModel(replacement);
+    toast(`Model "${model}" is not in the catalog — reset to ${replacement}`, "info");
+    // harness/toast are read, not tracked: re-running on a harness change would
+    // be a SECOND migration, which the ref already forbids.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelCatalogSource, modelGroups, model]);
   const [harness, setHarness] = useState(() => lsLoad(HARNESS_KEY, DEFAULT_HARNESS));
   useEffect(() => { lsSave(HARNESS_KEY, harness); }, [harness]);
   // Switching harness only touches the model when the current one CANNOT run on
@@ -596,6 +646,13 @@ export default function App() {
     const sessionName = name || `Session ${localId}`;
     const dir = workdir || "C:\\Code";
     const useModel = sessionModel || model;
+    // Per-session overrides from the New Session dialog. Each falls back to the
+    // TopBar state, so every existing caller (which passes none) is unchanged.
+    // `??` not `||`: effort's "" is a real value meaning "no effort flag", and
+    // `||` would silently promote it to the TopBar's setting.
+    const usePermissionMode = options.permissionMode ?? permissionMode;
+    const useEffort = options.effort ?? effort;
+    const useHarness = options.harness ?? harness;
 
     addLocations([dir]);
 
@@ -642,10 +699,10 @@ export default function App() {
         // corrects this immediately after mount.
         cols: DEFAULT_SPAWN_COLS,
         rows: DEFAULT_SPAWN_ROWS,
-        permissionMode,
-        effort,
+        permissionMode: usePermissionMode,
+        effort: useEffort,
         // Which CLI to spawn ("claude-code" | "codex"); the backend validates it.
-        harness,
+        harness: useHarness,
         fast: isOpus && fast,
         ...(getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
@@ -2877,9 +2934,19 @@ export default function App() {
           <NewSessionDialog
             recentLocations={recentLocations}
             savedLocations={savedLocations}
-            onConfirm={(name, workdir, bypassPermissions) => {
+            // The dialog OPENS on the TopBar's current settings rather than an
+            // arbitrary first catalog entry — the same "never substitute a
+            // plausible model" rule the pill now follows.
+            defaultModel={model}
+            defaultPermissionMode={permissionMode}
+            defaultEffort={effort}
+            defaultHarness={harness}
+            onConfirm={(name, workdir, bypassPermissions, overrides) => {
               setShowNewDialog(false);
-              createSession(name, workdir, undefined, { bypassPermissions });
+              // The dialog's Model/Permission/Effort/Harness selects used to be
+              // decorative. They are wired now, so the dialog's choice — not the
+              // TopBar's — is what this session spawns on.
+              createSession(name, workdir, overrides?.model, { bypassPermissions, ...overrides });
             }}
             onCancel={() => setShowNewDialog(false)}
           />

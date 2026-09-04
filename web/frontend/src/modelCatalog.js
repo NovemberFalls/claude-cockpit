@@ -496,8 +496,95 @@ export function groupsForHarness(groups, harness) {
   return [...CODEX_MODEL_GROUPS, ...openrouter, ...local];
 }
 
+/** The model a FRESH install starts on, and the Claude Code fallback.
+ *
+ *  A REAL catalog id, never the bare alias "sonnet". Both spawn the same model
+ *  -- `claude --model sonnet` is valid and resolveModelSelection renders the
+ *  alias honestly -- but they render DIFFERENTLY ("Sonnet 5" vs "Sonnet
+ *  (alias)"), and a user who switched harness away and back would silently
+ *  change how their unchanged selection is labelled. It lives here rather than
+ *  in App.jsx because defaultModelForHarness needs the same value, and two
+ *  constants for one default is the drift this catalog exists to prevent. */
+export const DEFAULT_MODEL_ID = "claude-sonnet-5";
+
 /** The model a session falls back to when the current selection is not valid
  *  for the harness being switched to. */
 export function defaultModelForHarness(harness) {
-  return harness === "codex" ? "gpt-5.6-terra" : "sonnet";
+  return harness === "codex" ? "gpt-5.6-terra" : DEFAULT_MODEL_ID;
+}
+
+/* ── Honest resolution of a stored model id ───────────────────────────────────
+ *
+ * THE DEFECT THIS SECTION EXISTS TO REMOVE, measured 2026-09-04: the pill did
+ * `modelList.find((m) => m.id === model) || modelList[0]`. The persisted default
+ * was the bare alias "sonnet", which GET /api/models never returns, so the
+ * lookup missed and the pill rendered modelList[0] — "Opus 5" — while the POST
+ * body still carried "sonnet" and the CLI spawned `claude --model sonnet`. The
+ * user read the pill and believed they were on Opus for weeks.
+ *
+ * Substituting a DIFFERENT model when the id is unrecognized is the same class
+ * of false claim as reporting a refused credential as `reachable: false` (see
+ * UNAUTHORIZED_NOTE) or drawing a 0% bar for an unknown quota. The rule here is
+ * the same one those notes encode: show the truth, or show that it is unknown —
+ * never a plausible-looking substitute.
+ */
+
+/** Bare CLI aliases. `claude --model sonnet` is a LEGITIMATE, working value
+ *  that Anthropic's /v1/models list does not contain, so an aliased selection
+ *  is neither a catalog hit nor a mistake — it is a third case, and it needs a
+ *  label of its own or it renders as another model's name.
+ *
+ *  Mapped to the FAMILY, not to a dated id, deliberately: rewriting "sonnet" to
+ *  "claude-sonnet-5" would pin the user to whatever was current the day this
+ *  file was edited, whereas the alias follows Anthropic's own pointer. The
+ *  alias is a different (and often better) choice, not a stale one. */
+export const MODEL_ALIASES = {
+  opus: "Opus",
+  sonnet: "Sonnet",
+  haiku: "Haiku",
+};
+
+/** Resolves `id` to its catalog entry across EVERY harness — the supplied
+ *  `groups` (live or fallback anthropic + openrouter + local) AND the static
+ *  CODEX_MODEL_GROUPS, which useModelCatalog() deliberately excludes so the
+ *  Claude Code picker does not offer models it cannot launch. That exclusion is
+ *  right for OFFERING and wrong for LABELLING: a Codex id is a real selection
+ *  and must render its own name, not the first Anthropic entry.
+ *
+ *  Returns the entry or null. It NEVER returns a different model as a
+ *  consolation prize — that substitution is the whole bug. */
+export function findModelEntry(id, groups) {
+  if (typeof id !== "string" || !id) return null;
+  const lists = [Array.isArray(groups) && groups.length > 0 ? groups : FALLBACK_MODEL_GROUPS, CODEX_MODEL_GROUPS];
+  for (const list of lists) {
+    for (const group of list) {
+      for (const model of group?.models || []) {
+        if (model?.id === id) return model;
+      }
+    }
+  }
+  return null;
+}
+
+/** The ONE resolver every surface that DISPLAYS a model selection uses (TopBar
+ *  pill, New Session dialog). Three outcomes, kept distinct because they call
+ *  for three different things on screen:
+ *
+ *    catalog hit -> { entry, label: entry.label, known: true,  isAlias: false }
+ *    bare alias  -> { entry: null, label: "Sonnet (alias)", known: true, isAlias: true }
+ *    anything else -> { entry: null, label: id, known: false, isAlias: false }
+ *
+ *  The third case renders the id AS ITSELF. It looks unpolished, and that is the
+ *  point: a raw id on screen is a true statement about what a new session will
+ *  spawn on, where a tidy "Opus 5" was a false one. Callers flag `known: false`
+ *  visually (see TopBar) so the user can tell "unusual" from "wrong".
+ *
+ *  A null/empty id resolves to known: false with an empty label rather than
+ *  throwing — a display path must not be able to blank the whole bar. */
+export function resolveModelSelection(id, groups) {
+  const entry = findModelEntry(id, groups);
+  if (entry) return { entry, label: entry.label, known: true, isAlias: false };
+  const family = typeof id === "string" ? MODEL_ALIASES[id] : undefined;
+  if (family) return { entry: null, label: `${family} (alias)`, known: true, isAlias: true };
+  return { entry: null, label: typeof id === "string" ? id : "", known: false, isAlias: false };
 }
