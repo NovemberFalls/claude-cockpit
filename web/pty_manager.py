@@ -215,6 +215,78 @@ def resolve_claude_cli(search_path: str) -> tuple[str, str]:
     )
 
 
+# Environment override for the OpenAI `codex` CLI, mirroring
+# _CLAUDE_CLI_PATH_ENV. Separate variable because the two harnesses are
+# separate installs — a user can have one somewhere unusual and not the other.
+_CODEX_CLI_PATH_ENV = "COCKPIT_CODEX_CLI_PATH"
+
+
+class CodexCliNotFound(FileNotFoundError):
+    """Raised when no `codex` executable can be located.
+
+    Mirrors ClaudeCliNotFound exactly (including `.searched`) so server.py's
+    existing `except FileNotFoundError` fallback still catches it, while a
+    harness-aware caller can report which CLI was missing.
+    """
+
+    def __init__(self, message: str, searched: list[str] | None = None):
+        super().__init__(message)
+        self.searched = searched or []
+
+
+def resolve_codex_cli(search_path: str) -> tuple[str, str]:
+    """Locate the `codex` executable.
+
+    Same contract as resolve_claude_cli: returns ``(codex_exe,
+    effective_path)`` with the path extended when the CLI had to be found via
+    the fallback probe, because the child resolves `codex` off PATH.
+
+    Reuses ``_candidate_claude_dirs()`` deliberately and WITHOUT renaming it:
+    that list is a npm-global / user-bin directory list, not a Claude-specific
+    one, and `codex` ships via `npm install -g` into exactly those same
+    directories. Duplicating it would give us two lists to keep in sync.
+    """
+    override = os.environ.get(_CODEX_CLI_PATH_ENV, "").strip().strip('"')
+    if override:
+        if os.path.isfile(override):
+            override_dir = os.path.dirname(os.path.abspath(override))
+            logger.info("Using %s override: %s", _CODEX_CLI_PATH_ENV, override)
+            return override, override_dir + os.pathsep + search_path
+        raise CodexCliNotFound(
+            f"{_CODEX_CLI_PATH_ENV} is set to {override!r} but no file exists "
+            "there. Point it at the full path of the `codex` executable, or "
+            "unset it to fall back to PATH discovery.",
+            [override],
+        )
+
+    found = shutil.which("codex", path=search_path)
+    if found:
+        return found, search_path
+
+    searched = _candidate_claude_dirs()
+    for directory in searched:
+        if not os.path.isdir(directory):
+            continue
+        found = shutil.which("codex", path=directory)
+        if found:
+            logger.warning(
+                "`codex` was not on the inherited PATH; found it at %s via the "
+                "fallback probe. Cockpit's PATH is likely stale — restarting it "
+                "from a fresh shell avoids this lookup.",
+                found,
+            )
+            return found, directory + os.pathsep + search_path
+
+    raise CodexCliNotFound(
+        "Could not find the `codex` CLI. Install it with "
+        "`npm install -g @openai/codex`, then restart Plexar Studio so it "
+        "picks up the new PATH. If `codex` is installed somewhere unusual, "
+        f"set the {_CODEX_CLI_PATH_ENV} environment variable to its full "
+        "path. Searched PATH plus: " + ", ".join(searched),
+        searched,
+    )
+
+
 # Regex to strip ANSI escape sequences
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\].*?\x1b\\")
 # Patterns for state detection
@@ -371,6 +443,10 @@ class TerminalSession:
     created_at: str
     model: str = "sonnet"
     provider: str = "anthropic"  # "anthropic" | "openrouter" — for display + reroute detection
+    # Which CLI this PTY is actually running: "claude-code" | "codex". Defaults
+    # to the historical value so every existing construction site (tests, the
+    # bridge fixtures) keeps meaning what it meant.
+    harness: str = "claude-code"
     working_dir: str = ""
     claude_session_id: Optional[str] = None  # for --resume
     bypass_permissions: bool = False
@@ -475,6 +551,22 @@ _SESSION_ID_RE = re.compile(r"^[a-f0-9\-]{8,64}$", re.IGNORECASE)
 # endpoint via env vars; see create_terminal()), or "local" (reroutes onto a
 # local inference server — LM Studio or vLLM — via ANTHROPIC_BASE_URL).
 _ALLOWED_PROVIDERS = {"anthropic", "openrouter", "local"}
+
+# Allowed harnesses — which CLI is spawned in the PTY. "claude-code" is the
+# default and the historical behaviour; "codex" spawns OpenAI's `codex` CLI
+# instead. The harness is orthogonal to the provider: a codex session can still
+# be routed at OpenRouter, which is why this is a separate dimension rather
+# than another _ALLOWED_PROVIDERS value.
+_ALLOWED_HARNESSES = {"claude-code", "codex"}
+
+# Codex model-id validator. The Anthropic regex does not apply: Codex ids carry
+# no "[1m]" long-context suffix, and their catalog is static (Codex publishes no
+# live /v1/models route we consume), so a closed allowlist here would drift the
+# same way the Anthropic one did. Same anti-injection intent though — the id is
+# interpolated into the cmd string after `-m`, so the first character must be
+# alphanumeric to block a "--flag"-shaped value, and the remainder is limited to
+# a charset with no spaces/quotes/semicolons/slashes.
+_CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 # OpenRouter model slug format: "<vendor>/<model>", e.g. "qwen/qwen3-coder-next"
 # or "anthropic/claude-3.7-sonnet:beta". Vendor segment must start with an
@@ -738,6 +830,7 @@ class PtyManager:
         workdir: str = "",
         model: str = "sonnet",
         provider: str = "anthropic",
+        harness: str = "claude-code",
         provider_model: str = "",
         resume_session_id: str = "",
         continue_last: bool = False,
@@ -761,6 +854,14 @@ class PtyManager:
             OpenRouter slugs are not valid ``--model`` values, so ``--model``
             is omitted entirely and the ``model`` param is ignored (it is
             not even allowlist-validated for this provider).
+
+        harness selects which CLI is spawned:
+          - "claude-code" (default): the `claude` CLI, unchanged behaviour.
+          - "codex": OpenAI's `codex` CLI. Orthogonal to ``provider`` —
+            provider="anthropic" means "Codex's own backend" here, and
+            provider="openrouter" reroutes it via Codex's custom
+            model_provider config. provider="local" is REFUSED (Codex speaks
+            the Responses API; the local engines serve Chat Completions).
         """
         if len(self.sessions) >= MAX_SESSIONS:
             raise RuntimeError(f"Maximum session limit ({MAX_SESSIONS}) reached")
@@ -769,6 +870,19 @@ class PtyManager:
         # branch below depends on knowing which provider we're spawning for.
         if provider not in _ALLOWED_PROVIDERS:
             raise ValueError(f"Invalid provider: {provider!r}")
+        # Validated here too, beside provider, because the two together decide
+        # every branch below — the model validator, the command build, and
+        # which CLI gets resolved.
+        if harness not in _ALLOWED_HARNESSES:
+            raise ValueError(f"Invalid harness: {harness!r}")
+        if harness == "codex" and provider == "local":
+            # Defense in depth: the frontend renders local models as
+            # non-selectable under Codex, but a direct POST must not get a
+            # session whose every turn 404s on a Responses-API call.
+            raise ValueError(
+                "Local providers are not supported by the Codex harness — "
+                "switch to Claude Code."
+            )
 
         # Generated up front (not down with the rest of the session fields
         # below) so the provider="local" branch can pass it into
@@ -818,6 +932,12 @@ class PtyManager:
             local_base_url = _server.resolve_local_base_url(local_provider_id, terminal_id)
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
+        elif harness == "codex":
+            # Codex model ids are not Anthropic ids, so the Anthropic
+            # allowlist/regex would reject every valid one. Same injection
+            # guard, different charset — see _CODEX_MODEL_RE.
+            if not _CODEX_MODEL_RE.match(model):
+                raise ValueError(f"Invalid Codex model: {model!r}")
         else:
             # Validate model to prevent command injection (e.g. "sonnet --dangerously-skip-permissions").
             # Skipped for provider="openrouter": model selection there rides
@@ -976,7 +1096,18 @@ class PtyManager:
                 current_path = os.pathsep.join(prepend) + os.pathsep + current_path
         env["PATH"] = current_path
 
-        if provider == "openrouter":
+        if provider == "openrouter" and harness == "codex":
+            # Codex reads NONE of the ANTHROPIC_* plumbing below — it is routed
+            # by the `-c model_providers.openrouter.*` config emitted in the
+            # command build, and that config names OPENROUTER_API_KEY as its
+            # env_key. So the ONE thing this branch owes the child is that
+            # variable. Setting the ANTHROPIC_* vars here would be inert at
+            # best and misleading at worst.
+            env["OPENROUTER_API_KEY"] = openrouter_key
+            # NEVER log the key itself — var names only.
+            logger.info("OpenRouter provider (codex harness): set env vars %s",
+                        ["OPENROUTER_API_KEY"])
+        elif provider == "openrouter":
             # Reroute this session's `claude` CLI onto OpenRouter's Anthropic-
             # compatible endpoint. ANTHROPIC_API_KEY is explicitly cleared so
             # the CLI can't fall back to a real Anthropic key that happens to
@@ -1040,14 +1171,41 @@ class PtyManager:
         # Snapshot existing JSONL files BEFORE spawning so we can detect which
         # new file Claude Code creates. Claude ignores --session-id and generates
         # its own UUID, so we discover it by diffing the directory.
-        home = os.path.expanduser("~")
-        project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
-        jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
-        pre_spawn_files = set()
-        if os.path.isdir(jsonl_dir):
-            pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
+        #
+        # Skipped entirely under the codex harness: ~/.claude/projects is
+        # Claude Code's store and a codex session never writes to it, so a
+        # snapshot there would be a diff against a directory this session
+        # cannot touch. Leaving _pre_spawn_files unset also keeps
+        # claude_session_id None — see _get_jsonl_path, which refuses to
+        # discover for a non-claude harness rather than let Strategy 3 claim
+        # some other pane's transcript.
+        pre_spawn_files: Optional[set] = None
+        if harness == "claude-code":
+            home = os.path.expanduser("~")
+            project_id = workdir.replace("\\", "-").replace("/", "-").replace(":", "-").lstrip("-")
+            jsonl_dir = os.path.join(home, ".claude", "projects", project_id)
+            pre_spawn_files = set()
+            if os.path.isdir(jsonl_dir):
+                pre_spawn_files = {f for f in os.listdir(jsonl_dir) if f.endswith(".jsonl")}
 
-        if provider in ("openrouter", "local"):
+        if harness == "codex":
+            # `codex -m <model>`: unlike the claude CLI there is no env-var
+            # route for model selection, so the id (or the OpenRouter slug)
+            # always rides the command line. Both are regex-validated above.
+            codex_model = provider_model if provider == "openrouter" else model
+            cmd = f"codex -m {codex_model}"
+            if provider == "openrouter":
+                # Codex's own config-override syntax. wire_api=responses
+                # because that is the only wire protocol Codex speaks, and
+                # OpenRouter serves it.
+                cmd += (
+                    " -c model_provider=openrouter"
+                    " -c model_providers.openrouter.name=OpenRouter"
+                    " -c model_providers.openrouter.base_url=https://openrouter.ai/api/v1"
+                    " -c model_providers.openrouter.env_key=OPENROUTER_API_KEY"
+                    " -c model_providers.openrouter.wire_api=responses"
+                )
+        elif provider in ("openrouter", "local"):
             # OpenRouter slugs and local model ids (e.g. "qwen/qwen3-coder-next"
             # or "/models/Qwen3-Coder-30B-A3B-AWQ") are not valid --model values
             # for the claude CLI — model selection rides ANTHROPIC_MODEL (set
@@ -1055,7 +1213,18 @@ class PtyManager:
             cmd = "claude"
         else:
             cmd = f"claude --model {model}"
-        if resume_session_id:
+        if harness == "codex" and (resume_session_id or continue_last):
+            # `codex resume <id>` / `codex resume --last` are a SUBCOMMAND, not
+            # a flag — they cannot be appended to `codex -m ...`, and the id
+            # space is Codex's own rollout store, not Claude's session uuids.
+            # Ignore rather than fabricate a flag that does not exist; the
+            # session spawns fresh and says so in the log.
+            logger.warning(
+                "Codex harness: resume/continue requested (resume=%r, continue=%s) "
+                "but `codex resume` is a subcommand — spawning a fresh session instead",
+                resume_session_id, continue_last,
+            )
+        elif resume_session_id:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
             cmd += " --continue"
@@ -1065,7 +1234,21 @@ class PtyManager:
         # both map to --dangerously-skip-permissions; bypass wins and we do NOT
         # also append --permission-mode to avoid duplicate/conflicting flags.
         effective_bypass = bypass_permissions or (permission_mode == "bypassPermissions")
-        if effective_bypass:
+        if harness == "codex":
+            # Codex expresses the same intent as a sandbox level plus an
+            # approval policy, not as one --permission-mode flag. Mapped rather
+            # than passed through so the pane's existing permission control
+            # keeps meaning the same thing to the user across both harnesses.
+            if effective_bypass:
+                cmd += " --dangerously-bypass-approvals-and-sandbox"
+            elif permission_mode == "acceptEdits":
+                cmd += " --sandbox workspace-write --ask-for-approval on-request"
+            elif permission_mode == "plan":
+                # read-only + untrusted is the closest Codex gets to plan mode:
+                # it can look but every action needs a human.
+                cmd += " --sandbox read-only --ask-for-approval untrusted"
+            # default/auto/dontAsk: no flags — Codex's own defaults apply.
+        elif effective_bypass:
             cmd += " --dangerously-skip-permissions"
         elif permission_mode and permission_mode != "default":
             # All values in _ALLOWED_PERMISSION_MODES are allowlist-validated above.
@@ -1073,7 +1256,12 @@ class PtyManager:
 
         # Effort level: empty string means "use model default" (no flag appended).
         # Skipped entirely for openrouter/local — foreign/local models don't support --effort.
-        if effort and provider in ("openrouter", "local"):
+        if effort and harness == "codex":
+            # Codex takes reasoning effort as a config override, not a flag.
+            # Values are allowlist-validated above and share the {low..max}
+            # vocabulary, so the same string carries across.
+            cmd += f" -c model_reasoning_effort={effort}"
+        elif effort and provider in ("openrouter", "local"):
             logger.info("Effort level %r requested but skipped — not supported for provider=%s", effort, provider)
         elif effort:
             # Value is allowlist-validated above — safe to interpolate.
@@ -1088,7 +1276,12 @@ class PtyManager:
         # silently no-ops on non-Opus models, so we skip the flag entirely for non-Opus.
         # Also skipped entirely for openrouter/local — foreign/local models don't support fast mode.
         _fast_settings_path: Optional[str] = None
-        if fast and provider in ("openrouter", "local"):
+        if fast and harness == "codex":
+            # Fast mode is a Claude Code settings key. Codex has no equivalent,
+            # so the request is dropped loudly rather than silently — same
+            # shape as the openrouter/local skips below.
+            logger.info("Fast mode requested but skipped — not supported by the codex harness")
+        elif fast and provider in ("openrouter", "local"):
             logger.info("Fast mode requested but skipped — not supported for provider=%s", provider)
         elif fast and "opus" in model.lower():
             import json as _json
@@ -1121,10 +1314,13 @@ class PtyManager:
         # deep inside the PTY backend. resolve_claude_cli may extend PATH when
         # it locates the CLI outside the inherited one — that extension has to
         # reach the child, so re-stamp env["PATH"].
-        claude_path, current_path = resolve_claude_cli(current_path)
+        if harness == "codex":
+            cli_path, current_path = resolve_codex_cli(current_path)
+        else:
+            cli_path, current_path = resolve_claude_cli(current_path)
         env["PATH"] = current_path
         logger.info("Spawning: %s", cmd)
-        logger.info("Claude found at: %s", claude_path)
+        logger.info("Harness %s found at: %s", harness, cli_path)
         logger.info("CWD: %s", workdir)
         logger.debug("Bundled: %s", bool(meipass))
         if effective_bypass:
@@ -1184,8 +1380,12 @@ class PtyManager:
             created_at=datetime.now(timezone.utc).isoformat(),
             model=display_model,
             provider=provider,
+            harness=harness,
             working_dir=workdir,
-            claude_session_id=resume_session_id or None,
+            # Under codex the resume id was ignored above (no such flag), so
+            # recording it would claim a lock on a Claude transcript this
+            # session will never write.
+            claude_session_id=None if harness == "codex" else (resume_session_id or None),
             bypass_permissions=effective_bypass,
             permission_mode=permission_mode,
             effort=effort,
@@ -1290,6 +1490,14 @@ class PtyManager:
         3. Fallback: use the most recently modified JSONL file in the project
            (covers /resume which reuses existing files)
         """
+        # Every strategy below reads ~/.claude/projects, which only the claude
+        # CLI writes. A codex session has no file there — and Strategy 3 would
+        # happily hand it the most recently written unclaimed transcript
+        # belonging to some other pane (the bug #15 mis-attribution family).
+        # Refuse rather than guess; Codex transcripts are not read at all.
+        if getattr(session, "harness", "claude-code") != "claude-code":
+            return None
+
         if not session.working_dir:
             return None
 
@@ -1416,6 +1624,7 @@ class PtyManager:
             "name": session.name,
             "model": session.model,
             "provider": session.provider,
+            "harness": session.harness,
             "created_at": session.created_at,
             "working_dir": session.working_dir,
             "claude_session_id": session.claude_session_id,

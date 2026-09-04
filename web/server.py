@@ -34,7 +34,7 @@ logging_config.setup()
 logger = logging.getLogger("cockpit.server")
 
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
-from pty_manager import ClaudeCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+from pty_manager import ClaudeCliNotFound, CodexCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 from mailbox_bridge import mailbox_manager, cleanup_mailbox_root, read_mailbox  # noqa: E402 -- V4 bridge; imports bridge_manager, so it must follow that line
 # _wait_for_idle_simple / _paste_and_submit are underscore-prefixed (bridge_manager treats
@@ -1001,6 +1001,10 @@ async def create_terminal(request: Request):
     workdir = body.get("workdir", str(Path.cwd()))
     model = body.get("model", "sonnet")
     provider = body.get("provider", "anthropic")
+    # Which CLI to spawn ("claude-code" | "codex"). Validated in
+    # pty_manager.create_terminal against _ALLOWED_HARNESSES, alongside
+    # provider — the two together decide the command build.
+    harness = body.get("harness", "claude-code")
     provider_model = body.get("providerModel", "")
     resume_id = body.get("resume_session_id", "")
     continue_last = body.get("continue", False)
@@ -1029,6 +1033,7 @@ async def create_terminal(request: Request):
             workdir=workdir,
             model=model,
             provider=provider,
+            harness=harness,
             provider_model=provider_model,
             resume_session_id=resume_id,
             continue_last=continue_last,
@@ -1044,12 +1049,15 @@ async def create_terminal(request: Request):
         # by the process before we clean it up below.
         await asyncio.sleep(1.5)
         if not session.pty.isalive():
+            # Name the CLI the user actually asked for — telling a Codex user
+            # to check their `claude` install sends them to fix the wrong thing.
+            _cli_name = "codex" if getattr(session, "harness", "") == "codex" else "claude"
             exit_code = getattr(session.pty, "exitstatus", "?")
             logger.error("Session %s died on spawn (exit: %s)", session.id, exit_code)
             pty_manager.kill_terminal(session.id)
             return JSONResponse(
-                {"error": "Claude process exited immediately after spawn. "
-                          "Ensure 'claude' CLI is installed and authenticated."},
+                {"error": f"{_cli_name} process exited immediately after spawn. "
+                          f"Ensure '{_cli_name}' CLI is installed and authenticated."},
                 status_code=500,
             )
 
@@ -1071,12 +1079,12 @@ async def create_terminal(request: Request):
             "provider": session.provider,
             "created_at": session.created_at,
         })
-    except ClaudeCliNotFound as e:
-        # resolve_claude_cli() already probed every standard install location
+    except (ClaudeCliNotFound, CodexCliNotFound) as e:
+        # The resolver already probed every standard install location
         # and built an actionable message (install link + CLAUDE_CLI_PATH
         # escape hatch + what was searched) — surface it verbatim rather than
         # flattening it to "not found".
-        logger.error("Claude CLI not found: %s", e)
+        logger.error("Harness CLI not found: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
     except FileNotFoundError as e:
         logger.error("Spawn failed — executable not found", exc_info=True)
