@@ -15,6 +15,9 @@ import {
   getModelProvider,
   isUnservedSelection,
   UNSERVED_ROW_TAG,
+  HARNESSES,
+  DEFAULT_HARNESS,
+  groupsForHarness,
 } from "../modelCatalog";
 // Lane math lives in utils/laneMath.js so the Workspace lane meter, this
 // quick-glance pill and Engine > Live all read the same arithmetic (see the
@@ -42,6 +45,11 @@ export { isOpusModel, getModelProvider };
 export { PERMISSION_MODES, EFFORT_OPTIONS };
 
 export default function TopBar({
+  // Which CLI a new session is spawned against ("claude-code" | "codex"). The
+  // harness decides which model groups are even offerable, so it sits to the
+  // LEFT of the model pill — you pick the harness, then a model it can run.
+  harness = DEFAULT_HARNESS,
+  setHarness,
   model,
   setModel,
   permissionMode,
@@ -89,6 +97,7 @@ export default function TopBar({
   localBusyModelId = null,
 }) {
   const [modelOpen, setModelOpen] = useState(false);
+  const [harnessOpen, setHarnessOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -99,6 +108,13 @@ export default function TopBar({
 
   // Live, account-accurate catalog (falls back to the static list offline).
   const { groups: modelGroups, models: modelList } = useModelCatalog();
+  // The picker only OFFERS what the selected harness can run, but the pill's
+  // label is looked up against the FULL list: a selection the harness cannot
+  // run must still render its own name rather than silently reading as the
+  // first model in the filtered list, which is a different session entirely.
+  const visibleGroups = groupsForHarness(modelGroups, harness);
+  const currentHarness = HARNESSES.find((h) => h.id === harness) || HARNESSES[0];
+  const isCodexHarness = currentHarness.id === "codex";
   const currentModel = modelList.find((m) => m.id === model) || modelList[0];
   const currentPermission = PERMISSION_MODES.find((p) => p.id === permissionMode) || PERMISSION_MODES[0];
   const currentEffort = EFFORT_OPTIONS.find((e) => e.id === effort) || EFFORT_OPTIONS[0];
@@ -108,7 +124,9 @@ export default function TopBar({
   const selectionUnserved = isUnservedSelection(currentModel);
   const modelProvider = getModelProvider(model);
   const isOpenRouterModel = modelProvider === "openrouter";
-  const fastEligible = isOpusModel(model) && !isOpenRouterModel;
+  // Codex exposes no fast mode at all, so the toggle is dead there for the same
+  // reason it is dead on OpenRouter: the backend has nothing to send.
+  const fastEligible = isOpusModel(model) && !isOpenRouterModel && !isCodexHarness;
 
   // Check OpenRouter key status on mount, and again every time the
   // OpenRouterModal closes (the key may have just been saved/removed).
@@ -142,6 +160,7 @@ export default function TopBar({
 
   function closeAll() {
     setModelOpen(false);
+    setHarnessOpen(false);
     setPermissionOpen(false);
     setEffortOpen(false);
     setThemeOpen(false);
@@ -449,6 +468,57 @@ export default function TopBar({
         {themeOpen && <ThemePopover align="right" onClose={() => setThemeOpen(false)} />}
       </div>
 
+      {/* Harness picker — sits left of the model pill because it constrains it */}
+      <div className="relative">
+        <button
+          onClick={() => { closeAll(); setHarnessOpen((v) => !v); }}
+          className="flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full transition-colors hover-bg-elevated"
+          style={{
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border-color)",
+            backgroundColor: "var(--bg-surface)",
+          }}
+          aria-label={`Harness: ${currentHarness.label}`}
+          aria-expanded={harnessOpen}
+          aria-haspopup="listbox"
+          title="CLI new sessions are spawned against"
+        >
+          {currentHarness.label}
+          <ChevronDown size={10} />
+        </button>
+        {harnessOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setHarnessOpen(false)} aria-hidden="true" />
+            <div
+              role="listbox"
+              aria-label="Harness"
+              className="absolute right-0 mt-1 rounded-lg py-1 z-50 min-w-[140px]"
+              style={{
+                backgroundColor: "var(--bg-elevated)",
+                border: "1px solid var(--border-color)",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              }}
+            >
+              {HARNESSES.map((h) => (
+                <button
+                  key={h.id}
+                  role="option"
+                  aria-selected={h.id === harness}
+                  onClick={() => { setHarness?.(h.id); setHarnessOpen(false); }}
+                  className="block w-full text-left text-xs px-3 py-1.5 transition-colors hover-bg-surface"
+                  style={{
+                    color: h.id === harness ? "var(--accent)" : "var(--text-secondary)",
+                    fontWeight: h.id === harness ? 600 : 400,
+                  }}
+                >
+                  {h.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
       {/* Model picker */}
       <div className="relative">
         <button
@@ -490,7 +560,7 @@ export default function TopBar({
                 boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
               }}
             >
-              {modelGroups.map((group, gi) => {
+              {visibleGroups.map((group, gi) => {
                 const isOpenRouterGroup = group.provider === "openrouter";
                 const isLocalGroup = group.provider === "local";
                 const groupDisabled = (isOpenRouterGroup && !openRouterConfigured) || (isLocalGroup && !localLaunchEnabled);
@@ -740,11 +810,19 @@ export default function TopBar({
           opacity: fastEligible ? 1 : 0.4,
           cursor: fastEligible ? "pointer" : "not-allowed",
         }}
-        aria-label={fastEligible ? (fast ? "Fast mode on" : "Fast mode off") : "Fast mode (Opus models only)"}
+        aria-label={
+          fastEligible
+            ? (fast ? "Fast mode on" : "Fast mode off")
+            : isCodexHarness
+              ? "Fast mode (not available for Codex)"
+              : "Fast mode (Opus models only)"
+        }
         aria-pressed={fastEligible && fast}
         disabled={!fastEligible}
         title={
-          isOpenRouterModel
+          isCodexHarness
+            ? "Not available for Codex"
+            : isOpenRouterModel
             ? "Not available for OpenRouter models"
             : fastEligible
               ? "Toggle fast mode for new sessions"

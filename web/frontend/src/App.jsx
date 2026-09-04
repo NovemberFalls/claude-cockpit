@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Loader, ExternalLink } from "lucide-react";
 import TopBar, { getModelProvider, MODELS } from "./components/TopBar";
-import { parseLocalModelId } from "./modelCatalog";
+import { parseLocalModelId, DEFAULT_HARNESS, getModelHarness, defaultModelForHarness } from "./modelCatalog";
 import Sidebar from "./components/Sidebar";
 import TerminalPane from "./components/TerminalPane";
 import NewSessionDialog from "./components/NewSessionDialog";
@@ -37,6 +37,7 @@ const SESSIONS_KEY = "cockpit-sessions";
 const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 const WORKSPACES_KEY = "cockpit-workspaces";
 const MODEL_KEY = "cockpit-model";
+const HARNESS_KEY = "cockpit-harness";
 const PERMISSION_MODE_KEY = "cockpit-permission-mode";
 const EFFORT_KEY = "cockpit-effort";
 const FAST_KEY = "cockpit-fast";
@@ -251,6 +252,22 @@ export default function App() {
   const zoomToastTimer = useRef(null);
   const [model, setModel] = useState(() => lsLoad(MODEL_KEY, "sonnet"));
   useEffect(() => { lsSave(MODEL_KEY, model); }, [model]);
+  const [harness, setHarness] = useState(() => lsLoad(HARNESS_KEY, DEFAULT_HARNESS));
+  useEffect(() => { lsSave(HARNESS_KEY, harness); }, [harness]);
+  // Switching harness only touches the model when the current one CANNOT run on
+  // the new harness ("any" = OpenRouter/local, which both harnesses reach). A
+  // blanket reset would stomp a selection that was still perfectly valid, so
+  // the check comes first and the toast explains the swap when it does happen.
+  const selectHarness = useCallback((next) => {
+    setHarness(next);
+    const owner = getModelHarness(model);
+    if (owner === "any" || owner === next) return;
+    // Not inside the setModel updater: React may re-run an updater, and a
+    // toast fired from one would show twice.
+    const fallback = defaultModelForHarness(next);
+    setModel(fallback);
+    toast(`Model reset to ${fallback} — the previous model does not run on this harness`, "info");
+  }, [model, toast]);
   const [permissionMode, setPermissionMode] = useState(() => lsLoad(PERMISSION_MODE_KEY, "default"));
   useEffect(() => { lsSave(PERMISSION_MODE_KEY, permissionMode); }, [permissionMode]);
   const [effort, setEffort] = useState(() => lsLoad(EFFORT_KEY, ""));
@@ -627,6 +644,8 @@ export default function App() {
         rows: DEFAULT_SPAWN_ROWS,
         permissionMode,
         effort,
+        // Which CLI to spawn ("claude-code" | "codex"); the backend validates it.
+        harness,
         fast: isOpus && fast,
         ...(getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
@@ -670,7 +689,7 @@ export default function App() {
         prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
       );
     }
-  }, [model, permissionMode, effort, fast, slotCapacity, addLocations, toast]);
+  }, [model, harness, permissionMode, effort, fast, slotCapacity, addLocations, toast]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
   // Undo resumes via claude_session_id (exact session) if available, or
@@ -2484,6 +2503,8 @@ export default function App() {
               controls={
                 <TopBar
                   embedded
+                  harness={harness}
+                  setHarness={selectHarness}
                   model={model}
                   setModel={setModel}
                   permissionMode={permissionMode}

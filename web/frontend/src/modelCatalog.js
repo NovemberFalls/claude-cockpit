@@ -387,3 +387,117 @@ export function ModelCatalogProvider({ children }) {
   const catalog = { groups, models: flatten(groups), source };
   return createElement(ModelCatalogContext.Provider, { value: catalog }, children);
 }
+
+/* ── Harness selection ────────────────────────────────────────────────────────
+ *
+ * Plexar Studio can drive TWO different CLIs in a pane: Anthropic's `claude`
+ * (harness "claude-code") and OpenAI's `codex` (harness "codex"). They are not
+ * two skins on one model list — each one can only speak to the models its own
+ * CLI knows how to reach, so the picker must narrow with the harness or it
+ * offers choices that fail at spawn time, far from the click that made them.
+ *
+ * The narrowing is a PURE function (groupsForHarness) applied by consumers, and
+ * deliberately NOT baked into the catalog context: useModelCatalog() keeps
+ * returning the full, unfiltered catalog so a stale/foreign model id still
+ * resolves to a label instead of rendering as a raw id.
+ */
+
+export const HARNESSES = [
+  { id: "claude-code", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+];
+
+export const DEFAULT_HARNESS = "claude-code";
+
+/* Codex publishes no live model-list route, so unlike the Anthropic half of
+ * this file the Codex catalog is STATIC and must be re-verified by hand.
+ * Verified 2026-09-03. Retired that day and deliberately absent: gpt-5.4,
+ * gpt-5.4-mini, gpt-5.3-codex, gpt-5.2 — a retired id in a static list is the
+ * exact drift this catalog's live-fetch half exists to avoid, and here there is
+ * no live list to correct it. */
+export const CODEX_MODEL_GROUPS = [
+  {
+    label: "GPT-6",
+    harness: "codex",
+    models: [{ id: "gpt-6-astra", label: "GPT-6 Astra", provider: "codex" }],
+  },
+  {
+    label: "GPT-5.6",
+    harness: "codex",
+    models: [
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "codex" },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "codex" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "codex" },
+    ],
+  },
+  {
+    label: "GPT-5.5",
+    harness: "codex",
+    models: [{ id: "gpt-5.5", label: "GPT-5.5", provider: "codex" }],
+  },
+  {
+    label: "Codex",
+    harness: "codex",
+    models: [{ id: "gpt-5.3-codex-spark", label: "Codex Spark", provider: "codex" }],
+  },
+];
+
+const CODEX_IDS = new Set(CODEX_MODEL_GROUPS.flatMap((g) => g.models.map((m) => m.id)));
+
+/** Row- and group-level reason for a LOCAL engine under the Codex harness.
+ *  This is a protocol mismatch, not an outage and not a permission problem: the
+ *  engine is up, it publishes its models, and Codex simply cannot talk to it —
+ *  it speaks the Responses API where these engines serve Chat Completions. So
+ *  the group stays VISIBLE (omitting it is what "down" looks like, the same
+ *  argument UNAUTHORIZED_NOTE makes) and the note says what to DO — switch the
+ *  harness — rather than pointing at another screen or implying a fix that does
+ *  not exist on the engine's side. */
+export const CODEX_LOCAL_UNSUPPORTED_NOTE =
+  "Codex talks the Responses API; this engine serves the Chat Completions API. " +
+  "Switch the harness to Claude Code to use it.";
+
+/** Which harness can run `modelId`. "any" for OpenRouter and local ids — those
+ *  are reachable from both CLIs (OpenRouter via Codex's custom model_provider;
+ *  local via Claude Code) — "codex" for a Codex catalog id, and "claude-code"
+ *  otherwise. Unrecognized ids fall to "claude-code" for the same reason
+ *  getModelProvider() calls them anthropic: an id we do not know is far more
+ *  likely a model newer than this file than a foreign one. */
+export function getModelHarness(modelId) {
+  if (CODEX_IDS.has(modelId)) return "codex";
+  const provider = getModelProvider(modelId);
+  if (provider === "local" || provider === "openrouter") return "any";
+  return "claude-code";
+}
+
+// A group is harness-agnostic when it belongs to a provider both CLIs can
+// reach: `provider: "openrouter"` or `provider: "local"`. Anthropic family
+// groups carry no `provider` key at all (see buildModelGroups), which is what
+// makes them claude-code-only — the absence IS the discriminator.
+
+/** Pure filter/decorate: the subset of `groups` a given harness can actually
+ *  launch. Never mutates its input — the catalog is shared state, and marking a
+ *  local model unselectable for Codex must not leave it unselectable for Claude
+ *  Code the moment the user switches back. */
+export function groupsForHarness(groups, harness) {
+  const list = Array.isArray(groups) ? groups : [];
+  if (harness !== "codex") return list; // claude-code: exactly today's behaviour
+  const openrouter = list.filter((g) => g?.provider === "openrouter");
+  const local = list
+    .filter((g) => g?.provider === "local")
+    .map((g) => ({
+      ...g,
+      note: CODEX_LOCAL_UNSUPPORTED_NOTE,
+      models: (g.models || []).map((m) => ({
+        ...m,
+        selectable: false,
+        unavailableReason: CODEX_LOCAL_UNSUPPORTED_NOTE,
+      })),
+    }));
+  return [...CODEX_MODEL_GROUPS, ...openrouter, ...local];
+}
+
+/** The model a session falls back to when the current selection is not valid
+ *  for the harness being switched to. */
+export function defaultModelForHarness(harness) {
+  return harness === "codex" ? "gpt-5.6-terra" : "sonnet";
+}
