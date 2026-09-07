@@ -568,6 +568,29 @@ _ALLOWED_HARNESSES = {"claude-code", "codex"}
 # a charset with no spaces/quotes/semicolons/slashes.
 _CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
+# Anthropic model ids, recognised so the codex harness can REFUSE them.
+#
+# This is deliberately a NEGATIVE check rather than a positive allowlist of
+# Codex ids. A positive list would drift the moment OpenAI ships a model —
+# exactly the failure _CODEX_MODEL_RE's comment above is guarding against, and
+# exactly what happened to CODEX_MODEL_GROUPS' retired gpt-5.4 entries. The set
+# we CAN enumerate without drift is the other side: Anthropic's own ids all
+# begin "claude-", plus the three bare CLI aliases. A model id that is not one
+# of those is not our business to judge, and is allowed through.
+_ANTHROPIC_MODEL_ALIASES = frozenset({"sonnet", "opus", "haiku"})
+
+
+def _looks_anthropic(model: str) -> bool:
+    """True for a model id that is unambiguously Claude's, never for a Codex id.
+
+    Case-insensitive on the prefix only; the bare aliases are matched exactly,
+    because `claude --model sonnet` is the spelling the CLI accepts.
+    """
+    if not isinstance(model, str):
+        return False
+    stripped = model.strip()
+    return stripped.lower().startswith("claude-") or stripped in _ANTHROPIC_MODEL_ALIASES
+
 # OpenRouter model slug format: "<vendor>/<model>", e.g. "qwen/qwen3-coder-next"
 # or "anthropic/claude-3.7-sonnet:beta". Vendor segment must start with an
 # alnum char (lowercase enforced upstream by OpenRouter's own catalog); model
@@ -933,6 +956,34 @@ class PtyManager:
             if not local_base_url:
                 raise ValueError(f"Unknown or non-local provider id: {local_provider_id!r}")
         elif harness == "codex":
+            # Defense in depth, the twin of the provider="local" refusal above.
+            # `claude-opus-5` satisfies _CODEX_MODEL_RE — it is alphanumeric,
+            # hyphenated and injection-free — so the regex alone happily
+            # spawned `codex -m claude-opus-5`, which authenticates fine and
+            # then 400s on every turn. That pair was reachable from the UI on
+            # 2.1.0 (TopBar restored harness="codex" and model="claude-opus-5"
+            # from two independent localStorage keys), and it stays reachable
+            # by a direct POST regardless of what the frontend does.
+            #
+            # BEFORE the charset regex, deliberately. A long-context id like
+            # "claude-opus-5[1m]" carries brackets that _CODEX_MODEL_RE rejects
+            # anyway, so ordering does not change WHETHER it is refused — only
+            # which message the user gets. "Invalid Codex model" is true and
+            # useless; it reads as a malformed id when the id is perfectly
+            # well-formed and simply belongs to the other CLI. The actionable
+            # message has to win for every Claude id, not just the ones that
+            # happen to survive the regex.
+            #
+            # Scoped to provider="anthropic": under provider="openrouter" the
+            # id that reaches the CLI is provider_model (an OpenRouter slug
+            # like "anthropic/claude-opus-5"), which Codex reaches legitimately
+            # through its custom model_provider — refusing that would break a
+            # supported combination.
+            if provider == "anthropic" and _looks_anthropic(model):
+                raise ValueError(
+                    f"{model!r} is a Claude model and the Codex harness cannot run it — "
+                    "pick a Codex model, or switch the harness to Claude Code."
+                )
             # Codex model ids are not Anthropic ids, so the Anthropic
             # allowlist/regex would reject every valid one. Same injection
             # guard, different charset — see _CODEX_MODEL_RE.

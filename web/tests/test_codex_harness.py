@@ -431,6 +431,55 @@ class TestHarnessValidation:
                                  harness="codex", model="gpt-5.3-codex-spark")
         assert cmd == "codex -m gpt-5.3-codex-spark"
 
+    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-opus-5[1m]",
+                                       "claude-sonnet-5", "sonnet", "opus", "haiku",
+                                       "CLAUDE-Opus-5"])
+    def test_codex_plus_a_claude_model_raises(self, mgr, model):
+        """The twin of test_codex_plus_local_provider_raises, and it exists
+        because _CODEX_MODEL_RE alone let this through.
+
+        `claude-opus-5` is alphanumeric, hyphenated and injection-free, so the
+        regex matched and the manager spawned `codex -m claude-opus-5` -- a
+        session that authenticates fine and then 400s on every turn. The pair
+        was reachable from the UI on 2.1.0: TopBar restores `cockpit-harness`
+        and `cockpit-model` from two INDEPENDENT localStorage keys, so a saved
+        Codex harness came back beside a saved Claude model with nothing
+        reconciling them. The frontend now has a single arbiter
+        (reconcileModelForHarness), but a direct POST still reaches here.
+        """
+        with pytest.raises(ValueError, match="cannot run it"):
+            _call_create(mgr, name="t", workdir="C:\\Code",
+                         harness="codex", model=model)
+
+    def test_claude_harness_still_accepts_its_own_models(self, mgr):
+        """Watch-to-fail twin #1: the refusal must be scoped to harness=codex.
+        A guard that fired for Claude Code would break every normal session."""
+        _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
+                                 harness="claude-code", model="claude-opus-5")
+        assert "claude" in cmd and "codex" not in cmd
+
+    def test_codex_via_openrouter_still_accepts_an_anthropic_slug(self, mgr):
+        """Watch-to-fail twin #2, and the reason the guard checks `provider`.
+
+        Under provider="openrouter" the id that reaches the CLI is
+        provider_model -- an OpenRouter slug -- and Codex genuinely reaches
+        Anthropic models that way through its custom model_provider. A guard
+        that ignored provider would refuse a SUPPORTED combination.
+        """
+        _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
+                                 harness="codex", provider="openrouter",
+                                 model="claude-opus-5",
+                                 provider_model="anthropic/claude-opus-5")
+        assert "codex -m anthropic/claude-opus-5" in cmd
+
+    def test_a_codex_id_that_merely_contains_claude_is_allowed(self, mgr):
+        """The check is a PREFIX match, not a substring one. A future OpenAI id
+        carrying the word elsewhere must not be swept up -- the guard exists to
+        catch Anthropic's own ids, not to police OpenAI's namespace."""
+        _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
+                                 harness="codex", model="gpt-6-claude-compat")
+        assert cmd == "codex -m gpt-6-claude-compat"
+
 
 # ---------------------------------------------------------------------------
 # 9 + 10 — the wire
