@@ -15,6 +15,16 @@
  * `selectHarness` callback in a minimal harness component while importing the
  * REAL getModelHarness/defaultModelForHarness, so the logic under test is not a
  * re-implementation.
+ *
+ * THE LIMIT OF THAT REPLICA, learned the hard way 2026-09-07: it only ever
+ * exercises the harness CLICK. Three other paths move one half of the pair —
+ * the model pill, the Inspector's applySessionOverride, and the mount restore
+ * that reads `cockpit-harness` and `cockpit-model` from two independent
+ * localStorage keys — and none of them went through selectHarness, so 2.1.0
+ * shipped a TopBar reading "Codex · Opus 5". Section 2b therefore tests the
+ * REAL reconcileModelForHarness directly: it is the single arbiter every one
+ * of those paths now calls, so covering it covers them all, including paths
+ * added after this file was written.
  */
 
 import React from "react";
@@ -33,11 +43,12 @@ import {
   defaultModelForHarness,
   getModelHarness,
   groupsForHarness,
+  reconcileModelForHarness,
 } from "../modelCatalog.js";
 import { ThemeProvider } from "../hooks/useTheme.jsx";
 import TopBar from "../components/TopBar.jsx";
 
-const { useState, useCallback } = React;
+const { useState, useCallback, useEffect } = React;
 
 // A local-provider group of the exact shape buildLocalGroups() emits. Built
 // literally rather than through buildLocalGroups so this file pins
@@ -173,7 +184,15 @@ describe("Codex catalog — retired ids are absent", () => {
     expect(getModelHarness("gpt-5.6-terra")).toBe("codex");
     expect(getModelHarness("sonnet")).toBe("claude-code");
     expect(getModelHarness("deepseek/deepseek-v4-pro")).toBe("any");
-    expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("any");
+    // WAS "any", and that was a FALSE CLAIM about the backend — corrected
+    // 2026-09-07. create_terminal raises ValueError for harness="codex" with
+    // provider="local" ("Local providers are not supported by the Codex
+    // harness"), and the picker already renders those rows non-selectable
+    // under Codex. "any" made every harness check pass for a pair the server
+    // throws on, so a local model selected BEFORE switching to Codex survived
+    // the switch and spawned a guaranteed failure. OpenRouter above is the
+    // only genuine "any": both CLIs really do reach it.
+    expect(getModelHarness("local:lmstudio-local:qwen3")).toBe("claude-code");
     expect(defaultModelForHarness("codex")).toBe("gpt-5.6-terra");
     // WAS "sonnet". That bare alias is exactly the id GET /api/models never
     // returns, which is how the pill came to render "Opus 5" for a Sonnet
@@ -333,6 +352,103 @@ function HarnessSwitchHarness({ toast, initialModel }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// 2b. reconcileModelForHarness — the single arbiter, tested DIRECTLY
+//
+// Section 3 below tests a REPLICA of App's callback rather than App itself,
+// which is precisely why the mount path went uncovered: the replica only ever
+// exercised the harness click. These cases run the REAL exported function, so
+// every caller (TopBar pill, New Session dialog, Inspector, mount restore) is
+// covered by construction rather than one replica at a time.
+// ---------------------------------------------------------------------------
+
+describe("reconcileModelForHarness — the pair that 2.1.0 could not spawn", () => {
+  it("resets a Claude model under Codex — the measured TopBar 'Codex · Opus 5'", () => {
+    // The exact incoherent pair a 2.1.0 reload restored from two independent
+    // localStorage keys. It POSTs `codex -m claude-opus-5`, which the CLI
+    // accepts and then 400s on every turn.
+    const out = reconcileModelForHarness("claude-opus-5", "codex");
+    expect(out.changed).toBe(true);
+    expect(out.model).toBe("gpt-5.6-terra");
+  });
+
+  it("resets a LOCAL model under Codex — the pair the server refuses outright", () => {
+    const out = reconcileModelForHarness("local:lmstudio-local:qwen3", "codex");
+    expect(out.changed).toBe(true);
+    expect(out.model).toBe("gpt-5.6-terra");
+  });
+
+  it("resets a Codex model under Claude Code", () => {
+    const out = reconcileModelForHarness("gpt-6-astra", "claude-code");
+    expect(out.changed).toBe(true);
+    expect(out.model).toBe(DEFAULT_MODEL_ID);
+  });
+
+  // The watch-to-fail twins: a reconciler that reset everything would pass all
+  // three cases above while destroying valid selections, so each has a partner
+  // asserting it does NOT fire.
+  it("leaves an OpenRouter model alone under EITHER harness", () => {
+    for (const h of ["codex", "claude-code"]) {
+      const out = reconcileModelForHarness("deepseek/deepseek-v4-pro", h);
+      expect(out.changed).toBe(false);
+      expect(out.model).toBe("deepseek/deepseek-v4-pro");
+    }
+  });
+
+  it("leaves a matching pair alone, and reports the SAME shape when unchanged", () => {
+    const codex = reconcileModelForHarness("gpt-6-astra", "codex");
+    expect(codex).toEqual({ model: "gpt-6-astra", changed: false });
+    const claude = reconcileModelForHarness("claude-opus-5", "claude-code");
+    expect(claude).toEqual({ model: "claude-opus-5", changed: false });
+  });
+
+  it("is IDEMPOTENT — its own output never needs reconciling again", () => {
+    // The reconciler runs in an effect keyed on [model, harness], so a fixed
+    // value that still mismatched would setModel forever. This is the property
+    // that makes that effect safe, not a restatement of the cases above.
+    for (const [model, harness] of [
+      ["claude-opus-5", "codex"],
+      ["local:lmstudio-local:qwen3", "codex"],
+      ["gpt-6-astra", "claude-code"],
+    ]) {
+      const once = reconcileModelForHarness(model, harness);
+      const twice = reconcileModelForHarness(once.model, harness);
+      expect(twice.changed).toBe(false);
+      expect(twice.model).toBe(once.model);
+    }
+  });
+});
+
+// A mount restore is not a click, and no setter wrapper can see it. This is
+// the path that produced the reported bug, so it gets a real render.
+describe("App mount — an incoherent restored pair self-corrects", () => {
+  function MountHarness({ storedModel, storedHarness, toast }) {
+    const [harness] = useState(storedHarness);
+    const [model, setModel] = useState(storedModel);
+    useEffect(() => {
+      const { model: fixed, changed } = reconcileModelForHarness(model, harness);
+      if (!changed) return;
+      setModel(fixed);
+      toast(`Model reset to ${fixed} — the previous model does not run on this harness`, "info");
+    }, [model, harness, toast]);
+    return <span data-testid="model">{model}</span>;
+  }
+
+  it("corrects harness=codex + model=claude-opus-5 restored from localStorage", () => {
+    const toast = vi.fn();
+    render(<MountHarness storedModel="claude-opus-5" storedHarness="codex" toast={toast} />);
+    expect(screen.getByTestId("model")).toHaveTextContent("gpt-5.6-terra");
+    expect(toast).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT fire for a coherent restored pair", () => {
+    const toast = vi.fn();
+    render(<MountHarness storedModel="gpt-6-astra" storedHarness="codex" toast={toast} />);
+    expect(screen.getByTestId("model")).toHaveTextContent("gpt-6-astra");
+    expect(toast).not.toHaveBeenCalled();
+  });
+});
 
 describe("App — switching harness only resets a model that cannot run there", () => {
   it("resets sonnet to gpt-5.6-terra and toasts when switching to Codex", () => {
