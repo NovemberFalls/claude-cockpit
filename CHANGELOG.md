@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [2.1.2] - 2026-09-07
+
+### Fixed
+- **The desktop app no longer opens on "server could not be reached".** Every cold launch showed WebView2's error page until you hit Refresh. `lib.rs` carried a loop commented *"Wait for the server to be ready before the webview loads"* — it did not do that. Tauri builds every window whose config has `create: true` and only THEN calls the setup hook (tauri-2.10.3 `app.rs:2374` vs `:2380`), so the webview had already navigated to `frontendDist` and already been refused before the wait began. It was a 15-second wait placed after the thing it was meant to prevent, and it lost on essentially every launch: the sidecar needs ~2.0s to answer HTTP when warm — longer cold, while Defender scans the 50MB onefile extraction — against a webview that navigates at ~0ms. Nothing recovered either, because the recovery logic (App.jsx's health-check polling) lives *inside* the page that failed to load.
+- The fix is **ordering, not duration**: `create: false` in `tauri.conf.json` stops Tauri's own loop from building the window, and the window is built after the server answers. Raising the timeout would have changed nothing.
+- The readiness probe is now an HTTP `GET /api/version` rather than a bare `TcpStream::connect` — a listening socket accepts as soon as it is bound, which is strictly earlier than uvicorn serving routes, so "connected" could still mean "not answering". Written against std rather than adding an HTTP crate; the request satisfies both `origin_guard` clauses (loopback `Host`, absent `Origin` allowed on HTTP).
+
+### Verified — not changed, measured
+A live audit ran against the running instance and its real 94MB store (150,879 usage events, 61,105 tool events). All fifteen invariant checks hold, so the following are confirmed working rather than assumed:
+- **Usage tracking** — per-session rows carry real input/output/cache/total tokens, turns and cost; `/api/usage/report` agrees with the store exactly; the `(uuid, block_index)` composite key holds with zero duplicate rows.
+- **Estimated spend** — cost is a STORED column written at ingest, and none of the six read paths calls `price_for`, so a price change cannot re-price history; `model_prices` carries no UPDATE or DELETE anywhere; `price_source` is honest (`exact` 121,629 / `backfill` 29,188 / `unpriced` 63, and no `unpriced` row carries a cost).
+- **Context window** — Claude panes report a real percentage, Codex panes correctly report none; `claude-opus-5` resolves to 200,000 tokens and `claude-opus-5[1m]` to 1,000,000, with long-context-only families resolving long without needing the suffix.
+- **Subscription limits** — real server-reported percentages, and the OAuth token never appears in the response body.
+
+### Notes
+- Two guards are correct but **unexercised by production data**, which the audit now proves synthetically instead of asserting the corpus exercises them: measured across 40 JSONL files and 29,456 assistant messages, Claude Code never writes two `tool_use` blocks in one message (parallel calls each get their own entry), and every tool-bearing message also carries `usage`. The multi-block and usage-less-turn paths are exercised directly through the real parser.
+
 ## [2.1.1] - 2026-09-07
 
 ### Fixed
