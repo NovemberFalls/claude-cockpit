@@ -456,17 +456,51 @@ export const CODEX_LOCAL_UNSUPPORTED_NOTE =
   "Codex talks the Responses API; this engine serves the Chat Completions API. " +
   "Switch the harness to Claude Code to use it.";
 
-/** Which harness can run `modelId`. "any" for OpenRouter and local ids — those
- *  are reachable from both CLIs (OpenRouter via Codex's custom model_provider;
- *  local via Claude Code) — "codex" for a Codex catalog id, and "claude-code"
+/** Which harness can run `modelId`. "any" ONLY for OpenRouter, which both CLIs
+ *  genuinely reach (Codex via its custom model_provider, Claude Code via the
+ *  ANTHROPIC_* swap). "codex" for a Codex catalog id, and "claude-code"
  *  otherwise. Unrecognized ids fall to "claude-code" for the same reason
  *  getModelProvider() calls them anthropic: an id we do not know is far more
- *  likely a model newer than this file than a foreign one. */
+ *  likely a model newer than this file than a foreign one.
+ *
+ *  LOCAL IS "claude-code", NOT "any" — corrected 2026-09-07. This function's
+ *  own doc comment used to say local was "reachable from both CLIs (... local
+ *  via Claude Code)", which names ONE CLI while the code returned "any". The
+ *  code was the wrong half: `create_terminal` REFUSES harness="codex" with
+ *  provider="local" outright (pty_manager.py, "Local providers are not
+ *  supported by the Codex harness"), and the picker already renders those rows
+ *  non-selectable under Codex with CODEX_LOCAL_UNSUPPORTED_NOTE. Claiming
+ *  "any" made every caller's harness check pass for a pair the backend throws
+ *  on, so a local model selected BEFORE the switch to Codex survived the
+ *  switch and spawned a guaranteed failure. */
 export function getModelHarness(modelId) {
   if (CODEX_IDS.has(modelId)) return "codex";
   const provider = getModelProvider(modelId);
-  if (provider === "local" || provider === "openrouter") return "any";
+  if (provider === "openrouter") return "any";
+  if (provider === "local") return "claude-code";
   return "claude-code";
+}
+
+/** THE SINGLE ARBITER of "may this model run on this harness", and the one
+ *  place that answers "if not, what instead".
+ *
+ *  It exists because the rule was previously enforced PER SITE and the sites
+ *  disagreed: App.jsx's selectHarness checked it, NewSessionDialog's
+ *  changeHarness checked it, and the two paths that did NOT — restoring
+ *  `cockpit-harness` and `cockpit-model` independently from localStorage at
+ *  mount, and the Inspector's applySessionOverride("model", …) writing an
+ *  unfiltered Anthropic list straight into the workspace default — are exactly
+ *  where the incoherent pair came from (harness pill "Codex", model pill
+ *  "Opus 5", measured 2026-09-07 on 2.1.0). This is the same lesson R-169
+ *  recorded about `|| list[0]`: a rule that lives at each call site is a rule
+ *  the next call site will not have.
+ *
+ *  Returns the SAME object shape whether or not it changed anything, so a
+ *  caller cannot accidentally treat "no change" as "no answer". */
+export function reconcileModelForHarness(model, harness) {
+  const owner = getModelHarness(model);
+  if (owner === "any" || owner === harness) return { model, changed: false };
+  return { model: defaultModelForHarness(harness), changed: true };
 }
 
 // A group is harness-agnostic when it belongs to a provider both CLIs can

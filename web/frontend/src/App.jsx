@@ -5,6 +5,7 @@ import {
   parseLocalModelId,
   DEFAULT_HARNESS,
   getModelHarness,
+  reconcileModelForHarness,
   defaultModelForHarness,
   useModelCatalog,
   findModelEntry,
@@ -304,20 +305,44 @@ export default function App() {
   }, [modelCatalogSource, modelGroups, model]);
   const [harness, setHarness] = useState(() => lsLoad(HARNESS_KEY, DEFAULT_HARNESS));
   useEffect(() => { lsSave(HARNESS_KEY, harness); }, [harness]);
-  // Switching harness only touches the model when the current one CANNOT run on
-  // the new harness ("any" = OpenRouter/local, which both harnesses reach). A
-  // blanket reset would stomp a selection that was still perfectly valid, so
-  // the check comes first and the toast explains the swap when it does happen.
-  const selectHarness = useCallback((next) => {
-    setHarness(next);
-    const owner = getModelHarness(model);
-    if (owner === "any" || owner === next) return;
-    // Not inside the setModel updater: React may re-run an updater, and a
-    // toast fired from one would show twice.
-    const fallback = defaultModelForHarness(next);
-    setModel(fallback);
-    toast(`Model reset to ${fallback} — the previous model does not run on this harness`, "info");
-  }, [model, toast]);
+  // Switching harness carries NO correction of its own — see the reconciler
+  // effect below, which owns that rule for every path that can move either
+  // half of the pair.
+  const selectHarness = useCallback((next) => { setHarness(next); }, []);
+
+  /* THE HARNESS/MODEL COHERENCE CHOKE POINT.
+   *
+   * `harness` and `model` are two independent pieces of state, each restored
+   * from its own localStorage key, and FOUR different things can move one
+   * without the other:
+   *
+   *   1. selectHarness      — the harness pill
+   *   2. setModel           — the model pill
+   *   3. applySessionOverride("model", …) — the Inspector's model dropdown
+   *   4. mount              — lsLoad(HARNESS_KEY) and lsLoad(MODEL_KEY) restore
+   *                           INDEPENDENTLY, so yesterday's pair comes back
+   *                           exactly as incoherent as it was saved
+   *
+   * Only (1) used to check, which is why 2.1.0 shipped a TopBar reading
+   * "Codex · Opus 5" — a pair that spawns `codex -m claude-opus-5`. Guarding
+   * each writer is what R-169 already proved does not hold: the guard is not
+   * on the writers, it is HERE, on the state, so a fifth writer added later
+   * inherits it without knowing this rule exists.
+   *
+   * Watching [model, harness] rather than wrapping the setters is deliberate:
+   * an effect cannot be bypassed by a new call site, and it covers the mount
+   * restore that no setter wrapper ever sees. The cost is one render showing
+   * the incoherent pair before it self-corrects, which is why pty_manager
+   * refuses the pair independently rather than trusting this.
+   *
+   * `changed` gates the toast, so a coherent pair (the overwhelmingly common
+   * case, every render) is silent. */
+  useEffect(() => {
+    const { model: fixed, changed } = reconcileModelForHarness(model, harness);
+    if (!changed) return;
+    setModel(fixed);
+    toast(`Model reset to ${fixed} — the previous model does not run on this harness`, "info");
+  }, [model, harness, toast]);
   const [permissionMode, setPermissionMode] = useState(() => lsLoad(PERMISSION_MODE_KEY, "default"));
   useEffect(() => { lsSave(PERMISSION_MODE_KEY, permissionMode); }, [permissionMode]);
   const [effort, setEffort] = useState(() => lsLoad(EFFORT_KEY, ""));
@@ -1950,9 +1975,20 @@ export default function App() {
     else if (key === "fast") setFast(value);
   }, []);
 
+  /* Harness-filtered, because this list is WRITTEN STRAIGHT INTO the workspace
+   * default by applySessionOverride("model", …). Offering the full Anthropic
+   * list under Codex put a model the harness cannot run one click away, and
+   * the reconciler above would then reset it — a control that visibly undoes
+   * itself is worse than one that never offered the option. Same rule the
+   * model picker already follows via groupsForHarness. */
   const inspectorModelOptions = useMemo(
-    () => MODELS.map((m) => ({ value: m.id, label: m.label })),
-    [],
+    () => MODELS
+      .filter((m) => {
+        const owner = getModelHarness(m.id);
+        return owner === "any" || owner === harness;
+      })
+      .map((m) => ({ value: m.id, label: m.label })),
+    [harness],
   );
 
   const activeWorkspaceName = useMemo(() => {

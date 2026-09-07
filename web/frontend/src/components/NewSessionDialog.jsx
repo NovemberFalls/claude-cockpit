@@ -68,8 +68,7 @@ import {
   HARNESSES,
   DEFAULT_HARNESS,
   groupsForHarness,
-  getModelHarness,
-  defaultModelForHarness,
+  reconcileModelForHarness,
 } from "../modelCatalog";
 import { normPath, baseName, parentOf } from "./folderPath";
 import { computeSelectPlacement, PANEL_MAX } from "./selectPlacement";
@@ -377,15 +376,19 @@ export default function NewSessionDialog({
 
   /**
    * Switching harness resets the model ONLY when the current one cannot run on
-   * the new harness. A blanket reset would stomp a perfectly valid OpenRouter or
-   * local selection — those are `getModelHarness() === "any"` precisely because
-   * both CLIs can reach them — and silently re-pick a model the user did not ask
-   * for, which is the class of substitution this whole change removes.
+   * the new harness — reconcileModelForHarness is the single arbiter of that,
+   * shared with App.jsx so the dialog and the TopBar cannot drift apart.
+   *
+   * A blanket reset would stomp a perfectly valid OpenRouter selection, which
+   * really is reachable from both CLIs. LOCAL IS NOT, and this comment used to
+   * claim it was ("OpenRouter or local ... both CLIs can reach them"): Codex
+   * speaks the Responses API, the local engines serve Chat Completions, and
+   * create_terminal refuses the pair outright. See getModelHarness.
    */
   const changeHarness = (next) => {
     setHarnessSel(next);
-    const owner = getModelHarness(modelSel);
-    if (owner !== "any" && owner !== next) setModelSel(defaultModelForHarness(next));
+    const { model: fixed, changed } = reconcileModelForHarness(modelSel, next);
+    if (changed) setModelSel(fixed);
   };
   const [validation, setValidation] = useState({ state: "unknown", error: "" });
   const [git, setGit] = useState(null);
