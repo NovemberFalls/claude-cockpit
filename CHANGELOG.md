@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Multi-monitor / detachable panes
 - [ ] Session templates / presets
 
+## [2.1.1] - 2026-09-07
+
+### Fixed
+- **The TopBar could show a harness/model pair that cannot spawn.** With the Codex harness selected, the model pill could read an Anthropic model — "Codex · Opus 5" — and the quick-spawn button would then POST `codex -m claude-opus-5`, a session that authenticates and fails on every turn. Both pills were rendering honestly; the *state* was incoherent. `harness` and `model` live behind two independent localStorage keys, and four paths could move one without the other — the harness pill, the model pill, the Inspector's model dropdown, and the mount restore — while only the harness pill checked. A reload therefore brought back yesterday's harness beside yesterday's model with nothing reconciling them.
+- The rule now lives in one arbiter (`reconcileModelForHarness`) driven by an effect keyed on `[model, harness]`, not in a guard bolted onto each writer. That form is deliberate: **an effect is the only one that sees the mount restore**, which has no click for a setter wrapper to intercept, and it cannot be bypassed by a writer added later. This is the same lesson R-169 recorded about `|| list[0]` — a rule enforced per call site is a rule the next call site will not have.
+- **A local model selected before switching to Codex survived the switch.** `getModelHarness` returned `"any"` for local ids while its own doc comment said local was reachable "via Claude Code" — naming one CLI. `create_terminal` refuses `harness=codex` with `provider=local` outright, so `"any"` was a false claim about the server and the pair spawned a guaranteed failure. OpenRouter is the only genuine `"any"`. A unit test asserted the wrong value, so the suite stayed green while pinning the defect.
+- **The server now refuses a Claude model under the Codex harness**, the twin of the existing `provider=local` refusal. `_CODEX_MODEL_RE` is an injection guard, not a namespace check: `claude-opus-5` is alphanumeric, hyphenated and quote-free, so it matched and the command was built. Implemented as a *negative* check (ids beginning `claude-`, plus the bare `sonnet`/`opus`/`haiku` aliases) — a positive allowlist of Codex ids would drift the day OpenAI ships a model, which already happened to the retired `gpt-5.4` entries. It runs before the charset regex so a long-context id like `claude-opus-5[1m]` gets the actionable message rather than "Invalid Codex model", and it is scoped to `provider="anthropic"` so codex-over-OpenRouter — a supported combination — is untouched.
+- The Inspector's model list is harness-filtered. It writes straight into the workspace default, so leaving it unfiltered put an unrunnable model one click away and the reconciler would then undo the choice.
+
+### Notes
+- Codex panes still show `▲0 · $0.00` and their scrollback still cannot reveal the conversation. Neither is a Studio terminal defect: measured against codex-cli 0.153.4, Codex never enables the alternate screen, repaints the viewport with absolute cursor addressing, emits no carriage returns, and hands the terminal almost nothing — the transcript lives in its own buffer, reachable with `PgUp` and `Ctrl+T`. Codex does write a full transcript to `~/.codex/sessions/**/rollout-*.jsonl`, which Studio does not yet read; wiring that up is what would restore both the history surface and the token/cost figures. See `NOTE-172` on the board.
+
 ## [2.0.0] - 2026-08-07
 
 ### Fixed — the reason this is a major version
