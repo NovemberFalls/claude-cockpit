@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.5] - 2026-09-07
+## [2.1.6] - 2026-09-07
 
 ### Known follow-up
 - Codex history can show a blank loading view; intermittent history failures and interface lag remain reported issues under investigation. Automatic loading and session restoration do not close this usability work.
@@ -19,11 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Preserve Claude/Codex session identity when restoring sessions and resuming native conversations. Reject mismatched model/harness combinations and avoid mixing history after a native conversation switch.
 - Keep Codex scrollback through erase-scrollback sequences, retain terminal instances across layout changes, and prevent duplicate or stale socket output during reconnects and popout transitions. Native saved messages remain readable when a CLI redraw or grid resize overwrites the terminal viewport.
-- Keep Windows ConPTY input safe while terminals resize or receive large pasted messages.
+- Use independent synchronous Windows ConPTY input/output pipes, matching the API contract; allow output to drain while input writes wait, and cancel blocked writes during cleanup.
 - Let Reports tables and Diagnostics logs use the available height; keep folder highlighting synchronized with the scrolling session layout.
 
 ### Changed
-- Public release consolidating the 2.1.3 and locally tested 2.1.4 fixes under **Plexar Studio** branding. The application executable is `plexar-studio.exe` and the PyInstaller output is `plexar-studio-server.exe`.
+- Public release consolidating the 2.1.3 and locally tested 2.1.4 fixes under **Plexar Studio** branding. The 2.1.5 draft was held during final Windows paste verification. The application executable is `plexar-studio.exe` and the PyInstaller output is `plexar-studio-server.exe`.
 - Preserve the installed application identifier, internal sidecar bundle name and existing configuration/storage keys so upgrades retain application identity and preferences. Tauri signatures authenticate updater archives; they do not constitute Windows Authenticode signing.
 
 ### Scope

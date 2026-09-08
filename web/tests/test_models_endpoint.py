@@ -6,6 +6,7 @@ validator in pty_manager so live-picker ids actually spawn.
 """
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -58,17 +59,44 @@ async def test_models_fallback_when_fetch_fails(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_models_serves_stale_cache_after_failure(client, monkeypatch):
+    # A zero timestamp is still fresh on a runner booted less than one TTL ago.
+    # Replace the server's clock reference, not the shared time module used by asyncio.
+    clock = Mock(wraps=server_module._time)
+    clock.monotonic.return_value = 1.0
+    monkeypatch.setattr(server_module, "_time", clock)
     good = [{"id": "claude-opus-5", "display_name": "Claude Opus 5"}]
     monkeypatch.setattr(server_module, "_fetch_models_blocking", lambda: good)
     first = await client.get("/api/models")
     assert first.json()["source"] == "live"
 
     # Force TTL expiry, then make the refresh fail — we should get the old cache.
-    server_module._MODELS_CACHE["ts"] = 0.0
+    clock.monotonic.return_value += server_module._MODELS_TTL
     monkeypatch.setattr(server_module, "_fetch_models_blocking", lambda: None)
     stale = await client.get("/api/models")
     assert stale.json()["source"] == "stale"
     assert stale.json()["models"] == good
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl_offset,expected_source,refreshes", [
+    (-0.001, "live", 0),
+    (0.0, "stale", 1),
+    (0.001, "stale", 1),
+])
+async def test_models_cache_expiry_boundary(client, monkeypatch, ttl_offset, expected_source, refreshes):
+    good = [{"id": "claude-opus-5", "display_name": "Claude Opus 5"}]
+    server_module._MODELS_CACHE.update(data=good, ts=1.0)
+    clock = Mock(wraps=server_module._time)
+    clock.monotonic.return_value = 1.0 + server_module._MODELS_TTL + ttl_offset
+    monkeypatch.setattr(server_module, "_time", clock)
+    fetch = Mock(return_value=None)
+    monkeypatch.setattr(server_module, "_fetch_models_blocking", fetch)
+
+    response = await client.get("/api/models")
+
+    assert response.status_code == 200
+    assert response.json() == {"models": good, "source": expected_source}
+    assert fetch.call_count == refreshes
 
 
 def test_read_oauth_token_missing_file(monkeypatch, tmp_path):

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections import deque
 
 import pytest
 
@@ -23,7 +24,7 @@ async def test_large_paste_reaches_child_complete(tmp_path, backend_name):
     # stdin. Test complete user text here; splitter tests pin marker boundaries.
     payload = "HEAD-" + ("line 0123456789 abcdef\r" * 600) + "-TAIL"
     child_file = tmp_path / "receiver.py"
-    child_file.write_text('''import os, sys
+    child_file.write_text('''import os, sys, time
 from pathlib import Path
 if os.name == "nt":
     import ctypes, msvcrt
@@ -46,14 +47,21 @@ with Path("partial").open("wb") as output:
         output.flush()
         remaining -= len(block)
 Path("partial").rename("received")
+# Model a CLI that stays alive after accepting input. The parent owns teardown;
+# do not race the pipe's final write completion by exiting on the last byte.
+while not Path("done").exists():
+    time.sleep(0.01)
 ''', encoding="utf-8")
     argv = [sys.executable, "-u", str(child_file), str(len(payload))]
     child = backend.spawn(subprocess.list2cmdline(argv) if os.name == "nt" else argv,
                           cwd=str(tmp_path), env=dict(os.environ), dimensions=(30, 120))
+    terminal_tail = deque(maxlen=8)
     def drain():
         try:
             while child.isalive():
-                child.read(65536)
+                output = child.read(65536)
+                if output:
+                    terminal_tail.append(output[-2048:])
         except (EOFError, OSError):
             return
     reader = threading.Thread(target=drain, daemon=True)
@@ -71,14 +79,20 @@ Path("partial").rename("received")
         evidence = partial.read_bytes() if partial.exists() else b""
         pytest.fail(
             f"Owned PTY fixture did not produce {path.name}; received >= {len(evidence)} bytes; "
-            f"head={evidence[:30]!r}; tail={evidence[-30:]!r}"
+            f"head={evidence[:30]!r}; tail={evidence[-30:]!r}; "
+            f"alive={child.isalive()}; terminal_tail={list(terminal_tail)!r}"
         )
 
     try:
         await wait_file(tmp_path / "ready")
         child.setwinsize(40, 140)
         assert child.isalive(), "Resizing must preserve the owned process"
-        assert await manager.write_pty_async(session.id, payload)
+        write_ok = await manager.write_pty_async(session.id, payload)
+        assert write_ok, (
+            f"write failed: alive={child.isalive()}, exit={child.exitstatus}, "
+            f"received={(tmp_path / 'received').exists()}, "
+            f"terminal_tail={list(terminal_tail)!r}"
+        )
         await wait_file(tmp_path / "received")
         actual = (tmp_path / "received").read_bytes()
         expected = payload.encode("utf-8")
@@ -86,8 +100,10 @@ Path("partial").rename("received")
         assert hashlib.sha256(actual).digest() == hashlib.sha256(expected).digest()
         assert actual.startswith(b"HEAD-")
         assert actual.endswith(b"-TAIL")
+        assert child.isalive(), "Receiver must remain alive until parent acknowledgement"
     finally:
         # Only the process created above, never manager orphan discovery.
+        (tmp_path / "done").touch()
         child.terminate(force=True)
         assert not child.isalive()
         reader.join(timeout=2)

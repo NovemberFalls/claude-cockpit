@@ -3,7 +3,7 @@
 Bypasses pywinpty's C extension which causes 0xC0000142 DLL failures
 when spawning child processes inside PyInstaller onefile bundles.
 Uses the Windows ConPTY API (CreatePseudoConsole) directly via ctypes,
-with NtCreateNamedPipeFile for pipe creation (matching winpty-rs internals).
+with independent synchronous input/output pipes as required by ConPTY.
 """
 
 from __future__ import annotations
@@ -218,6 +218,15 @@ kernel32.WriteFile.argtypes = [
 ]
 kernel32.WriteFile.restype = wt.BOOL
 
+kernel32.CreatePipe.argtypes = [ctypes.POINTER(wt.HANDLE), ctypes.POINTER(wt.HANDLE), ctypes.c_void_p, wt.DWORD]
+kernel32.CreatePipe.restype = wt.BOOL
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wt.DWORD
+kernel32.OpenThread.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenThread.restype = wt.HANDLE
+kernel32.CancelSynchronousIo.argtypes = [wt.HANDLE]
+kernel32.CancelSynchronousIo.restype = wt.BOOL
+
 kernel32.DuplicateHandle.argtypes = [
     wt.HANDLE, wt.HANDLE, wt.HANDLE, ctypes.POINTER(wt.HANDLE),
     wt.DWORD, wt.BOOL, wt.DWORD,
@@ -429,6 +438,22 @@ def _create_nt_pipe():
     return server.value, client.value
 
 
+def _create_conpty_pipes():
+    """Four owned synchronous handles, with independent input/output channels."""
+    handles = []
+    try:
+        for _ in range(2):
+            read, write = wt.HANDLE(), wt.HANDLE()
+            if not kernel32.CreatePipe(ctypes.byref(read), ctypes.byref(write), None, 128 * 1024):
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.extend((read.value, write.value))
+        return tuple(handles)
+    except Exception:
+        for handle in handles:
+            kernel32.CloseHandle(wt.HANDLE(handle))
+        raise
+
+
 class PtyProcess:
     """A process running inside a Windows ConPTY pseudo-console.
 
@@ -439,8 +464,13 @@ class PtyProcess:
     def __init__(self):
         self._hpc = ctypes.c_void_p()
         self._pi = PROCESS_INFORMATION()
-        self._server_pipe = None  # Bidirectional pipe for read/write
-        self._pipe_lock = threading.RLock()  # Guards _server_pipe against concurrent close/read
+        self._input_pipe = None
+        self._output_pipe = None
+        self._read_lock = threading.RLock()
+        self._write_lock = threading.RLock()
+        self._handle_lock = threading.RLock()
+        self._write_thread = None
+        self._closing = False
         self._job = None  # Job Object handle for process tree management
         self._alive = False
         self.exitstatus = None
@@ -499,37 +529,20 @@ class PtyProcess:
         inst = cls()
         rows, cols = dimensions
 
-        # Create bidirectional pipe via NT native API
-        server_handle, client_handle = _create_nt_pipe()
-        inst._server_pipe = server_handle
-
-        # Duplicate client handle for ConPTY input and output
-        cur_proc = kernel32.GetCurrentProcess()
-        input_read = wt.HANDLE()
-        output_write = wt.HANDLE()
-        kernel32.DuplicateHandle(
-            cur_proc, wt.HANDLE(client_handle), cur_proc,
-            ctypes.byref(input_read), 0, True, DUPLICATE_SAME_ACCESS,
-        )
-        kernel32.DuplicateHandle(
-            cur_proc, wt.HANDLE(client_handle), cur_proc,
-            ctypes.byref(output_write), 0, True, DUPLICATE_SAME_ACCESS,
-        )
+        input_read, inst._input_pipe, inst._output_pipe, output_write = _create_conpty_pipes()
 
         # Create pseudo-console
         size = wt.DWORD(cols | (rows << 16))
-        hr = kernel32.CreatePseudoConsole(
-            size, input_read, output_write, wt.DWORD(0), ctypes.byref(inst._hpc),
-        )
-
-        # Close ConPTY-side handles (it duplicates them internally)
-        kernel32.CloseHandle(input_read)
-        kernel32.CloseHandle(output_write)
-        kernel32.CloseHandle(wt.HANDLE(client_handle))
+        try:
+            hr = kernel32.CreatePseudoConsole(
+                size, wt.HANDLE(input_read), wt.HANDLE(output_write), wt.DWORD(0), ctypes.byref(inst._hpc),
+            )
+        finally:
+            kernel32.CloseHandle(wt.HANDLE(input_read))
+            kernel32.CloseHandle(wt.HANDLE(output_write))
 
         if hr != S_OK:
-            kernel32.CloseHandle(wt.HANDLE(server_handle))
-            inst._server_pipe = None
+            inst._cleanup()
             raise OSError(f"CreatePseudoConsole failed: HRESULT 0x{hr & 0xFFFFFFFF:08x}")
 
         # Set up thread attribute list with pseudo-console
@@ -539,7 +552,9 @@ class PtyProcess:
         if not kernel32.InitializeProcThreadAttributeList(
             ctypes.cast(attr_buf, ctypes.c_void_p), 1, 0, ctypes.byref(attr_size),
         ):
-            raise ctypes.WinError()
+            error = ctypes.WinError()
+            inst._cleanup()
+            raise error
 
         # Pass HPCON value directly (not byref) — matches winpty-rs and MS sample
         if not kernel32.UpdateProcThreadAttribute(
@@ -551,7 +566,10 @@ class PtyProcess:
             None,
             None,
         ):
-            raise ctypes.WinError()
+            error = ctypes.WinError()
+            kernel32.DeleteProcThreadAttributeList(ctypes.cast(attr_buf, ctypes.c_void_p))
+            inst._cleanup()
+            raise error
 
         si = STARTUPINFOEXW()
         si.StartupInfo.cb = ctypes.sizeof(si)
@@ -584,10 +602,7 @@ class PtyProcess:
         if not ok:
             err = ctypes.get_last_error()
             # Clean up all allocated resources on failure
-            kernel32.ClosePseudoConsole(inst._hpc)
-            inst._hpc = ctypes.c_void_p()
-            kernel32.CloseHandle(wt.HANDLE(inst._server_pipe))
-            inst._server_pipe = None
+            inst._cleanup()
             raise OSError(f"CreateProcessW failed: error {err} (0x{err:08x})")
 
         inst._pi = pi
@@ -623,6 +638,12 @@ class PtyProcess:
         return True
 
     def read(self, size: int = 65536, timeout_ms: int = 500) -> str:
+        # Keep peek/read one transaction: a second reader must not consume the
+        # available bytes between them and strand this synchronous ReadFile.
+        with self._read_lock:
+            return self._read_output(size, timeout_ms)
+
+    def _read_output(self, size: int, timeout_ms: int) -> str:
         """Read from the pseudo-console output with timeout.
 
         Uses PeekNamedPipe to poll for available data, avoiding indefinite
@@ -638,8 +659,8 @@ class PtyProcess:
         deadline = time.monotonic() + timeout_ms / 1000.0
 
         while time.monotonic() < deadline:
-            with self._pipe_lock:
-                pipe = self._server_pipe
+            with self._read_lock:
+                pipe = self._output_pipe
                 if pipe is None:
                     raise EOFError("Pty is closed")
                 ok = kernel32.PeekNamedPipe(
@@ -662,8 +683,8 @@ class PtyProcess:
         read_size = min(size, avail.value)
         buf = ctypes.create_string_buffer(read_size)
         n = wt.DWORD()
-        with self._pipe_lock:
-            pipe = self._server_pipe
+        with self._read_lock:
+            pipe = self._output_pipe
             if pipe is None:
                 raise EOFError("Pty is closed")
             ok = kernel32.ReadFile(
@@ -701,22 +722,33 @@ class PtyProcess:
         while offset < total:
             chunk = raw[offset:offset + chunk_size]
             n = wt.DWORD()
-            with self._pipe_lock:
-                pipe = self._server_pipe
-                if pipe is None:
+            with self._write_lock:
+                pipe = self._input_pipe
+                if pipe is None or self._closing:
                     logging.getLogger("cockpit.pty").warning(
                         "ConPTY input pipe is gone at offset %d/%d — %d bytes lost",
                         offset, total, total - offset,
                     )
                     return offset
-                ok = kernel32.WriteFile(
-                    wt.HANDLE(pipe), chunk, wt.DWORD(len(chunk)),
-                    ctypes.byref(n), None,
-                )
+                with self._handle_lock:
+                    thread = kernel32.OpenThread(0x0001, False, kernel32.GetCurrentThreadId())
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    self._write_thread = thread
+                try:
+                    ok = kernel32.WriteFile(
+                        wt.HANDLE(pipe), chunk, wt.DWORD(len(chunk)),
+                        ctypes.byref(n), None,
+                    )
+                    write_error = ctypes.get_last_error() if not ok else 0
+                finally:
+                    with self._handle_lock:
+                        self._write_thread = None
+                        kernel32.CloseHandle(thread)
             if not ok:
                 logging.getLogger("cockpit.pty").error(
                     "WriteFile failed at offset %d/%d (error %d) — %d bytes not written",
-                    offset, total, ctypes.get_last_error(), total - offset,
+                    offset, total, write_error, total - offset,
                 )
                 return offset
             if n.value == 0:
@@ -761,10 +793,27 @@ class PtyProcess:
     def _cleanup(self):
         """Close all handles including the Job Object.
 
-        The pipe lock ensures that reader/writer threads see _server_pipe
-        become None *before* the handle is closed, preventing use-after-close.
+        Cancel an owned synchronous writer before waiting for its lock. Close
+        output before the pseudoconsole so final console output cannot deadlock.
         """
         self._alive = False
+        self._closing = True
+        # A cancellation can race the writer just before it enters WriteFile.
+        # Retry while waiting, rather than assuming one NOT_FOUND means no work.
+        while not self._write_lock.acquire(timeout=0.05):
+            with self._handle_lock:
+                if self._write_thread:
+                    kernel32.CancelSynchronousIo(self._write_thread)
+        try:
+            pipe, self._input_pipe = self._input_pipe, None
+            if pipe:
+                kernel32.CloseHandle(wt.HANDLE(pipe))
+        finally:
+            self._write_lock.release()
+        with self._read_lock:
+            pipe, self._output_pipe = self._output_pipe, None
+            if pipe:
+                kernel32.CloseHandle(wt.HANDLE(pipe))
         # Flush and reset the incremental decoder so any buffered partial
         # sequence is dropped rather than leaking into a future PTY reuse.
         try:
@@ -780,13 +829,6 @@ class PtyProcess:
         if self._pi.hThread:
             kernel32.CloseHandle(self._pi.hThread)
             self._pi.hThread = None
-        # Atomically grab and clear _server_pipe so concurrent readers
-        # see None and bail out before we close the underlying handle.
-        with self._pipe_lock:
-            pipe = self._server_pipe
-            self._server_pipe = None
-        if pipe:
-            kernel32.CloseHandle(wt.HANDLE(pipe))
         # Close Job Object last — JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         # ensures any remaining processes in the job are killed
         if self._job:
