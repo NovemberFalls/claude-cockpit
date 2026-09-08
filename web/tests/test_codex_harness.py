@@ -478,10 +478,12 @@ class TestHarnessValidation:
         Anthropic models that way through its custom model_provider. A guard
         that ignored provider would refuse a SUPPORTED combination.
         """
-        _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
-                                 harness="codex", provider="openrouter",
-                                 model="claude-opus-5",
-                                 provider_model="anthropic/claude-opus-5")
+        with patch("settings_store.resolve_openrouter_key",
+                   return_value=("sk-or-test-key", "settings")):
+            _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
+                                     harness="codex", provider="openrouter",
+                                     model="claude-opus-5",
+                                     provider_model="anthropic/claude-opus-5")
         assert "codex -m anthropic/claude-opus-5" in cmd
 
     def test_a_codex_id_that_merely_contains_claude_is_allowed(self, mgr):

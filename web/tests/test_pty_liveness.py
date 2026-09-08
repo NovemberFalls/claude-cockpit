@@ -50,12 +50,15 @@ def _session(alive_flag=True, process_alive=True, write_raises=None):
     ("get_terminal", "get-process-exited"),
     ("_write_pty_sync", "write-process-exited"),
 ])
-def test_liveness_transition_has_one_info_cause(operation, cause, caplog):
+def test_liveness_transition_has_one_info_cause(operation, cause, caplog, monkeypatch):
     manager = PtyManager()
     session = _session(process_alive=False)
     session.id = "audit-fixture"
     manager.sessions[session.id] = session
     logger = logging.getLogger("cockpit.pty")
+    # Capture here exactly once, regardless of whether earlier logging tests
+    # restored propagation to caplog's second handler on the root logger.
+    monkeypatch.setattr(logger, "propagate", False)
     logger.addHandler(caplog.handler)
     try:
         with caplog.at_level(logging.INFO, logger="cockpit.pty"):

@@ -51,7 +51,9 @@ def _call_create(mgr, backend_cls, **kwargs):
 
     backend_cls.spawn.side_effect = recording_spawn
 
-    with patch("pty_backend.get_backend", return_value=backend_cls):
+    # Command-building tests own CLI discovery as well as the mocked process.
+    with patch("pty_backend.get_backend", return_value=backend_cls), \
+         patch("pty_manager.resolve_claude_cli", side_effect=lambda path: ("claude", path)):
         session = mgr.create_terminal(**kwargs)
 
     return session, captured.get("cmd", ""), captured.get("env", {})

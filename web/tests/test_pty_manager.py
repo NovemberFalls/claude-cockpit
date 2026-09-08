@@ -231,7 +231,8 @@ class TestSpawnEnvDisablesAutoupdater:
     def test_spawn_env_sets_disable_autoupdater(self):
         """create_terminal() passes env with DISABLE_AUTOUPDATER=1 to backend.spawn()."""
         backend = self._make_mock_backend()
-        with patch("pty_backend.get_backend", return_value=backend):
+        with patch("pty_backend.get_backend", return_value=backend), \
+             patch("pty_manager.resolve_claude_cli", side_effect=lambda path: ("claude", path)):
             self.mgr.create_terminal(name="t", workdir="C:\\Code", model="sonnet")
         backend.spawn.assert_called_once()
         _, kwargs = backend.spawn.call_args
@@ -246,7 +247,8 @@ class TestSpawnEnvDisablesAutoupdater:
         """
         monkeypatch.delenv("DISABLE_AUTOUPDATER", raising=False)
         backend = self._make_mock_backend()
-        with patch("pty_backend.get_backend", return_value=backend):
+        with patch("pty_backend.get_backend", return_value=backend), \
+             patch("pty_manager.resolve_claude_cli", side_effect=lambda path: ("claude", path)):
             self.mgr.create_terminal(name="t", workdir="C:\\Code", model="sonnet")
         assert "DISABLE_AUTOUPDATER" not in os.environ
 
