@@ -418,6 +418,13 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# Cloudflare's default bot rules answer urllib's own "Python-urllib/3.x" agent
+# with a bare 403 (measured 2026-09-08 on studio.boord-its.com: curl, Dart and a
+# browser all got the Access 302; Python-urllib alone got 403). A probe that
+# announces itself honestly gets the same answer a phone would.
+_PROBE_USER_AGENT = "PlexarStudio-remote-probe/1"
+
+
 def _fetch_probe(hostname: str) -> tuple[int | None, dict, str]:
     """GET https://<hostname>/remote/v1/hello, redirects NOT followed, no creds.
 
@@ -426,7 +433,7 @@ def _fetch_probe(hostname: str) -> tuple[int | None, dict, str]:
     """
     url = f"https://{hostname}/remote/v1/hello"
     opener = urllib.request.build_opener(_NoRedirectHandler)
-    request = urllib.request.Request(url, method="GET")
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": _PROBE_USER_AGENT})
     try:
         with opener.open(request, timeout=5) as resp:
             body = resp.read(65536).decode("utf-8", errors="replace")
