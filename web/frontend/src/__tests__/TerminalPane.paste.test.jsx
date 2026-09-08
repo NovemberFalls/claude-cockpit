@@ -59,6 +59,7 @@ let _wsInstance = null;
 // ---------------------------------------------------------------------------
 
 let capturedPasteHandler = null;
+let capturedPasteTarget = null;
 let capturedKeyHandler = null;
 let mockTermPaste = null;
 
@@ -136,6 +137,7 @@ function patchListeners() {
   EventTarget.prototype.addEventListener = function (type, listener, options) {
     if (type === "paste") {
       capturedPasteHandler = listener;
+      capturedPasteTarget = this;
     }
     return _origAddEventListener.call(this, type, listener, options);
   };
@@ -200,7 +202,10 @@ const SESSION = {
 // renderPane — render TerminalPane with a mock WebSocket
 // ---------------------------------------------------------------------------
 
-async function renderPane({ toastSpy } = {}) {
+async function renderPane({ toastSpy, clipboard } = {}) {
+  if (clipboard) {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  }
   _wsSendSpy = vi.fn();
   _wsInstance = {
     readyState: 1, // WebSocket.OPEN
@@ -244,15 +249,17 @@ async function renderPane({ toastSpy } = {}) {
 // Helpers — build fake clipboard events
 // ---------------------------------------------------------------------------
 
+function makePasteEvent(clipboardData) {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: clipboardData });
+  return event;
+}
+
 function makeTextPasteEvent(text = "hello world") {
-  return {
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-    clipboardData: {
+  return makePasteEvent({
       getData: vi.fn().mockReturnValue(text),
       items: [],
-    },
-  };
+  });
 }
 
 function makeImagePasteEvent({ type = "image/png" } = {}) {
@@ -262,14 +269,10 @@ function makeImagePasteEvent({ type = "image/png" } = {}) {
     type,
     getAsFile: vi.fn().mockReturnValue(blob),
   };
-  return {
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-    clipboardData: {
+  return makePasteEvent({
       getData: vi.fn().mockReturnValue(""),
       items: [item],
-    },
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -310,8 +313,10 @@ function makeClipboardUnavailable(errorMessage = "Permission denied") {
 // ---------------------------------------------------------------------------
 
 describe("TerminalPane paste handler", () => {
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   beforeEach(async () => {
     capturedPasteHandler = null;
+    capturedPasteTarget = null;
     capturedKeyHandler = null;
     await setupTerminalMock();
     patchListeners();
@@ -322,6 +327,8 @@ describe("TerminalPane paste handler", () => {
 
   afterEach(() => {
     unpatchListeners();
+    if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+    else delete navigator.clipboard;
     vi.clearAllMocks();
   });
 
@@ -405,16 +412,23 @@ describe("TerminalPane paste handler", () => {
   });
 
   // 4
-  it("paste_event_calls_preventDefault_and_stopPropagation", async () => {
+  it("paste_event_prevents_default_and_duplicate_listeners", async () => {
     const { unmount } = await renderPane();
 
     const ev = makeTextPasteEvent("test");
+    const target = capturedPasteTarget;
+    const duplicatePaste = vi.fn();
+    const ancestorPaste = vi.fn();
+    _origAddEventListener.call(target, "paste", duplicatePaste);
+    _origAddEventListener.call(target.parentElement, "paste", ancestorPaste);
     await act(async () => {
-      await capturedPasteHandler(ev);
+      target.dispatchEvent(ev);
     });
 
-    expect(ev.preventDefault).toHaveBeenCalled();
-    expect(ev.stopPropagation).toHaveBeenCalled();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(duplicatePaste).not.toHaveBeenCalled();
+    expect(ancestorPaste).not.toHaveBeenCalled();
+    expect(mockTermPaste).toHaveBeenCalledExactlyOnceWith("test");
 
     unmount();
   });
@@ -428,17 +442,18 @@ describe("TerminalPane paste handler", () => {
       expect(capturedKeyHandler).not.toBeNull();
     });
 
-    const ctrlVEvent = {
-      type: "keydown",
+    const ctrlVEvent = new KeyboardEvent("keydown", {
+      cancelable: true,
       ctrlKey: true,
       metaKey: false,
       shiftKey: false,
       key: "v",
-    };
+    });
 
     const result = capturedKeyHandler(ctrlVEvent);
     // Handler must return false for Ctrl+V so xterm doesn't send raw \x16
     expect(result).toBe(false);
+    expect(ctrlVEvent.defaultPrevented).toBe(false);
 
     unmount();
   });
@@ -446,35 +461,31 @@ describe("TerminalPane paste handler", () => {
   // 6 — Alt+V with image on clipboard: uploads image and sends path via xterm.paste()
   it("alt_v_with_image_uploads_and_sends_path", async () => {
     const toastSpy = vi.fn();
-    const { wsSendSpy, unmount } = await renderPane({ toastSpy });
+    const clipboard = makeClipboardWithImage({ path: "C:\\uploads\\altv.png" });
+    const { wsSendSpy, unmount } = await renderPane({ toastSpy, clipboard });
 
     await waitFor(() => {
       expect(capturedKeyHandler).not.toBeNull();
     });
-
-    const clipboard = makeClipboardWithImage({ path: "C:\\uploads\\altv.png" });
-    globalThis.navigator = {
-      ...globalThis.navigator,
-      clipboard,
-    };
 
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ paths: ["C:\\uploads\\altv.png"] }),
     });
 
-    const altVEvent = {
-      type: "keydown",
+    const altVEvent = new KeyboardEvent("keydown", {
+      cancelable: true,
       altKey: true,
       ctrlKey: false,
       metaKey: false,
       shiftKey: false,
       key: "v",
-    };
+    });
 
     // The handler fires handleAltVPaste() asynchronously then returns false
     const result = capturedKeyHandler(altVEvent);
     expect(result).toBe(false);
+    expect(altVEvent.defaultPrevented).toBe(true);
 
     // Wait for the async upload to complete
     await waitFor(() => {
@@ -492,6 +503,8 @@ describe("TerminalPane paste handler", () => {
     const sent = mockTermPaste.mock.calls[0][0];
     // Path has no spaces — unquoted
     expect(sent).toBe("C:\\uploads\\altv.png");
+    expect(mockTermPaste).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     // ws.send must NOT be called directly
     expect(wsSendSpy).not.toHaveBeenCalled();
 
@@ -505,34 +518,31 @@ describe("TerminalPane paste handler", () => {
 
   // 7 — Alt+V with text-only clipboard: falls back to xterm.paste()
   it("alt_v_with_text_only_calls_xterm_paste", async () => {
-    const { unmount } = await renderPane();
+    const clipboard = makeClipboardTextOnly("hello from alt-v");
+    const { unmount } = await renderPane({ clipboard });
 
     await waitFor(() => {
       expect(capturedKeyHandler).not.toBeNull();
     });
 
-    const clipboard = makeClipboardTextOnly("hello from alt-v");
-    globalThis.navigator = {
-      ...globalThis.navigator,
-      clipboard,
-    };
-
-    const altVEvent = {
-      type: "keydown",
+    const altVEvent = new KeyboardEvent("keydown", {
+      cancelable: true,
       altKey: true,
       ctrlKey: false,
       metaKey: false,
       shiftKey: false,
       key: "v",
-    };
+    });
 
     const result = capturedKeyHandler(altVEvent);
     expect(result).toBe(false);
+    expect(altVEvent.defaultPrevented).toBe(true);
 
     // xterm.paste() should be called with the clipboard text
     await waitFor(() => {
       expect(mockTermPaste).toHaveBeenCalledWith("hello from alt-v");
     });
+    expect(mockTermPaste).toHaveBeenCalledTimes(1);
 
     // WS send should NOT be called directly — xterm's onData handler does it
     expect(_wsSendSpy).not.toHaveBeenCalled();
@@ -569,29 +579,25 @@ describe("TerminalPane paste handler", () => {
   // 8 — Alt+V when clipboard API is unavailable: shows error toast
   it("alt_v_clipboard_unavailable_shows_toast", async () => {
     const toastSpy = vi.fn();
-    const { unmount } = await renderPane({ toastSpy });
+    const clipboard = makeClipboardUnavailable("NotAllowedError: Permission denied");
+    const { unmount } = await renderPane({ toastSpy, clipboard });
 
     await waitFor(() => {
       expect(capturedKeyHandler).not.toBeNull();
     });
 
-    const clipboard = makeClipboardUnavailable("NotAllowedError: Permission denied");
-    globalThis.navigator = {
-      ...globalThis.navigator,
-      clipboard,
-    };
-
-    const altVEvent = {
-      type: "keydown",
+    const altVEvent = new KeyboardEvent("keydown", {
+      cancelable: true,
       altKey: true,
       ctrlKey: false,
       metaKey: false,
       shiftKey: false,
       key: "v",
-    };
+    });
 
     const result = capturedKeyHandler(altVEvent);
     expect(result).toBe(false);
+    expect(altVEvent.defaultPrevented).toBe(true);
 
     // Error toast should be shown — the handler catches and surfaces the error
     await waitFor(() => {

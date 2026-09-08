@@ -7,6 +7,7 @@ import { useTheme } from "../hooks/useTheme";
 import { MODELS } from "./TopBar";
 import CodexTranscript from "./CodexTranscript";
 import { getModelHarness } from "../modelCatalog";
+import { createTerminalClipboard } from "../utils/terminalClipboard";
 import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import {
   isContainerMeasurable,
@@ -29,9 +30,13 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
   const fitRef = useRef(null);
   const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);
+  const currentTerminalIdRef = useRef(terminalId);
+  currentTerminalIdRef.current = terminalId;
+  const [pasteNotice, setPasteNotice] = useState(null);
   const replayCursorRef = useRef(createReplayCursor());
   const [historyWarning, setHistoryWarning] = useState(null);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [transcriptStatusHost, setTranscriptStatusHost] = useState(null);
   const transcriptOpenRef = useRef(false);
   transcriptOpenRef.current = Boolean(showTranscript);
   const codexRef = useRef(false);
@@ -209,96 +214,16 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
       xtermRef.current = term;
       fitRef.current = fitAddon;
 
-      // -------------------------------------------------------------------------
-      // Paste stack — ported faithfully from TerminalPane.jsx.
-      // PopoutTerminal has no `toast` prop; paste failures are silent.
-      // -------------------------------------------------------------------------
-
-      // Alt+V handler — uses navigator.clipboard.read() because there is no DOM
-      // paste event for Alt+V. Matches Claude Code's native image-paste shortcut.
-      const handleAltVPaste = async () => {
-        try {
-          const clipboardItems = await navigator.clipboard.read();
-          let handledImage = false;
-
-          for (const item of clipboardItems) {
-            const imageType = item.types.find((t) => t.startsWith("image/"));
-            if (imageType) {
-              const blob = await item.getType(imageType);
-              const ext = imageType.split("/")[1]?.split("+")[0] || "png";
-              const file = new File([blob], `paste.${ext}`, { type: imageType });
-              const formData = new FormData();
-              formData.append("files", file);
-              try {
-                const res = await fetch("/api/upload", { method: "POST", body: formData });
-                const data = await res.json();
-                if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-                  const p = data.paths[0];
-                  xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
-                }
-              } catch {
-                // upload failed — silent in popout (no toast system)
-              }
-              handledImage = true;
-              break;
-            }
-          }
-
-          if (!handledImage) {
-            // No image — fall back to text
-            const text = await navigator.clipboard.readText();
-            if (text && xtermRef.current) {
-              xtermRef.current.paste(text);
-            }
-          }
-        } catch {
-          // Clipboard API unavailable or permission denied — silent in popout
-        }
-      };
-
-      // Capture-phase paste listener — runs BEFORE xterm's own paste listener on
-      // the textarea. stopPropagation() prevents xterm from also handling it,
-      // eliminating the double-paste race. terminal.paste(text) uses xterm's own
-      // bracketed-paste-mode-aware path, so onData fires exactly once with
-      // correctly framed data.
-      const pasteHandler = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        // Image: synchronous detection from clipboardData.items
-        const items = Array.from(e.clipboardData?.items || []);
-        const imageItem = items.find(
-          (it) => it.kind === "file" && it.type?.startsWith("image/")
-        );
-
-        if (imageItem) {
-          const blob = imageItem.getAsFile();
-          if (!blob) {
-            return;
-          }
-          const ext = imageItem.type.split("/")[1]?.split("+")[0] || "png";
-          const file = new File([blob], `paste.${ext}`, { type: imageItem.type });
-          const formData = new FormData();
-          formData.append("files", file);
-          try {
-            const res = await fetch("/api/upload", { method: "POST", body: formData });
-            const data = await res.json();
-            if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-              const p = data.paths[0];
-              xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
-            }
-          } catch {
-            // upload failed — silent in popout (no toast system)
-          }
-          return;
-        }
-
-        // Text: defer to xterm's paste() which respects bracketed-paste mode.
-        const text = e.clipboardData?.getData("text/plain");
-        if (text && xtermRef.current) {
-          xtermRef.current.paste(text);
-        }
-      };
+      const clipboardPaste = createTerminalClipboard({
+        captureTarget: () => wsRef.current?.readyState === WebSocket.OPEN
+          ? { term, socket: wsRef.current, terminalId } : null,
+        isCurrent: (target) => !cancelled && xtermRef.current === target.term
+          && wsRef.current === target.socket && target.socket.readyState === WebSocket.OPEN
+          && currentTerminalIdRef.current === target.terminalId,
+        notify: (message, kind) => setPasteNotice({ message, kind }),
+      });
+      const pasteHandler = clipboardPaste.paste;
+      const handleAltVPaste = () => clipboardPaste.paste();
 
       const termEl = termRef.current;
       const historyScroll = attachCodexHistoryScroll(term, termEl, {
@@ -336,11 +261,16 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         // Ctrl+V / Ctrl+Shift+V: prevent xterm from sending raw \x16.
         // The actual paste is handled by the capture-phase 'paste' DOM listener.
         if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
+          if (ev.shiftKey) {
+            ev.preventDefault();
+            handleAltVPaste();
+          }
           return false;
         }
 
         // Alt+V: intercept Claude Code's native image-paste shortcut.
         if (ev.altKey && (ev.key === "v" || ev.key === "V") && !ev.ctrlKey && !ev.metaKey) {
+          ev.preventDefault();
           handleAltVPaste(); // async — fire-and-forget from sync handler
           return false;
         }
@@ -461,6 +391,7 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
       connectWs(terminalId);
 
       cleanup = () => {
+        clipboardPaste.dispose();
         historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -560,6 +491,11 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         {codexRef.current && <button type="button" onClick={() => setShowTranscript(true)} style={{ fontSize: 10 }}>Conversation history</button>}
       </div>
 
+      <div ref={setTranscriptStatusHost} style={{ flexShrink: 0 }} />
+      {pasteNotice && <div role={pasteNotice.kind === "error" ? "alert" : "status"} style={{ flexShrink: 0, padding: "4px 8px", fontSize: 11 }}>
+        {pasteNotice.message}
+        <button type="button" aria-label="Dismiss paste notification" onClick={() => setPasteNotice(null)} style={{ marginLeft: 8 }}>Dismiss</button>
+      </div>}
       {historyWarning && <div role="status" style={{ flexShrink: 0, padding: "4px 8px", fontSize: 11, color: "var(--cc-waiting)" }}>{historyWarning}</div>}
       {/* Terminal area. Padding lives on termRef's parent, not termRef itself
           — see the matching comment in TerminalPane.jsx for why: FitAddon
@@ -576,7 +512,7 @@ export default function PopoutTerminal({ terminalId, name, model, harness }) {
         }}
       >
         <div ref={termRef} style={{ width: "100%", height: "100%" }} />
-        {codexRef.current && showTranscript && <CodexTranscript key={terminalId} terminalId={terminalId} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
+        {codexRef.current && showTranscript && <CodexTranscript key={terminalId} terminalId={terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
       </div>
     </div>
   );

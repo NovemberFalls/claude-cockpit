@@ -10,6 +10,7 @@ import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
 import CodexUsageBadge from "./CodexUsageBadge";
 import CodexTranscript from "./CodexTranscript";
+import { createTerminalClipboard } from "../utils/terminalClipboard";
 import PaneActionsMenu from "./PaneActionsMenu";
 import { useModelCatalog, getModelHarness } from "../modelCatalog";
 import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
@@ -46,6 +47,7 @@ const TerminalPane = forwardRef(function TerminalPane({
   const replayCursorRef = useRef(createReplayCursor());
   const [historyWarning, setHistoryWarning] = useState(null);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [transcriptStatusHost, setTranscriptStatusHost] = useState(null);
   const transcriptOpenRef = useRef(false);
   transcriptOpenRef.current = Boolean(showTranscript);
   const codexRef = useRef(false);
@@ -353,50 +355,15 @@ const TerminalPane = forwardRef(function TerminalPane({
       // eliminating the double-paste race. terminal.paste(text) uses xterm's
       // own bracketed-paste-mode-aware path, so onData fires exactly once with
       // correctly framed data.
-      const pasteHandler = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        // Image: synchronous detection from clipboardData.items
-        const items = Array.from(e.clipboardData?.items || []);
-        const imageItem = items.find(
-          (it) => it.kind === "file" && it.type?.startsWith("image/")
-        );
-
-        if (imageItem) {
-          const blob = imageItem.getAsFile();
-          if (!blob) {
-            toast?.("Image paste failed: empty blob", "error");
-            return;
-          }
-          const ext = imageItem.type.split("/")[1]?.split("+")[0] || "png";
-          const file = new File([blob], `paste.${ext}`, { type: imageItem.type });
-          const formData = new FormData();
-          formData.append("files", file);
-          try {
-            const res = await fetch("/api/upload", { method: "POST", body: formData });
-            const data = await res.json();
-            if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-              const p = data.paths[0];
-              xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
-              toast?.("Image pasted", "success");
-            } else if (data.errors?.length) {
-              toast?.(`Image paste failed: ${data.errors[0]}`, "error");
-            }
-          } catch (err) {
-            toast?.(`Image paste failed: ${err.message}`, "error");
-          }
-          return;
-        }
-
-        // Text: defer to xterm's paste() which respects bracketed-paste mode.
-        // This fires onData exactly once with the wrapped text, which then
-        // gets sent through the existing wsRef.current.send path.
-        const text = e.clipboardData?.getData("text/plain");
-        if (text && xtermRef.current) {
-          xtermRef.current.paste(text);
-        }
-      };
+      const clipboardPaste = createTerminalClipboard({
+        captureTarget: () => wsRef.current?.readyState === WebSocket.OPEN
+          ? { term, socket: wsRef.current, terminalId: terminalIdRef.current } : null,
+        isCurrent: (target) => !cancelled && xtermRef.current === target.term
+          && wsRef.current === target.socket && target.socket.readyState === WebSocket.OPEN
+          && terminalIdRef.current === target.terminalId,
+        notify: (message, kind) => toast?.(message, kind),
+      });
+      const pasteHandler = clipboardPaste.paste;
       const termEl = termRef.current;
       const historyScroll = attachCodexHistoryScroll(term, termEl, {
         enabled: () => codexRef.current && !transcriptOpenRef.current,
@@ -409,49 +376,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       // Claude Code uses Alt+V as its native image-paste shortcut; ConPTY cannot
       // access the system clipboard, so we must intercept here and upload the image
       // before injecting the path into the PTY.
-      const handleAltVPaste = async () => {
-        try {
-          const clipboardItems = await navigator.clipboard.read();
-          let handledImage = false;
-
-          for (const item of clipboardItems) {
-            const imageType = item.types.find((t) => t.startsWith("image/"));
-            if (imageType) {
-              const blob = await item.getType(imageType);
-              const ext = imageType.split("/")[1]?.split("+")[0] || "png";
-              const file = new File([blob], `paste.${ext}`, { type: imageType });
-              const formData = new FormData();
-              formData.append("files", file);
-              try {
-                const res = await fetch("/api/upload", { method: "POST", body: formData });
-                const data = await res.json();
-                if (data.paths?.length && wsRef.current?.readyState === WebSocket.OPEN) {
-                  const p = data.paths[0];
-                  xtermRef.current.paste(p.includes(" ") ? `"${p}"` : p);
-                  toast?.("Image pasted", "success");
-                } else if (data.errors?.length) {
-                  toast?.(`Image paste failed: ${data.errors[0]}`, "error");
-                }
-              } catch (err) {
-                toast?.(`Image paste failed: ${err.message}`, "error");
-              }
-              handledImage = true;
-              break;
-            }
-          }
-
-          if (!handledImage) {
-            // No image — fall back to text
-            const text = await navigator.clipboard.readText();
-            if (text && xtermRef.current) {
-              xtermRef.current.paste(text);
-            }
-          }
-        } catch (err) {
-          // Clipboard API unavailable or permission denied — log silently
-          toast?.(`Paste failed: ${err.message}`, "error");
-        }
-      };
+      const handleAltVPaste = () => clipboardPaste.paste();
 
       // Fit once mounted (double-rAF to ensure layout is settled)
       requestAnimationFrame(() => requestAnimationFrame(() => safeFit()));
@@ -495,6 +420,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         // to clipboardData, blocks xterm's own paste listener via stopPropagation,
         // and uses xterm.paste() for correct bracketed-paste-mode handling.
         if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) {
+          if (ev.shiftKey) { ev.preventDefault(); handleAltVPaste(); }
           return false;
         }
 
@@ -503,6 +429,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         // Clipboard API and upload any image to the backend before injecting the
         // path — matching exactly what the Ctrl+V capture-phase handler does.
         if (ev.altKey && (ev.key === "v" || ev.key === "V") && !ev.ctrlKey && !ev.metaKey) {
+          ev.preventDefault();
           handleAltVPaste(); // async — fire-and-forget from sync handler
           return false;
         }
@@ -541,6 +468,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       }
 
       cleanup = () => {
+        clipboardPaste.dispose();
         historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -1101,6 +1029,8 @@ const TerminalPane = forwardRef(function TerminalPane({
         </div>
       </div>
 
+      <div ref={setTranscriptStatusHost} style={{ flexShrink: 0 }} />
+
       {/* Search bar */}
       {searchVisible && (
         <div
@@ -1195,7 +1125,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         onDragOver={handleDragOver}
       >
         <div ref={termRef} className="w-full h-full" />
-        {codexRef.current && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
+        {codexRef.current && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} statusHost={transcriptStatusHost} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
         {activeBridge && (
           <div
             style={{
