@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.8] - 2026-09-08
+
+### Added
+- Studio Remote (opt-in, off by default): Settings > Remote pairs a phone by QR or code, lists and revokes devices, and serves an authenticated `/remote/v1/` surface for Plexar Mobile. The remote stream never displaces the desktop pane. Settings > Remote also generates a `cloudflared` configuration restricted to the remote path, reports `cloudflared` status, and tests the public hostname, with an optional Cloudflare Access flag that tells the phone to sign in first.
+
 ## [2.1.7] - 2026-09-08
 
 ### Fixed
