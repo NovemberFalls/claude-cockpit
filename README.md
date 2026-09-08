@@ -4,7 +4,7 @@ A desktop workspace for Claude Code and Codex CLI sessions. Run terminals side b
 
 **AGPL-3.0** · [Latest release](https://github.com/NovemberFalls/plexar-studio/releases/latest)
 
-**2.1.5:** automatic Codex conversation history, session restore and usage improvements, with compatible upgrades for existing installations. See the [release notes](CHANGELOG.md#215---2026-09-07).
+**2.1.7:** readable history during loading, faster terminal replay and Windows clipboard image recovery, with compatible upgrades for existing installations. See the [release notes](CHANGELOG.md#217---2026-09-08).
 
 [![Plexar Studio](screenshot.svg)](https://github.com/NovemberFalls/plexar-studio/releases/latest)
 
@@ -98,6 +98,8 @@ Scroll upward in a Codex pane to reach saved user and assistant messages automat
 
 This works in docked and popout panes and leaves the CLI running. Saved messages come from Codex's native conversation record; they are separate from raw terminal output and do not include every tool display. Terminal reconnects also replay a bounded 8 MiB output buffer. Truncated or unavailable history is labelled; restarting the backend does not preserve that in-memory raw-output buffer.
 
+While saved history loads, the live terminal stays visible. Reopening uses cached messages while checking the current conversation; failed or timed-out requests offer **Refresh**. If you keep typing during the request, **Show saved messages** lets you open the result when ready without losing input focus.
+
 ### Layouts
 
 `Ctrl+Shift+1` through `Ctrl+Shift+8` set how many panes are visible. `Ctrl+1`–`Ctrl+8` focus a pane.
@@ -139,7 +141,7 @@ Studio can optionally own a local vLLM container's lifecycle (off by default), o
 
 ### Files, clipboard, search
 
-Drag files onto any pane to upload (up to 50 MB each: code, images, PDFs, JSON, CSV, …) — the path is pasted into the prompt. `Ctrl+V` pastes text, or uploads a clipboard image and pastes its path. `Ctrl+Shift+F` searches terminal scrollback.
+Drag files onto any pane to upload (up to 50 MB each: code, images, PDFs, JSON, CSV, …) — the path is pasted into the prompt. `Ctrl+V` pastes text, or uploads a clipboard image and pastes its path. `Ctrl+Shift+V` and `Alt+V` also request clipboard paste, with a native Windows image fallback when browser clipboard access is unavailable. Paste failures are shown in a notification; reconnect or session changes require pasting again in the intended pane. Pasting an image does not submit the prompt. `Ctrl+Shift+F` searches terminal scrollback.
 
 ### Keyboard shortcuts
 
@@ -153,7 +155,7 @@ The full, verified list is in **Settings ▸ Keybindings** — it is generated f
 | `Ctrl+1`–`8` | Focus pane 1–8 |
 | `Ctrl+Shift+F` | Search in the focused terminal |
 | `Ctrl+C` | Copy selection, or interrupt when nothing is selected |
-| `Ctrl+V` / `Alt+V` | Paste text / paste clipboard image |
+| `Ctrl+V` / `Ctrl+Shift+V` / `Alt+V` | Paste clipboard text or image |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Terminal zoom in / out / reset |
 
 Remapping is not wired yet. `Ctrl+K` opens the Projects drawer and focuses its filter; the command palette itself is not built.

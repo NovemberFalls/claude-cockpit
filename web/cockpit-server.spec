@@ -18,6 +18,9 @@ a = Analysis(
     datas=[
         (frontend_dist, 'frontend_dist'),
         (os.path.join(root, 'codex_pricing.json'), '.'),
+        # pricing_store seeds from this file; without it every sidecar start
+        # logged a FileNotFoundError traceback for _MEI*/pricing_models.json.
+        (os.path.join(root, 'pricing_models.json'), '.'),
         # GET /api/version reads the app version out of package.json -- the same
         # file tauri.conf.json points at and vite injects as VITE_APP_VERSION.
         # Without it bundled, _app_version() finds nothing in the sidecar and the

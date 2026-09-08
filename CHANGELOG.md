@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.7] - 2026-09-08
+
+### Fixed
+- Keep the live terminal readable during delayed or failed Codex history requests. Reopening restores cached messages and reading position while checking conversation identity; requests time out with a retry path. Continuing to type during a request prevents history from taking focus or covering input when it arrives.
+- Index saved Codex message offsets incrementally so repeated pages do not rescan the entire recording. Separate per-file locks keep a cold history read from blocking another session's cached pages. Capture recording path and native identity together during conversation switches.
+- Stop repeatedly scanning retained terminal output on idle replay polls, reducing server event-loop work that can delay typing across long sessions.
+- Recover image paste when WebView clipboard events omit image data, using browser clipboard access and a bounded native Windows image fallback. Report upload failures and prevent delayed pastes from entering a changed or reconnected session. Preserve bracketed text paste and require the user to submit prompts.
+
+- Deliver terminal output to the browser as it arrives instead of polling every session's retained replay buffer every 25 ms. On 2.1.3 to 2.1.6 that poll saturated the server's single event loop once several long sessions were open; the owner's log shows every session's PTY read timing out in the same second, and each such timeout silently discarded output already read from the pipe. Idle sessions now cost no server wakeups, a slow read is waited out instead of abandoned, and a reconnect replays retained output in a few large frames instead of one frame per chunk.
+- Recover cleanly when a previous Studio still holds port 8420. The sidecar deliberately outlives the window, which is how sessions survive a close; a healthy one is now attached to explicitly, a hung one is terminated so the new instance can start, and a foreign process is named and left alone. uvicorn's own bind errors now reach cockpit.log, and a second launch focuses the existing window instead of starting a second sidecar.
+- Report an overlapping paste instead of dropping it silently, and bundle the pricing seed whose absence logged a traceback on every sidecar start.
+
+### Scope
+- First access to a recording and pages beyond the bounded index can still require a file scan. Native history contains saved user/assistant messages. Real desktop history, input responsiveness and clipboard acceptance remain pending owner QA.
+- Windows installers carry Tauri updater signatures; Windows Authenticode status is reported separately. Existing application identity and preferences remain compatible.
+
 ## [2.1.6] - 2026-09-07
 
 ### Known follow-up
