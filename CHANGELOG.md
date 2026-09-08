@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.11] - 2026-09-08
+
+### Added
+- Studio Remote: a paired phone can read a session as a conversation (Claude Code and Codex transcripts in one message shape, with tool calls, thinking and pasted images), upload images for a prompt, and fetch images from the upload folder or the session's working directory. Images are served only from those two places, image types only, 10 MB cap.
+
+### Fixed
+- A session renamed from inside Claude Code (`/rename`) now renames the Studio session and follows to the phone; the desktop list adopts the new name without clobbering a rename typed in Studio. Codex records no rename, so a Codex rename is followed only when the CLI sets the terminal title.
+
 ## [2.1.10] - 2026-09-08
 
 ### Fixed
