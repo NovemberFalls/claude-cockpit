@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.12] - 2026-09-08
+
+### Added
+- Studio Remote: the sessions list carries `updated_at` and a `preview` of the last message (last text turn, tool-only turns and injected system text skipped; the transcript tail is read backward in 64 KB windows, 2 MB cap). Phones show it on the session card.
+
 ## [2.1.11] - 2026-09-08
 
 ### Added
