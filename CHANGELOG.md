@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.10] - 2026-09-08
+
+### Fixed
+- Studio Remote: the terminal stream now tells a phone the PTY's columns and rows, and sends a resize frame when the desktop pane changes size, so Plexar Mobile can render the mirrored terminal at its true geometry instead of wrapping every line.
+
 ## [2.1.9] - 2026-09-08
 
 ### Added
