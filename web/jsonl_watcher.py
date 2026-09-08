@@ -275,3 +275,58 @@ def read_all_messages(filepath: str) -> list[dict]:
         logger.debug("Error reading JSONL: %s", filepath, exc_info=True)
 
     return messages
+
+
+# Max length of a CLI-side title we are willing to adopt as a session name.
+MAX_CUSTOM_TITLE_LEN = 120
+
+
+def latest_custom_title(path: str, tail_bytes: int = 65536) -> str | None:
+    """Return the LAST user-set session title recorded in a Claude Code JSONL.
+
+    Claude Code's ``/rename`` appends ``{"type": "custom-title",
+    "customTitle": "<name>", ...}`` to the transcript. Automatic titles are
+    written as ``{"type": "ai-title", ...}`` and are deliberately NOT adopted:
+    an automatic title is not the user's rename.
+
+    TAIL-ONLY BY CONTRACT. These transcripts routinely reach 100 MB, so this
+    seeks to at most the last *tail_bytes* and drops the first (probably
+    partial) line. A rename older than that window is simply not seen — which
+    is correct, since a newer rename would be inside it.
+
+    Returns the stripped title (non-empty, at most ``MAX_CUSTOM_TITLE_LEN``
+    chars) or None when there is none / the file cannot be read.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - tail_bytes)
+            f.seek(start)
+            chunk = f.read()
+    except OSError:
+        return None
+
+    text = chunk.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if start > 0 and lines:
+        lines = lines[1:]  # first line is probably truncated mid-record
+
+    title: str | None = None
+    for line in lines:
+        line = line.strip()
+        if not line or '"custom-title"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "custom-title":
+            continue
+        value = obj.get("customTitle")
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if value:
+            title = value[:MAX_CUSTOM_TITLE_LEN]
+    return title

@@ -210,9 +210,9 @@ function saveSessions(sessions) {
   const toSave = sessions
     .filter((s) => s.status !== "history")
     .map(({ name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions }) => ({
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName }) => ({
       name, model, workdir, terminalId, harness, codex_session_id,
-      claude_session_id, permissionMode, effort, fast, bypassPermissions,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions, backendName,
     }));
   lsSave(SESSIONS_KEY, toSave);
 }
@@ -1208,18 +1208,22 @@ export default function App() {
               const newContextPercent = t.context_percent ?? null;
               const newClaudeSessionId = t.claude_session_id || null;
               const newCodexSessionId = t.codex_session_id || s.codex_session_id || null;
+              const followsRename = typeof t.name === "string" && t.name.length > 0 && t.name !== s.backendName;
+              const newName = followsRename ? t.name : s.name;
+              const newBackendName = followsRename ? t.name : s.backendName;
               if (
                 s.activityState === newState &&
                 s.tokens === newTokens &&
                 s.cost === newCost &&
                 s.context_percent === newContextPercent &&
                 s.claude_session_id === newClaudeSessionId &&
-                s.codex_session_id === newCodexSessionId
+                s.codex_session_id === newCodexSessionId &&
+                s.backendName === newBackendName
               ) {
                 return s;
               }
               changed = true;
-              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId };
+              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId, name: newName, backendName: newBackendName };
             });
 
             const result = changed ? updated : prev;
@@ -1861,6 +1865,9 @@ export default function App() {
       if (syncClaude && data.claude_synced === false) {
         toast(`Renamed to "${newName}" — Claude session sync did not go through`, "info");
       }
+      setSessions((prev) =>
+        prev.map((s) => (s.id === localId ? { ...s, backendName: newName } : s))
+      );
     } catch (err) {
       rollback();
       toast(`Rename failed: ${err.message}`, "error");

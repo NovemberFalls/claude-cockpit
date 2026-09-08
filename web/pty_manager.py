@@ -305,6 +305,10 @@ _EFFORT_RE = re.compile(r"Set effort level to (\w+)")
 # Context fill printed by Claude Code itself, e.g. "Context window is 73% full".
 # Kept as the PRECEDING source (not the primary one) -- see SessionStateTracker.
 _CONTEXT_PCT_RE = re.compile(r"context\D{0,30}?(\d{1,3})\s*%", re.IGNORECASE)
+# Terminal-title escape: ESC ] 0;<title> BEL (icon+title) or ESC ] 2;<title> BEL
+# (title only), with ST (ESC \) accepted as the terminator too. Only OSC 0 and 2
+# are titles -- OSC 8 (hyperlinks) and every other OSC number are ignored.
+_OSC_TITLE_RE = re.compile(r"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)")
 
 
 class SessionStateTracker:
@@ -334,6 +338,11 @@ class SessionStateTracker:
         self.reported_context_percent: Optional[int] = None
         self.derived_context_percent: Optional[int] = None
         self.effort: Optional[str] = None  # last effort level seen in PTY output (e.g. "high")
+        # Last terminal title the CLI set via OSC 0/2. This is the ONLY channel
+        # through which a Codex-side rename is observable (its rollout carries
+        # no title record); for claude-code it is a second channel beside the
+        # transcript's custom-title record. None means "never seen one".
+        self.osc_title: Optional[str] = None
 
     @property
     def context_percent(self) -> Optional[int]:
@@ -357,6 +366,16 @@ class SessionStateTracker:
         """Process new PTY output data."""
         self.last_output_time = time.time()
         self.state = "busy"
+
+        # Terminal-title extraction. A SEPARATE pass over the same chunk, run
+        # before the ANSI strip (which deletes OSC sequences outright), so it
+        # cannot perturb state/token/cost detection below. A title split across
+        # two PTY reads is missed -- accepted: the CLI re-emits its title, and
+        # buffering partial escapes here would put parser state on the hot path.
+        for m in _OSC_TITLE_RE.finditer(raw_data):
+            value = m.group(1).strip()
+            if value:
+                self.osc_title = value
 
         # Strip ANSI and append to rolling buffer
         clean = _ANSI_RE.sub("", raw_data)
@@ -489,6 +508,12 @@ class TerminalSession:
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_user_input_time: float = 0.0  # monotonic timestamp of last user keystroke (bridge typing-quiet gate)
     last_output_time: float = 0.0  # monotonic timestamp of last PTY output (JSONL staleness detection)
+    # Which side last named this session: "studio" (a desktop/API rename) or
+    # "cli" (a /rename inside Claude Code, or a terminal title from Codex).
+    # The most recent act wins on either side; this records which that was.
+    name_source: str = "studio"
+    cli_title: Optional[str] = None  # last CLI-side title observed, from either channel
+    _cli_title_checked: float = 0.0  # monotonic throttle stamp for _refresh_cli_title
 
 
 def _resolve_max_sessions() -> int:
@@ -1699,6 +1724,8 @@ class PtyManager:
         return {
             "id": session.id,
             "name": session.name,
+            "name_source": session.name_source,
+            "cli_title": session.cli_title,
             "model": session.model,
             "provider": session.provider,
             "harness": session.harness,
@@ -1823,7 +1850,76 @@ class PtyManager:
         if session is None:
             return None
         session.name = name
+        session.name_source = "studio"
+        # cli_title is deliberately NOT cleared: it is the record of what the
+        # CLI last called itself, not a pending change. A LATER CLI rename to a
+        # different title still wins -- the most recent act wins on either side.
         return session
+
+    _CLI_TITLE_THROTTLE = 5.0  # seconds between per-session title checks
+
+    def _refresh_cli_title(self, session) -> Optional[str]:
+        """Adopt a rename made INSIDE the CLI as this session's name.
+
+        Two channels, neither authoritative over the other -- whichever moves is
+        the most recent act:
+
+        * claude-code writes ``/rename`` to its transcript as a ``custom-title``
+          record; ``jsonl_watcher.latest_custom_title`` tail-reads it.
+        * Either harness may set the terminal title (OSC 0/2), captured by
+          ``SessionStateTracker``. This is the only Codex channel, since a Codex
+          rollout carries no rename record at all.
+
+        Blocking disk I/O: call this OFF the event loop (the state ticker hands
+        it to ``self._pty_executor``). Throttled to once per
+        ``_CLI_TITLE_THROTTLE`` seconds per session.
+
+        Returns the adopted title, or None when nothing changed.
+        """
+        now = time.monotonic()
+        if now - session._cli_title_checked < self._CLI_TITLE_THROTTLE:
+            return None
+        session._cli_title_checked = now
+
+        title: Optional[str] = None
+        if getattr(session, "harness", "claude-code") == "claude-code":
+            path = self._get_jsonl_path(session)
+            if path:
+                from jsonl_watcher import latest_custom_title
+
+                title = latest_custom_title(path)
+
+        if not title:
+            osc = session.tracker.osc_title
+            if isinstance(osc, str):
+                title = osc.strip()[:120] or None
+
+        if not title:
+            return None
+        # Never adopt the launch command's own binary name: every CLI sets the
+        # terminal title to that on startup, which is not a rename.
+        if title.lower() in ("claude", "codex"):
+            return None
+        if title == session.cli_title or title == session.name:
+            return None  # unchanged -- must not re-log
+
+        session.cli_title = title
+        session.name = title
+        session.name_source = "cli"
+        logger.info("Terminal %s renamed by the CLI: %r", session.id, title)
+        return title
+
+    def refresh_cli_titles(self) -> None:
+        """Run ``_refresh_cli_title`` over every live session (executor entry point)."""
+        for session in list(self.sessions.values()):
+            if not session.alive:
+                continue
+            try:
+                self._refresh_cli_title(session)
+            except Exception:
+                logger.warning(
+                    "CLI title refresh failed for session %s", session.id, exc_info=True
+                )
 
     def get_terminal(self, terminal_id: str) -> Optional[TerminalSession]:
         """Get a terminal session by ID."""
@@ -2144,6 +2240,21 @@ class PtyManager:
                             session.id,
                             exc_info=True,
                         )
+                # CLI-side renames. The JSONL tail read is blocking disk I/O, so
+                # it goes to the PTY executor for the same reason the context
+                # refresh does. Per-session throttling lives in
+                # _refresh_cli_title; this only has to offer it the chance.
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        self._pty_executor, self.refresh_cli_titles
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "State ticker: CLI title refresh failed", exc_info=True
+                    )
                 if ticks % self._CONTEXT_REFRESH_TICKS == 0:
                     # sqlite3 is synchronous: run the reads in the PTY executor so
                     # a slow disk cannot stall the event loop (and with it every
