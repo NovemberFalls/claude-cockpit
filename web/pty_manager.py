@@ -462,6 +462,11 @@ class TerminalSession:
     codex_usage_checked: float = 0.0
     history: TerminalHistory = field(default_factory=TerminalHistory)
     history_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    # One asyncio.Event per attached Studio Remote stream socket. Separate from
+    # history_changed on purpose: the desktop replay socket owns that one, and a
+    # phone must never share (or displace) the desktop's wakeup or its
+    # active_consumer generation. _session_reader sets every member on append.
+    remote_listeners: set = field(default_factory=set)
     bypass_permissions: bool = False
     permission_mode: str = "default"
     effort: str = ""

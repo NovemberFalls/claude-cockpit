@@ -264,6 +264,12 @@ app.add_middleware(
 # and why an Origin==Host equality check is insufficient here.
 @app.middleware("http")
 async def _origin_guard_middleware(request: Request, call_next):
+    # The ONE exemption: `/remote/v1/*` is reached by a phone through a tunnel,
+    # which presents a public Host and no Origin, so both clauses would refuse
+    # it. Its boundary is the device token instead — see origin_guard's
+    # docstring. `/api/remote/*` (desktop-only admin) is NOT exempt.
+    if origin_guard.is_remote_path(request.url.path):
+        return await call_next(request)
     reason = origin_guard.check_http(
         request.headers.get("host", ""),
         request.headers.get("origin"),
@@ -962,6 +968,12 @@ async def _session_reader(terminal_id: str):
             session.tracker.feed(data)
             session.history.append(data)
             session.history_changed.set()
+            # Studio Remote streams wait on their OWN events (one per socket) so
+            # a phone neither shares nor consumes the desktop pane's wakeup.
+            # Snapshot the set: a socket may unregister from its finally while
+            # this loop runs.
+            for listener in list(session.remote_listeners):
+                listener.set()
             session.last_output_time = _time.monotonic()
             if session.tracker.effort:
                 session.effort = session.tracker.effort
@@ -999,10 +1011,28 @@ async def send_terminal_input(terminal_id: str, request: Request):
 # ── Terminal Management (REST) ───────────────────────────
 
 
-@app.post("/api/terminals")
-async def create_terminal(request: Request):
-    """Create a new interactive Claude CLI terminal session."""
-    body = await request.json()
+class _CreateTerminalRefused(Exception):
+    """A create-terminal failure that already knows its HTTP shape.
+
+    Carries the exact (status, payload) the local POST /api/terminals route used
+    to build inline, so extracting the body into `_create_terminal_from_body`
+    changed no response byte. Studio Remote calls the same helper, so the two
+    paths cannot drift — a spend cap, a dead-on-spawn CLI or a missing binary
+    behaves identically whether the caller is the desktop or a phone.
+    """
+
+    def __init__(self, status: int, payload: dict):
+        super().__init__(payload.get("error", "create refused"))
+        self.status = status
+        self.payload = payload
+
+
+async def _create_terminal_from_body(body: dict) -> dict:
+    """Spawn a session from a POST /api/terminals body. THE single spawn path.
+
+    Raises ValueError for input pty_manager rejects (bad harness/provider combo)
+    and _CreateTerminalRefused for everything that already has an HTTP shape.
+    """
     name = body.get("name", "")
     workdir = body.get("workdir", str(Path.cwd()))
     model = body.get("model", "sonnet")
@@ -1028,9 +1058,8 @@ async def create_terminal(request: Request):
     # interactive typing is never blocked.
     spend = await _spend_refusal("new_sessions")
     if spend is not None:
-        return JSONResponse(
-            {"error": _spend_error_text(spend), "spend": spend},
-            status_code=409,
+        raise _CreateTerminalRefused(
+            409, {"error": _spend_error_text(spend), "spend": spend}
         )
 
     try:
@@ -1061,10 +1090,10 @@ async def create_terminal(request: Request):
             exit_code = getattr(session.pty, "exitstatus", "?")
             logger.error("Session %s died on spawn (exit: %s)", session.id, exit_code)
             pty_manager.kill_terminal(session.id)
-            return JSONResponse(
+            raise _CreateTerminalRefused(
+                500,
                 {"error": f"{_cli_name} process exited immediately after spawn. "
                           f"Ensure '{_cli_name}' CLI is installed and authenticated."},
-                status_code=500,
             )
 
         # Clean up the fast-mode temp settings file now that the process has had
@@ -1078,27 +1107,48 @@ async def create_terminal(request: Request):
 
         logger.info("Session %s alive after spawn", session.id)
         asyncio.create_task(_session_reader(session.id))
-        return JSONResponse({
+        return {
             "id": session.id,
             "name": session.name,
             "model": session.model,
             "provider": session.provider,
             "created_at": session.created_at,
-        })
+        }
+    except _CreateTerminalRefused:
+        # Already shaped; must not be flattened into the catch-all below.
+        raise
     except (ClaudeCliNotFound, CodexCliNotFound) as e:
         # The resolver already probed every standard install location
         # and built an actionable message (install link + CLAUDE_CLI_PATH
         # escape hatch + what was searched) — surface it verbatim rather than
         # flattening it to "not found".
         logger.error("Harness CLI not found: %s", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        raise _CreateTerminalRefused(500, {"error": str(e)}) from e
     except FileNotFoundError as e:
         logger.error("Spawn failed — executable not found", exc_info=True)
-        return JSONResponse(
-            {"error": f"Could not start the session: {e}"},
-            status_code=500,
-        )
+        raise _CreateTerminalRefused(
+            500, {"error": f"Could not start the session: {e}"}
+        ) from e
+    except ValueError:
+        # Input pty_manager rejected (harness/provider combo). Propagated as
+        # ValueError so Studio Remote can answer 400; the local route below
+        # re-flattens it to the 500 it has always returned.
+        raise
     except Exception as e:
+        raise _CreateTerminalRefused(
+            500, {"error": f"Failed to spawn terminal: {str(e)}"}
+        ) from e
+
+
+@app.post("/api/terminals")
+async def create_terminal(request: Request):
+    """Create a new interactive Claude CLI terminal session."""
+    body = await request.json()
+    try:
+        return JSONResponse(await _create_terminal_from_body(body))
+    except _CreateTerminalRefused as refused:
+        return JSONResponse(refused.payload, status_code=refused.status)
+    except ValueError as e:
         return JSONResponse(
             {"error": f"Failed to spawn terminal: {str(e)}"},
             status_code=500,
@@ -6701,6 +6751,135 @@ async def get_local_metrics(window: str = "lifetime"):
     forwarding — an unbounded client string is never passed to the broker.
     """
     return await get_provider_metrics(_DEFAULT_PROVIDER, window)
+
+
+# ── Studio Remote (protocol v1) ──────────────────────────
+
+import remote_gateway  # noqa: E402 -- grouped with the other post-app-creation router wiring
+from remote_devices import DeviceStore  # noqa: E402
+
+
+@app.websocket("/remote/v1/sessions/{terminal_id}/stream")
+async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
+    """Read-only live terminal stream for a paired device.
+
+    Deliberately NOT the desktop's `/ws/terminal/{id}`: this handler never reads
+    or writes `session.active_consumer`. That counter is the desktop's
+    latest-connection-wins generation, and a phone attaching must never displace
+    the pane the owner is typing in. Input from a device goes through the REST
+    `/remote/v1/sessions/{id}/input` route instead, so this socket is output-only.
+
+    Every refusal is a close BEFORE accept(): Starlette turns that into an HTTP
+    403 on the handshake, so a caller without a device token never holds a live
+    socket, and 101-then-close never leaks a terminal-id oracle.
+    """
+    if not remote_gateway.remote_enabled():
+        await websocket.close(code=4403, reason="remote disabled")
+        return
+    device = remote_gateway.authenticate_websocket(websocket)
+    if device is None:
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None:
+        await websocket.close(code=4004, reason="Terminal not found")
+        return
+
+    await websocket.accept()
+    remote_gateway.registry.register(device.id, websocket)
+
+    from terminal_history import coalesce_chunks
+
+    raw_after = websocket.query_params.get("after")
+    try:
+        cursor = int(raw_after) if raw_after is not None else None
+        if cursor is not None and cursor < 0:
+            cursor = None
+    except ValueError:
+        cursor = None
+
+    # This socket's OWN wakeup. _session_reader sets every member of
+    # remote_listeners on append, so N devices and the desktop pane each wake
+    # independently and none consumes another's event.
+    listener = asyncio.Event()
+    session.remote_listeners.add(listener)
+
+    async def stream_to_ws():
+        nonlocal cursor
+        initial = True
+        while True:
+            # Cleared BEFORE the snapshot: an append racing the sends below
+            # re-sets the event and is picked up next iteration. Clearing after
+            # would swallow that wakeup and stall the phone.
+            listener.clear()
+            snapshot = session.history.snapshot(cursor)
+            if initial or snapshot["reset"]:
+                await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
+                                           "truncated": snapshot["truncated"]})
+            for seq, data in coalesce_chunks(snapshot["chunks"], 64 * 1024):
+                await websocket.send_json({"type": "output", "seq": seq, "data": data})
+            cursor = snapshot["sequence"]
+            if initial or snapshot["reset"]:
+                await websocket.send_json({"type": "replay_end", "seq": cursor})
+            initial = False
+            if not session.alive:
+                await websocket.send_json({"type": "ended"})
+                return
+            # A liveness re-check for the branch above ONLY; new output arrives
+            # via the event, never by waiting this out.
+            try:
+                await asyncio.wait_for(listener.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
+
+    async def ws_to_stream():
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                message = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(message, dict) and message.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    stream_task = asyncio.create_task(stream_to_ws())
+    read_task = asyncio.create_task(ws_to_stream())
+    try:
+        done, pending = await asyncio.wait(
+            [stream_task, read_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except WebSocketDisconnect:
+        pass
+    except (RuntimeError, ConnectionError) as e:
+        logger.debug("Remote stream for terminal %s ended: %s", terminal_id, e)
+    finally:
+        session.remote_listeners.discard(listener)
+        remote_gateway.registry.unregister(device.id, websocket)
+
+
+app.include_router(remote_gateway.router)
+app.include_router(remote_gateway.admin_router)
+
+# Wired at IMPORT time, not in lifespan: a TestClient-based test constructs the
+# app without ever running startup, and an unconfigured gateway would 500 there
+# while working in production — the kind of split that hides a real defect.
+remote_gateway.configure(
+    remote_gateway.RemoteBackend(
+        settings=settings_store.read_settings,
+        app_version=_app_version,
+        list_sessions=pty_manager.list_terminals,
+        get_session=pty_manager.get_terminal,
+        create_session=_create_terminal_from_body,
+        submit=_paste_and_submit,
+        write_raw=pty_manager.write_pty_async,
+        interrupt=lambda terminal_id: pty_manager.write_pty_async(terminal_id, "\x1b"),
+    ),
+    DeviceStore(app_paths.data_path("remote_devices.json")),
+)
 
 
 # ── Static files ─────────────────────────────────────────

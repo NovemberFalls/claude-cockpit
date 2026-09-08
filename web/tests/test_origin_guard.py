@@ -246,3 +246,31 @@ async def test_the_claude_cli_path_is_not_collateral():
     no Origin. It must pass the guard with no exemption carved for it — an
     exemption would be a hole a page could aim at."""
     assert origin_guard.check_http("127.0.0.1:8420", None) is None
+
+
+# ── The one exemption: /remote/v1/ (Studio Remote, device-token authenticated) ──
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/remote/v1/hello", "/remote/v1/", "/remote/v1", "/remote/v1/sessions/abc/stream"],
+)
+def test_remote_v1_paths_are_exempt(path):
+    assert origin_guard.is_remote_path(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/remote/v10/x",        # a DIFFERENT protocol version, not v1's exemption
+        "/remote/v1x/hello",
+        "/remote/v2/hello",
+        "/remote",
+        "/api/remote/status",   # desktop-only admin — an ordinary /api route
+        "/api/remote/pairings",
+        "/api/terminals",
+        "/remotely/v1/hello",
+    ],
+)
+def test_everything_else_keeps_both_clauses(path):
+    assert not origin_guard.is_remote_path(path)

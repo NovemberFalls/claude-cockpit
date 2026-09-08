@@ -30,6 +30,17 @@ mean "a legitimate script", it means "not the UI", and it is refused. The only
 clients of `/ws/terminal/{id}` in existence are xterm.js in `TerminalPane.jsx`
 and `PopoutTerminal.jsx`; nothing in `tests/` connects to it.
 
+**`/remote/v1/*` IS exempt, and it is the only exemption.** A phone reaching
+Studio through a tunnel presents a public `Host` (`studio.example.com`) and no
+`Origin` at all, so the loopback-Host clause refuses it and the Origin clause
+cannot help. The trust boundary on that prefix is the **device token** instead
+(`Authorization: Bearer`, minted by an in-person pairing code): a drive-by page
+cannot attach that header without a CORS preflight Studio never answers, and a
+rebinding page — which can read replies — still cannot produce a token it does
+not hold. Every other path keeps both clauses unchanged, including the
+desktop-only `/api/remote/*` admin routes, which are ordinary `/api` routes and
+must stay origin-guarded.
+
 **`/shim/*` and `/v1/*` need no exemption.** They are driven by the `claude` CLI
 via `ANTHROPIC_BASE_URL`, a non-browser client that sends no Origin and addresses
 127.0.0.1 directly — so it satisfies both clauses without a carve-out. An
@@ -81,6 +92,16 @@ def is_loopback_host(raw: str) -> bool:
     anti-rebinding clause is no.
     """
     return _split_host(raw) in _LOOPBACK_HOSTNAMES
+
+
+def is_remote_path(path: str) -> bool:
+    """True for the device-authenticated Studio Remote surface, `/remote/v1/…`.
+
+    Exact prefix match on the versioned segment: `/remote/v10/x` is a DIFFERENT
+    protocol version and must not inherit v1's exemption, and `/api/remote/...`
+    (the desktop-only admin routes) is not this surface at all.
+    """
+    return path == "/remote/v1" or path.startswith("/remote/v1/")
 
 
 def _normalise_origin(origin: str) -> str:

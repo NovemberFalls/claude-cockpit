@@ -299,6 +299,13 @@ DEFAULT_SETTINGS = {
         "enforce_on": {"bridges": True, "new_sessions": False},
     },
     "system": {"keybindings": {}},
+    # Studio Remote (protocol v1). OFF by default and deliberately so: enabling
+    # it opens `/remote/v1/*`, the one route family exempt from the browser
+    # origin guard (the device token is the boundary there instead). `hostname`
+    # is the PUBLIC base URL a phone should dial, e.g.
+    # "https://studio.example.com" with no trailing slash; empty means "not
+    # configured" and the pairing payload falls back to http://<lan-ipv4>:<port>.
+    "remote": {"enabled": False, "hostname": ""},
     # Voice mode. OFF by default and deliberately so: the ML dependencies are
     # NOT bundled (the sidecar is 48 MB; torch would add ~2 GB), so on a fresh
     # install voice is simply not present. A default of True would advertise a
