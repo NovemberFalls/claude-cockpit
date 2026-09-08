@@ -26,6 +26,10 @@ from terminal_history import TerminalHistory
 
 logger = logging.getLogger("cockpit.pty")
 
+# Warn-only; the read is still awaited, so bytes the executor thread already took
+# off the ConPTY pipe are never discarded.
+_PTY_READ_WARN_AFTER = 10.0
+
 # Inter-chunk delay for large PTY writes.  ConPTY's input pipe buffer is
 # shallower than winpty's; a 10 ms pause between 200-byte chunks gives the
 # pseudoconsole host (claude.exe) enough time to drain the pipe before the
@@ -457,6 +461,7 @@ class TerminalSession:
     codex_usage_lock: Any = field(default_factory=threading.Lock)
     codex_usage_checked: float = 0.0
     history: TerminalHistory = field(default_factory=TerminalHistory)
+    history_changed: asyncio.Event = field(default_factory=asyncio.Event)
     bypass_permissions: bool = False
     permission_mode: str = "default"
     effort: str = ""
@@ -1825,21 +1830,29 @@ class PtyManager:
         return session
 
     async def read_pty(self, terminal_id: str, size: int = 65536) -> str:
-        """Read from PTY (runs in dedicated executor with timeout to avoid blocking)."""
+        """Read from PTY (runs in a dedicated executor; a slow read is waited out, never abandoned).
+
+        This used to be an ``asyncio.wait_for`` with a 10 s timeout. Cancelling the
+        wait does NOT stop the executor thread — it has already consumed those bytes
+        from the ConPTY pipe, and returning "" threw them away. An event-loop stall
+        (the shape that made every session log "PTY read timed out" in the same
+        second) therefore showed up as silently missing terminal output. The wait is
+        now unbounded and the old timeout is only a warning threshold.
+        """
         session = self.sessions.get(terminal_id)
         if not session or not session.alive:
             return ""
         loop = asyncio.get_event_loop()
         try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(self._pty_executor, session.pty.read, size),
-                timeout=10.0,
-            )
+            fut = loop.run_in_executor(self._pty_executor, session.pty.read, size)
+            done, _ = await asyncio.wait({fut}, timeout=_PTY_READ_WARN_AFTER)
+            if fut not in done:
+                logger.warning(
+                    "PTY read for %s has not returned after %.0fs; still waiting, no output is discarded",
+                    terminal_id, _PTY_READ_WARN_AFTER,
+                )
+            data = await fut
             return data
-        except asyncio.TimeoutError:
-            # Read hung — process may be in a zombie state
-            logger.warning("PTY read timed out for %s", terminal_id)
-            return ""
         except EOFError:
             if session.alive:
                 logger.info("Terminal %s alive=false cause=read-eof", terminal_id)

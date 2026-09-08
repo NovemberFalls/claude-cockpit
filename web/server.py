@@ -961,6 +961,7 @@ async def _session_reader(terminal_id: str):
         if data:
             session.tracker.feed(data)
             session.history.append(data)
+            session.history_changed.set()
             session.last_output_time = _time.monotonic()
             if session.tracker.effort:
                 session.effort = session.tracker.effort
@@ -1417,6 +1418,13 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     my_generation = session.active_consumer
 
     async def replay_to_ws():
+        # Delivery is EVENT-DRIVEN, not polled. The previous 25 ms cadence ran per
+        # WebSocket, so four or five panes with multi-MB retained buffers kept the
+        # single event loop permanently busy re-snapshotting history that had not
+        # changed — the stall that made PTY reads appear to time out across every
+        # session in the same second.
+        from terminal_history import coalesce_chunks
+
         raw_after = websocket.query_params.get("after")
         try:
             cursor = int(raw_after) if raw_after is not None else None
@@ -1426,11 +1434,18 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             cursor = None
         initial = True
         while session.active_consumer == my_generation:
+            # Cleared BEFORE the read: an append that races the sends below re-sets
+            # the event and is picked up on the next iteration. Clearing afterwards
+            # would swallow that wakeup and stall the pane until the next tick.
+            session.history_changed.clear()
             snapshot = session.history.snapshot(cursor)
             if initial or snapshot["reset"]:
                 await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
                                            "truncated": snapshot["truncated"]})
-            for seq, data in snapshot["chunks"]:
+            # One frame per 64 KB rather than one per PTY read: the client treats an
+            # output frame's seq as "accepted through seq", so a batch carrying its
+            # LAST seq is already correct there. See utils/terminalReplay.js.
+            for seq, data in coalesce_chunks(snapshot["chunks"], 64 * 1024):
                 if session.active_consumer != my_generation:
                     return
                 await websocket.send_json({"type": "output", "seq": seq, "data": data})
@@ -1441,7 +1456,12 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             if not session.alive:
                 await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
                 return
-            await asyncio.sleep(0.025)
+            # The timeout is ONLY a liveness re-check for the branch above; new
+            # output arrives via the event, never by waiting this out.
+            try:
+                await asyncio.wait_for(session.history_changed.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
 
     async def pty_to_ws():
         """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY).
@@ -1706,11 +1726,17 @@ def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int
     session = pty_manager.get_terminal(terminal_id)
     if session is None or session.harness != "codex":
         return JSONResponse({"error": "Codex terminal not found"}, status_code=404)
-    usage = pty_manager.refresh_codex_usage(session, usage_tracker)
-    if not session.codex_rollout_path:
+    pty_manager.refresh_codex_usage(session, usage_tracker)
+    # A native /new or /resume can rebind this pane while its recording is read.
+    # Capture identity and path together; never label old messages with a new ID.
+    with session.codex_usage_lock:
+        rollout_path = session.codex_rollout_path
+        session_id = session.codex_session_id
+        binding_status = session.codex_usage.get("binding_status")
+    if not rollout_path:
         return {"messages": [], "before": None, "has_more": False, "available": False}
-    return {**transcript_page(session.codex_rollout_path, max(0, before) if before is not None else None, limit),
-            "session_id": session.codex_session_id, "binding_status": usage.get("binding_status")}
+    return {**transcript_page(rollout_path, max(0, before) if before is not None else None, limit),
+            "session_id": session_id, "binding_status": binding_status}
 
 
 # ── Spend guardrails ─────────────────────────────────────
@@ -6742,11 +6768,27 @@ def main():
             "unless you specifically intend to expose it.",
             host,
         )
+    # Port-holder guard. The sidecar deliberately outlives the desktop app
+    # (Tauri kills only the PyInstaller bootloader; measured 2026-09-08 the
+    # Python child keeps answering on its port), which is how sessions
+    # survive a window close. On relaunch the port is therefore usually held
+    # by a previous Studio: a HEALTHY one is attached to (exit
+    # ATTACH_EXIT_CODE, which lib.rs treats as "do not restart"), a HUNG one
+    # is terminated so this instance can bind, and a foreign holder is named
+    # and left alone. Without this, a hung 2.1.6 sidecar produced twelve
+    # consecutive bind failures this morning, each invisible in cockpit.log.
+    from instance_guard import ATTACH_EXIT_CODE, resolve_port
+    verdict = resolve_port(host, port, logger=logger)
+    if verdict.state == "healthy":
+        sys.exit(ATTACH_EXIT_CODE)
     # Auto-open browser unless suppressed
     if os.getenv("NO_BROWSER", "").lower() not in ("1", "true", "yes"):
         import threading
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host=host, port=port)
+    # log_config=None: uvicorn's default dictConfig strips every handler from
+    # its own loggers, which is how "[Errno 10048]" never reached cockpit.log.
+    # logging_config.setup() already routes uvicorn.* to stderr + the file.
+    uvicorn.run(app, host=host, port=port, log_config=None)
 
 
 if __name__ == "__main__":

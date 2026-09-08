@@ -1,4 +1,6 @@
 import json
+import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,6 +10,28 @@ import codex_usage
 import server
 from pty_manager import PtyManager, TerminalSession
 from usage_tracker import UsageTracker
+
+
+def test_transcript_identity_matches_its_file_when_native_conversation_switches(monkeypatch):
+    session = SimpleNamespace(
+        harness="codex", codex_usage_lock=threading.Lock(),
+        codex_rollout_path="first.jsonl", codex_session_id="first-native",
+        codex_usage={"binding_status": "verified"},
+    )
+    manager = SimpleNamespace(get_terminal=lambda _: session, refresh_codex_usage=lambda *_: {})
+    monkeypatch.setattr(server, "pty_manager", manager)
+
+    def read_and_switch(path, before, limit):
+        assert path == "first.jsonl"
+        with session.codex_usage_lock:
+            session.codex_rollout_path = "second.jsonl"
+            session.codex_session_id = "second-native"
+        return {"available": True, "messages": [{"text": "first conversation"}]}
+
+    monkeypatch.setattr("codex_transcript.transcript_page", read_and_switch)
+    result = server.get_codex_transcript("pane")
+    assert result["session_id"] == "first-native"
+    assert result["messages"][0]["text"] == "first conversation"
 
 
 @pytest.mark.asyncio
