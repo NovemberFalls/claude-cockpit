@@ -1,10 +1,10 @@
 # Plexar Studio
 
-*(formerly Claude Cockpit)*
-
-A focused multi-session manager for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run up to 8 Claude Code terminals side by side in one window, organized by project, with live per-session state, session-to-session relays, and real cost tracking. Native desktop app for Windows; runs from source on macOS and Linux.
+A desktop workspace for Claude Code and Codex CLI sessions. Run terminals side by side or in a scrolling layout grouped by project, with saved conversation history, session state, token usage and API-equivalent cost estimates. Native desktop app for Windows; runs from source on macOS and Linux.
 
 **AGPL-3.0** · [Latest release](https://github.com/NovemberFalls/plexar-studio/releases/latest)
+
+**2.1.5:** automatic Codex conversation history, session restore and usage improvements, with compatible upgrades for existing installations. See the [release notes](CHANGELOG.md#215---2026-09-07).
 
 [![Plexar Studio](screenshot.svg)](https://github.com/NovemberFalls/plexar-studio/releases/latest)
 
@@ -14,16 +14,18 @@ A focused multi-session manager for [Claude Code](https://docs.anthropic.com/en/
 
 ## What Is This?
 
-Studio wraps the `claude` CLI in a terminal emulator (xterm.js) driven by a local FastAPI server that owns the PTYs. **It does not proxy, wrap, or intercept the model** — each pane is a real `claude` process with a real pseudo-terminal, and everything Claude Code can do on its own it can do here.
+Studio runs the `claude` and `codex` CLIs in terminal emulators (xterm.js), driven by a local FastAPI server that owns their pseudo-terminals. Each pane runs the selected CLI with its own session and working directory.
 
-The design bet is **depth over width**. This is not a general AI IDE; it is a manager for Claude Code, and nearly every feature exists because running several sessions at once has problems that running one does not.
+Plexar Studio keeps multiple CLI sessions organized while preserving the tools and authentication each CLI already uses.
 
-- **Up to 8 concurrent sessions**, in 1–8 pane layouts. The 3, 5 and 7-pane layouts have a featured cell you assign explicitly.
+- **Grid and scrolling layouts.** Choose 1–8 grid panes, or scroll through sessions grouped by folder. The concurrent-session limit defaults to 8 and can be configured separately; settings support up to 64, subject to your machine's resources.
 - **Live per-pane state** — idle / busy / waiting-on-you, parsed off the terminal stream. The point is knowing at a glance which pane needs you.
 - **Sessions grouped by project folder**, with live git branch and dirty status.
 - **Session-to-session relay** — hand one session's reply to another, run an autonomous loop between two, or open a channel with one lead and N workers.
-- **Cost and token tracking** per session, per model, and per tool, with spend guardrails.
-- **Open provider layer** — Claude Code is the focus, but you can pair a local engine (vLLM, LM Studio) or OpenRouter alongside it and choose per session.
+- **Codex conversation history through normal scrolling**, backed by saved native messages rather than terminal redraws.
+- **Usage and context at a glance**, including Codex's context ring, observed effort, token totals, focused-session quota and API-equivalent estimates. Unknown data stays labelled as unknown.
+- **Reports and spend guardrails** for recorded usage, with per-session, model and tool breakdowns.
+- **Provider selection** — native Claude and Codex, configured OpenRouter models, and local engines through Claude Code.
 - Drag-and-drop file upload, clipboard image paste, pop-out terminals into their own windows, session resume, per-session permission bypass.
 
 ---
@@ -44,34 +46,36 @@ The desktop app bundles the server and starts it automatically; no browser neede
 
 ## Prerequisites
 
-Only needed to run from source. The desktop installer bundles Python and the server.
+Install and authenticate at least one supported CLI for both desktop and source use. The desktop installer bundles Python and the Studio server; source development also needs Python and Node.js.
 
 | Requirement | Check with | Install from |
 |---|---|---|
 | **Claude CLI** | `claude --version` | [claude.com/download](https://claude.com/download) or `npm install -g @anthropic-ai/claude-code` |
+| **Codex CLI** | `codex --version` | [OpenAI Codex](https://github.com/openai/codex) |
 | **Python 3.11+** | `python --version` | [python.org](https://www.python.org/downloads/) |
-| **Node.js 18+** | `node --version` | [nodejs.org](https://nodejs.org/) |
+| **Node.js 20.19+ or 22.12+** | `node --version` | [nodejs.org](https://nodejs.org/) |
 
-The Claude CLI must be logged in. Run `claude` in a terminal once to confirm before starting Studio.
+Run `claude` or `codex` in a terminal once to confirm authentication before starting Studio. Both CLIs run natively on Windows here; WSL is not required. Studio deliberately disables Claude's auto-updater inside sessions. Finish those sessions before updating the CLI separately, then use **Re-check** in CLI settings.
 
 ---
 
 ## Quick Start (from source)
 
-```bash
+Run these commands in PowerShell:
+
+```powershell
 git clone https://github.com/NovemberFalls/plexar-studio.git
 cd plexar-studio
 
-pip install -r web/requirements.txt        # pywinpty on Windows, ptyprocess elsewhere
-cd web/frontend && npm install && cd ../..
-
-cd web && python server.py                 # API on http://localhost:8420
+python -m pip install -r web/requirements.txt
+npm --prefix web/frontend ci
+python web/server.py                       # API on http://localhost:8420
 ```
 
-In a second terminal:
+In a second terminal, from the repository root:
 
-```bash
-cd web/frontend && npm run dev             # Vite on http://localhost:5174
+```powershell
+npm --prefix web/frontend run dev          # Vite on http://localhost:5174
 ```
 
 Open **http://localhost:5174** and click **+** in the Projects drawer to create your first session.
@@ -82,11 +86,17 @@ Open **http://localhost:5174** and click **+** in the Projects drawer to create 
 
 ### Sessions
 
-Click **+** (or `Ctrl+Shift+N`), pick a working directory, optionally name it, choose a model, and open. **Bypass permissions** is a per-session toggle — it launches Claude Code without approval prompts, so use it deliberately.
+Click **+** (or `Ctrl+Shift+N`), choose Claude Code or Codex, pick a working directory and a compatible model, and open. **Bypass permissions** is a per-session toggle; review it before enabling it.
 
-Models offered: Opus 5 / 4.8, Sonnet 5, Haiku 4.5, Fable 5 (including 1M-context variants), plus any local or OpenRouter model you have configured.
+The model picker follows the selected CLI. Existing sessions retain their CLI and native conversation identity when restored, including native Codex resumes. The active-session view distinguishes unavailable or last-known conversation data instead of assigning another session's messages or usage to it.
 
 Closing a pane kills the terminal but shows a 12-second **Undo** that resumes the same conversation.
+
+### Codex history
+
+Scroll upward in a Codex pane to reach saved user and assistant messages automatically. Continue upward to load older messages. Scroll down past the newest saved messages, press Escape, or choose **Back to live terminal** to return. **Conversation history** remains available as a direct entry point.
+
+This works in docked and popout panes and leaves the CLI running. Saved messages come from Codex's native conversation record; they are separate from raw terminal output and do not include every tool display. Terminal reconnects also replay a bounded 8 MiB output buffer. Truncated or unavailable history is labelled; restarting the backend does not preserve that in-memory raw-output buffer.
 
 ### Layouts
 
@@ -95,6 +105,7 @@ Closing a pane kills the terminal but shows a 12-second **Undo** that resumes th
 - **3, 5 and 7** have a large featured cell. Which pane is featured only changes when you say so — via **Make featured** in the pane menu, or by dropping a pane into the big cell. Clicking into a terminal to type never reshuffles the grid.
 - **Drag a pane header** onto another to swap them. **Drag a session from the sidebar** into any pane to place it there.
 - **Pop out** any pane into its own OS window.
+- In **scrolling layout**, click a project folder to jump to it. The folder highlight follows scrolling, and pane dragging stays within its folder. Switching layouts keeps terminal instances mounted.
 
 ### Sessions that talk to each other
 
@@ -116,7 +127,9 @@ Prices are snapshotted daily from OpenRouter and **cost is frozen at ingest** �
 
 **Spend guardrails** (Settings ▸ Spend) can warn or block at a cap, with real and API-equivalent spend tracked separately — under a subscription, an Anthropic turn is not money billed, and the caps reflect that. Blocks apply to bridges and new sessions; **interactive typing is never blocked**. If the underlying pricing isn't trustworthy enough to hard-block on, a block downgrades to an alert and says so.
 
-The top bar also shows your Anthropic 5-hour and weekly utilization, read from the same source as `claude /status`.
+Subscription limits follow the focused session: Claude account utilization or the quota windows observed in that Codex session. Codex headers show the current context ring separately from cumulative tokens. API-equivalent estimates are not subscription charges and exclude tools, Fast mode and regional price adjustments; unsupported pricing remains unknown.
+
+Reports tables and the Diagnostics log viewer fill the available space. Diagnostics offers **ALL** to read retained logs, including rotated files, within the retention limit.
 
 ### Engine (local and alternate providers)
 
@@ -147,13 +160,13 @@ Remapping is not wired yet. `Ctrl+K` opens the Projects drawer and focuses its f
 
 ### Themes
 
-Two dark palettes ship: **VA Night** and **Cockpit Blue**. Settings ▸ Appearance also lets you override individual design tokens and save named palettes of your own.
+Two dark palettes ship: **VA Night** and **Plexar Studio Blue**. Settings ▸ Appearance also lets you override individual design tokens and save named palettes of your own.
 
 ---
 
 ## MCP Servers
 
-Sessions inside Studio automatically use whatever [MCP servers](https://modelcontextprotocol.io/) your Claude Code setup already has (`~/.claude/settings.json`). Nothing to configure in the app.
+Sessions use the [MCP servers](https://modelcontextprotocol.io/) configured for their selected CLI. Configure Claude Code and Codex through their respective CLI settings.
 
 Find servers via the [official registry](https://registry.modelcontextprotocol.io/) or the [reference implementations](https://github.com/modelcontextprotocol/servers).
 
@@ -169,10 +182,11 @@ A few are environment variables, set in `web/.env` (copy `web/.env.example`):
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address. See the security note below before changing this. |
 | `PORT` | `8420` | Server port |
-| `MAX_SESSIONS` | `8` | Maximum concurrent sessions |
+| `MAX_SESSIONS` | settings value, else `8` | Overrides the concurrent-session limit at server startup |
 | `IDLE_TIMEOUT` | `0` | Kill idle sessions after N seconds (0 = disabled) |
 | `NO_BROWSER` | `0` | `1` suppresses auto-opening a browser |
 | `CLAUDE_CLI_PATH` | — | Full path to the `claude` executable, if it isn't discoverable |
+| `CODEX_CLI_PATH` | — | Full path to the `codex` executable, if it isn't discoverable |
 | `OPENROUTER_API_KEY` | — | Enables OpenRouter models |
 | `COCKPIT_PRICING_REFRESH_HOURS` | `24` | How often to poll for model prices |
 
@@ -190,26 +204,36 @@ Setting `HOST=0.0.0.0` exposes it to your network and stands the `Host` check do
 
 Requires [Rust](https://rustup.rs/).
 
-**The order of these steps is load-bearing.** The desktop window is a thin webview over the sidecar's HTTP server, so the UI a user sees is the copy frozen into `cockpit-server.exe` — *not* `frontend/dist` on disk. Build the sidecar before the frontend and the app ships the previous release's interface while every version check passes. That shipped twice; hence step 3.
+Build the frontend before the server executable. The desktop window loads the UI embedded in `plexar-studio-server.exe`, so compiling the server first can package an older interface. The verification step checks the embedded UI against the current frontend build.
 
-```bash
+From the repository root in PowerShell:
+
+```powershell
 # 1. Build the React frontend — FIRST
-cd web/frontend && npm run build
+npm --prefix web/frontend run build
 
 # 2. Build the PyInstaller sidecar
-cd .. && python -m PyInstaller --clean --noconfirm cockpit-server.spec
+Push-Location web
+python -m PyInstaller --clean --noconfirm cockpit-server.spec
 
 # 3. Verify the sidecar carries the CURRENT frontend — stop-ship if this fails
 python verify_sidecar_bundle.py
 
 # 4. Stage the sidecar and build the desktop app
-cp dist/claude-cockpit.exe frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
-cd frontend && npx tauri build
+Copy-Item -LiteralPath dist/plexar-studio-server.exe -Destination frontend/src-tauri/binaries/cockpit-server-x86_64-pc-windows-msvc.exe
+Pop-Location
+Push-Location web/frontend
+npx tauri build
+Pop-Location
 ```
 
 Output: `web/frontend/src-tauri/target/release/bundle/nsis/Plexar-Studio_<version>_x64-setup.exe`
 
 Step 3 compares bytes, not timestamps — rebuilding the sidecar makes it *newer* than `dist/` while still carrying stale contents, so an mtime check goes green on exactly the broken build.
+
+The application executable is `plexar-studio.exe`; PyInstaller produces `plexar-studio-server.exe`. The internal sidecar bundle name `cockpit-server` and application identifier `com.claude-cockpit.app` remain unchanged for upgrade compatibility, as do existing storage and environment-variable keys. This preserves installed-app identity and saved preferences. Release updater archives use Tauri update signatures; those signatures are separate from Windows Authenticode signing of executables.
+
+Maintainers: see [Releasing Plexar Studio](RELEASING.md) for signing, manifest verification and publishing.
 
 ---
 
@@ -248,10 +272,14 @@ Many modules carry a long docstring explaining *why* they are shaped the way the
 
 ## Testing
 
-```bash
-cd web && python -m pytest tests/ -v      # backend
-cd web/frontend && npm test               # frontend
-cd web/frontend && npm run lint
+From the repository root:
+
+```powershell
+Push-Location web
+python -m pytest tests/ -v
+Pop-Location
+npm --prefix web/frontend test
+npm --prefix web/frontend run lint
 ```
 
 Both suites run on push and PR via GitHub Actions.
@@ -268,9 +296,9 @@ Both suites run on push and PR via GitHub Actions.
 
 The error message lists every directory that was searched — read it before guessing.
 
-**"[Session ended]" immediately** — the Claude CLI isn't authenticated. Run `claude` manually in that directory first.
+**"[Session ended]" immediately** — inspect Diagnostics and run the selected `claude` or `codex` CLI manually in the same working directory to see its startup error. Confirm authentication and executable selection.
 
-**Port 8420 already in use** — `PORT=9000 python server.py`.
+**Port 8420 already in use** — stop the conflicting development server, or set `$env:PORT="9000"` before `python web/server.py`. If using Vite, update its development proxy to the same port.
 
 **A pane says the backend is down and never recovers** — if it instead says the origin was refused, that is the origin guard, and reloading the app fixes it. The two are distinguished deliberately, because waiting fixes one and never fixes the other.
 
@@ -278,11 +306,11 @@ The error message lists every directory that was searched — read it before gue
 
 ## Privacy
 
-**Your sessions, code, and conversations stay on your machine.** Studio stores everything locally (`~/.plexar-studio/`), and terminal traffic never leaves the process — Studio is not a proxy, and it does not send your prompts or output anywhere.
+Studio stores its own settings and records locally (`~/.plexar-studio/`) and reads native CLI conversation records from their local storage. The selected CLI sends prompts and code to its configured provider as part of normal operation. Studio does not operate a hosted session service.
 
 For accuracy, Studio does make a small number of outbound requests, all of which you can see in the source:
 
-- **openrouter.ai** — daily model *price list* poll, so cost figures are real. No usage data is sent.
+- **openrouter.ai** — daily model *price list* poll for reference cost estimates. No usage data is sent by that poll.
 - **api.anthropic.com** — reads your subscription utilization, using the Claude CLI's own stored token. Read-only; Studio never refreshes or rotates that token.
 - **github.com** — the desktop app's update check on launch.
 - Any **provider you configure yourself** (a local engine, OpenRouter) receives the traffic you direct to it. Nothing is sent to a provider you have not selected.

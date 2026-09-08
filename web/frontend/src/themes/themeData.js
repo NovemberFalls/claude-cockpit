@@ -1,6 +1,6 @@
 /**
  * Plexar Studio — Theme Data
- * Two palettes: Visual Assist Night (default) and Cockpit Blue.
+ * Two palettes: Visual Assist Night (default) and Plexar Studio Blue.
  * Drives the `--cc-*` design-token custom properties consumed by index.css.
  */
 
@@ -15,7 +15,7 @@ export const THEMES = {
     working: "#4ea1e8", thinking: "#7cc7ff", waiting: "#e0b060", idle: "#5bbf9f", error: "#e0698a",
   },
   "cockpit-blue": {
-    id: "cockpit-blue", label: "Cockpit Blue", group: "dark",
+    id: "cockpit-blue", label: "Plexar Studio Blue", group: "dark",
     bg: "#1b1e23", bg2: "#101317", surface: "#20242b", elev: "#262b33", term: "#16191d",
     border: "rgba(255,255,255,.08)", line: "rgba(255,255,255,.06)",
     fg: "#d6dae1", dim: "#9aa4af", muted: "#626d78",

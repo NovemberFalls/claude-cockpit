@@ -11,7 +11,8 @@
 import { fmtCost, fmtCount, fmtPct } from "./format.js";
 
 const CARD = {
-  height: 300,
+  minHeight: 180,
+  height: "100%",
   borderRadius: 12,
   background: "var(--cc-surface)",
   border: "1px solid var(--cc-border)",

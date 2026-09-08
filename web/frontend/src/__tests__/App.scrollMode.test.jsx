@@ -1,10 +1,10 @@
 /**
  * Scroll mode — the folder-grouped layout (backlog row 19).
  *
- * These pin the four traps the row names. They are deliberately a mix of
- * behavioural (the grouping arithmetic, run for real) and structural (the
- * no-remount rule, which can only be proven against the source, and is
- * additionally covered by App.featuredPane.test.jsx).
+ * These retain the grouping arithmetic and structural guardrails. Runtime
+ * pane identity across layout switches and folder navigation, plus scroll
+ * highlight synchronization, are covered by App.scrollMode.behavior.test.jsx
+ * against the real App composition root.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";

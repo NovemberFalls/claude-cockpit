@@ -577,7 +577,7 @@ function NotEnforcedNote({ name, what, why }) {
  * deliberately NOT a draft field:
  *
  *   - The route applies and persists server-side the moment it returns
- *     (~/.claude-cockpit/vllm-models-dir.json, re-read at startup to build the
+ *     (~/.plexar-studio/vllm-models-dir.json, re-read at startup to build the
  *     managed container's docker -v bind mount). Routing it through setField
  *     would write a settings.json key nothing reads, and the container would
  *     never be configured — that is the exact regression this section closes.

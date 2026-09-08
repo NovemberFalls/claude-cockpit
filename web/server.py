@@ -1,4 +1,4 @@
-"""FastAPI web server for Claude Cockpit -- PTY-bridged interactive terminals."""
+"""FastAPI web server for Plexar Studio -- PTY-bridged interactive terminals."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time as _time
+import urllib.request as _urllib_request
 import urllib.error  # module scope: the /models handler distinguishes a REFUSAL from unreachable
 import uuid
 import webbrowser
@@ -81,7 +82,7 @@ async def lifespan(app: FastAPI):
         if PID_FILE.exists():
             old_pid = int(PID_FILE.read_text().strip())
             if psutil.pid_exists(old_pid):
-                logger.warning("Another cockpit instance may be running (PID %d)", old_pid)
+                logger.warning("Another Plexar Studio instance may be running (PID %d)", old_pid)
             else:
                 logger.info("Previous instance (PID %d) crashed — cleaned up", old_pid)
     except Exception:
@@ -114,6 +115,9 @@ async def lifespan(app: FastAPI):
                     if not session.alive:
                         continue
                     try:
+                        if session.harness == "codex":
+                            await loop.run_in_executor(None, pty_manager.refresh_codex_usage, session, usage_tracker)
+                            continue
                         jsonl_path = pty_manager._get_jsonl_path(session)
                         if not jsonl_path:
                             continue
@@ -158,7 +162,7 @@ async def lifespan(app: FastAPI):
     app.state.vllm_sampler_task = asyncio.create_task(_vllm_sampler_loop())
 
     # Fleet history sampler: snapshots ALL providers to a local JSONL time-series
-    # so the in-app History view is derived from Cockpit alone (no Prometheus).
+    # so the in-app History view is derived from Plexar Studio alone (no Prometheus).
     app.state.fleet_history_task = asyncio.create_task(_fleet_history_loop())
 
     # Daily model-price refresh. Prices are only ever APPENDED (pricing_store),
@@ -234,7 +238,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Claude Cockpit Web",
+    title="Plexar Studio API",
     description="Multi-session Claude CLI terminal manager",
     version="1.0.0",
     lifespan=lifespan,
@@ -956,6 +960,7 @@ async def _session_reader(terminal_id: str):
         data = await pty_manager.read_pty(terminal_id)
         if data:
             session.tracker.feed(data)
+            session.history.append(data)
             session.last_output_time = _time.monotonic()
             if session.tracker.effort:
                 session.effort = session.tracker.effort
@@ -1117,7 +1122,7 @@ async def delete_terminal(terminal_id: str):
 
 # Best-effort cap on how long the Claude-side /rename sync waits for the
 # target session to go typing-quiet + idle. This runs synchronously inside
-# the PATCH request, so it must stay short — the Cockpit-side rename has
+# the PATCH request, so it must stay short — the Plexar Studio-side rename has
 # already succeeded by this point regardless of the outcome.
 _RENAME_SYNC_TIMEOUT = 5.0
 
@@ -1139,7 +1144,7 @@ async def _sync_claude_rename(terminal_id: str, name: str) -> bool:
     helper bridge_manager's V1 manual relay uses. Any failure — gate timeout,
     dead session, or PTY write failure — is swallowed and reported back as
     False. The caller (PATCH /api/terminals/{id}) has already committed the
-    Cockpit-side rename by the time this runs, and that must NOT be rolled
+    Plexar Studio-side rename by the time this runs, and that must NOT be rolled
     back just because the Claude Code sync didn't land.
     """
     try:
@@ -1154,10 +1159,10 @@ async def _sync_claude_rename(terminal_id: str, name: str) -> bool:
 
 @app.patch("/api/terminals/{terminal_id}")
 async def rename_terminal_route(terminal_id: str, request: Request):
-    """Rename a Cockpit session, optionally syncing the name into Claude Code.
+    """Rename a Plexar Studio session, optionally syncing the name into Claude Code.
 
     Body: {"name": str, "sync_claude": bool=false}
-    The Cockpit-side rename always happens first and always succeeds if the
+    The Plexar Studio-side rename always happens first and always succeeds if the
     terminal exists and the name validates — sync_claude failure never rolls
     it back (see _sync_claude_rename).
     """
@@ -1411,6 +1416,33 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
     session.active_consumer += 1
     my_generation = session.active_consumer
 
+    async def replay_to_ws():
+        raw_after = websocket.query_params.get("after")
+        try:
+            cursor = int(raw_after) if raw_after is not None else None
+            if cursor is not None and cursor < 0:
+                cursor = None
+        except ValueError:
+            cursor = None
+        initial = True
+        while session.active_consumer == my_generation:
+            snapshot = session.history.snapshot(cursor)
+            if initial or snapshot["reset"]:
+                await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
+                                           "truncated": snapshot["truncated"]})
+            for seq, data in snapshot["chunks"]:
+                if session.active_consumer != my_generation:
+                    return
+                await websocket.send_json({"type": "output", "seq": seq, "data": data})
+            cursor = snapshot["sequence"]
+            if initial or snapshot["reset"]:
+                await websocket.send_json({"type": "replay_end", "seq": cursor})
+            initial = False
+            if not session.alive:
+                await websocket.send_text("\r\n\x1b[33m[Session ended]\x1b[0m\r\n")
+                return
+            await asyncio.sleep(0.025)
+
     async def pty_to_ws():
         """Forward PTY output to WebSocket (reads from session queue; background reader drains PTY).
 
@@ -1471,7 +1503,7 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
             except Exception:
                 break
 
-    reader_task = asyncio.create_task(pty_to_ws())
+    reader_task = asyncio.create_task(replay_to_ws() if websocket.query_params.get("replay") == "1" else pty_to_ws())
     heartbeat_task = asyncio.create_task(heartbeat())
 
     try:
@@ -1654,6 +1686,8 @@ def get_terminal_usage(terminal_id: str):
     session = pty_manager.get_terminal(terminal_id)
     if session is None:
         return JSONResponse({"error": "Terminal not found"}, status_code=404)
+    if session.harness == "codex":
+        return pty_manager.refresh_codex_usage(session, usage_tracker)
     summary = usage_tracker.session_summary(terminal_id)
     summary["effort"] = session.effort or None
     return summary
@@ -1663,6 +1697,20 @@ def get_terminal_usage(terminal_id: str):
 def get_daily_usage(day: str | None = None):
     """Return the daily cost/token rollup, optionally for a specific ``day`` (YYYY-MM-DD)."""
     return usage_tracker.daily_summary(day)
+
+
+@app.get("/api/terminals/{terminal_id}/transcript")
+def get_codex_transcript(terminal_id: str, before: int | None = None, limit: int = 50):
+    """Read only the native transcript already bound to this terminal's process."""
+    from codex_transcript import transcript_page
+    session = pty_manager.get_terminal(terminal_id)
+    if session is None or session.harness != "codex":
+        return JSONResponse({"error": "Codex terminal not found"}, status_code=404)
+    usage = pty_manager.refresh_codex_usage(session, usage_tracker)
+    if not session.codex_rollout_path:
+        return {"messages": [], "before": None, "has_more": False, "available": False}
+    return {**transcript_page(session.codex_rollout_path, max(0, before) if before is not None else None, limit),
+            "session_id": session.codex_session_id, "binding_status": usage.get("binding_status")}
 
 
 # ── Spend guardrails ─────────────────────────────────────
@@ -1693,7 +1741,7 @@ def _spend_error_text(spend: dict) -> str:
 @app.get("/api/spend/status")
 async def get_spend_status():
     """Current spend posture: window, per-class spend vs cap, and whether
-    Cockpit is blocking.
+    Plexar Studio is blocking.
 
     ALWAYS 200. This is a status read the Settings page renders inline; failing
     it would blank the panel and teach the user to ignore it. spend_guard.evaluate
@@ -2886,7 +2934,7 @@ async def delete_plexar_key():
             "ok": False, "configured": True, "source": "env",
             "masked": settings_store.mask_key(key),
             "error": ("This key comes from the COCKPIT_PLEXAR_KEY environment "
-                      "variable, which Cockpit cannot unset."),
+                      "variable, which Plexar Studio cannot unset."),
         })
     return JSONResponse({"ok": True, "configured": False, "source": None})
 
@@ -2909,8 +2957,8 @@ async def delete_anthropic_settings():
             "masked": settings_store.mask_key(key),
             "error": (
                 "This key comes from the ANTHROPIC_API_KEY environment variable, "
-                "which Cockpit cannot unset. Remove it from your environment (or "
-                "web/.env) and restart Cockpit."
+                "which Plexar Studio cannot unset. Remove it from your environment (or "
+                "web/.env) and restart Plexar Studio."
             ),
         })
     return JSONResponse({
@@ -3228,6 +3276,55 @@ def _tail_file(path: Path, lines: int) -> tuple[list[str], bool, int]:
     return [_redact(line) for line in region[-lines:]], truncated, size
 
 
+def _retained_logs(path: Path) -> dict:
+    """Read a bounded, best-effort snapshot, prioritizing the newest files."""
+    rotation = logging_config.rotation_config()
+    remaining = rotation["max_total_bytes"]
+    parts = []
+    errors = []
+    size_total = 0
+    truncated = False
+    for suffix in range(rotation["backup_count"] + 1):
+        candidate = path if suffix == 0 else path.with_name(f"{path.name}.{suffix}")
+        try:
+            size = candidate.stat().st_size
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors.append(candidate.name)
+            truncated = True
+            continue
+        size_total += size
+        take = min(size, remaining)
+        if take < size:
+            truncated = True
+        if not take and size:
+            continue
+        try:
+            with candidate.open("rb") as stream:
+                stream.seek(size - take)
+                data = stream.read(take)
+            remaining -= take
+            if len(data) < take:
+                truncated = True
+            region = data.decode("utf-8", errors="replace").splitlines()
+            if take < size and region:
+                region = region[1:]
+            parts.append((candidate.name, [_redact(line) for line in region]))
+        except OSError:
+            errors.append(candidate.name)
+            truncated = True
+    parts.reverse()
+    return {
+        "lines": [line for _, lines in parts for line in lines],
+        "truncated": truncated,
+        "size_bytes": size_total,
+        "scope": "retained",
+        "files_read": [name for name, _ in parts],
+        "read_errors": errors,
+    }
+
+
 @app.get("/api/logs")
 async def get_logs(lines: str | None = None):
     """Return the tail of the cockpit log file, secret-redacted.
@@ -3243,12 +3340,18 @@ async def get_logs(lines: str | None = None):
     count = max(1, min(_LOG_LINES_MAX, count))
 
     path = logging_config.log_file_path()
-    tail, truncated, size = await asyncio.to_thread(_tail_file, Path(path), count)
+    if lines == "all":
+        result = await asyncio.to_thread(_retained_logs, Path(path))
+    else:
+        tail, truncated, size = await asyncio.to_thread(_tail_file, Path(path), count)
+        result = {
+            "lines": tail, "truncated": truncated, "size_bytes": size,
+            "scope": "active", "files_read": [Path(path).name] if size else [],
+            "read_errors": [],
+        }
     return JSONResponse({
         "path": path,
-        "lines": tail,
-        "truncated": truncated,
-        "size_bytes": size,
+        **result,
         "rotation": logging_config.rotation_config(),
         "file_logging": logging_config.file_logging_active(),
     })
@@ -3343,7 +3446,7 @@ COCKPIT_VLLM_MODELS_DIR = os.getenv("COCKPIT_VLLM_MODELS_DIR", "")
 # Runtime-settable mirror of COCKPIT_VLLM_MODELS_DIR — seeded from the env var
 # above, but overridable at runtime via PUT /api/local/{id}/models-dir and
 # persisted to survive restart (see _load_vllm_models_dir/_save_vllm_models_dir
-# below). This is the HOST path Cockpit scans on disk. The vLLM container only
+# below). This is the HOST path Plexar Studio scans on disk. The vLLM container only
 # ever sees it bind-mounted at /models (see _vllm_docker_argv), so any model id
 # reported for restart purposes must be expressed as "/models/<name>" — the
 # CONTAINER path — while the host path stays around for display only.
@@ -3415,7 +3518,7 @@ _PROVIDERS = {
         # containers: the address never changes, model swaps and restarts
         # happen behind it, and a not-ready engine answers 503 + Retry-After
         # rather than ECONNREFUSED. So there is exactly one URL here and
-        # Cockpit needs no changes when it goes multi-model — it just points at
+        # Plexar Studio needs no changes when it goes multi-model — it just points at
         # the address and reads /v1/models.
         #
         # broker_url is set to the same address only because the field is
@@ -3442,14 +3545,14 @@ _PROVIDERS = {
             "cf_client_secret": os.getenv("COCKPIT_PLEXAR_CF_CLIENT_SECRET", ""),
         },
         # "model-control" was correctly ABSENT while Plexar owned lifecycle and
-        # exposed no way to drive it -- offering a button Cockpit could not
+        # exposed no way to drive it -- offering a button Plexar Studio could not
         # honour is the false-advertising bug the vLLM entry documents. Plexar
         # added POST /api/instances/{id}/{load,unload} on 2026-07-31, so the
-        # capability is now a promise Cockpit can actually keep. Note this is
-        # load/unload only: RESTART stays Plexar's, because Cockpit still does
+        # capability is now a promise Plexar Studio can actually keep. Note this is
+        # load/unload only: RESTART stays Plexar's, because Plexar Studio still does
         # not own those containers.
         # "instances" / "reports" / "gpus" are Plexar-shaped reads that no other
-        # provider serves. Cockpit KEEPS its own reporting; these are a second
+        # provider serves. Plexar Studio KEEPS its own reporting; these are a second
         # source beside it, never a replacement -- and every Plexar figure
         # carries its own source label so the two are never silently merged.
         # "timeseries" is bucketed HISTORY, which "reports" (window totals)
@@ -3469,7 +3572,7 @@ _DEFAULT_PROVIDER = "lmstudio-local"
 #   instead of offering a control that would always fail.
 #
 #   vLLM — there is no hot-swap API (one model per process, fixed by --model at
-#   launch), so the only mechanism is restarting the process. Cockpit can only
+#   launch), so the only mechanism is restarting the process. Plexar Studio can only
 #   do that for a container IT owns, i.e. the configured intent is on
 #   (COCKPIT_MANAGED_VLLM=1, else settings.json providers.vllm.managed) AND the
 #   double-bind guard did not hand ownership to an external process. When vLLM
@@ -3488,7 +3591,7 @@ if _LMS_CLI:
 # _vllm_is_managed() mid-process, which would (a) make the "model-control"
 # capability list disagree with reality — nothing re-runs
 # _refresh_vllm_model_control() on a settings write — and (b) advertise a
-# restart for a container Cockpit never started. Freezing it keeps effective
+# restart for a container Plexar Studio never started. Freezing it keeps effective
 # ownership changeable at exactly two moments, both of which already refresh the
 # capability list: import and the startup double-bind probe.
 #
@@ -3529,7 +3632,7 @@ def _vllm_managed_setting(*, live: bool = False) -> bool:
 
 
 def _vllm_managed_intent(*, live: bool = False) -> bool:
-    """The CONFIGURED intent to have Cockpit own vLLM — precedence, in order:
+    """The CONFIGURED intent to have Plexar Studio own vLLM — precedence, in order:
 
       1. COCKPIT_MANAGED_VLLM, when explicitly set (any non-empty value): it
          wins outright. An operator who exports the variable means it, and it is
@@ -3538,7 +3641,7 @@ def _vllm_managed_intent(*, live: bool = False) -> bool:
       2. Otherwise providers.vllm.managed from settings.json (the Settings ▸
          Providers ▸ vLLM toggle).
 
-    Intent only. Whether Cockpit ACTUALLY owns the process is _vllm_is_managed(),
+    Intent only. Whether Plexar Studio ACTUALLY owns the process is _vllm_is_managed(),
     which additionally defers to an external server holding the port.
     """
     if COCKPIT_MANAGED_VLLM:
@@ -3547,7 +3650,7 @@ def _vllm_managed_intent(*, live: bool = False) -> bool:
 
 
 def _vllm_is_managed() -> bool:
-    """True when Cockpit owns the vLLM process's lifecycle.
+    """True when Plexar Studio owns the vLLM process's lifecycle.
 
     Two conditions, both required:
       * the configured intent is on — _vllm_managed_intent(): COCKPIT_MANAGED_VLLM
@@ -3557,7 +3660,7 @@ def _vllm_is_managed() -> bool:
       * the startup double-bind guard did not find something already answering
         on the vLLM port. `start_managed_vllm` records that verdict in
         _MANAGED_VLLM["external"]; with the intent on but an external server
-        already up, Cockpit is a pure observer and must not claim otherwise.
+        already up, Plexar Studio is a pure observer and must not claim otherwise.
         This guard overrides BOTH config sources — it is the only one that
         reflects what is actually running.
 
@@ -3574,7 +3677,7 @@ def _vllm_ownership() -> dict:
 
     Three states the UI must be able to tell apart:
       * external — something else answers on the vLLM port. Turning the toggle
-        on changes NOTHING until that process stops; a Cockpit restart will not
+        on changes NOTHING until that process stops; a Plexar Studio restart will not
         help, so pending_restart is False.
       * pending_restart — the configured intent (live from env/settings.json)
         disagrees with what this process resolved at startup. The container is
@@ -3588,22 +3691,22 @@ def _vllm_ownership() -> dict:
     pending = (not external) and (configured != effective)
     if external:
         reason = (
-            "An external vLLM is already answering on this port, so Cockpit defers to it "
-            "and will keep doing so until that process stops. Restarting Cockpit will not "
+            "An external vLLM is already answering on this port, so Plexar Studio defers to it "
+            "and will keep doing so until that process stops. Restarting Plexar Studio will not "
             "change this."
         )
     elif pending and configured:
         reason = (
-            "Saved. Cockpit starts the vLLM container during startup, so this takes effect "
-            "the next time Cockpit restarts."
+            "Saved. Plexar Studio starts the vLLM container during startup, so this takes effect "
+            "the next time Plexar Studio restarts."
         )
     elif pending:
         reason = (
-            "Saved. Cockpit still owns the container it started; it is released the next "
-            "time Cockpit restarts."
+            "Saved. Plexar Studio still owns the container it started; it is released the next "
+            "time Plexar Studio restarts."
         )
     elif effective:
-        reason = "Cockpit owns this vLLM container."
+        reason = "Plexar Studio owns this vLLM container."
     else:
         reason = "vLLM is external — start and stop it where you started it."
     return {
@@ -3643,8 +3746,8 @@ async def get_vllm_ownership():
 # Prometheus adapter and the restart path all still work, and anyone genuinely
 # running a direct vLLM keeps them by declaring so. Two ways back:
 #   * managed intent on (COCKPIT_MANAGED_VLLM=1 / providers.vllm.managed) —
-#     Cockpit launches that container itself, so the provider MUST exist;
-#   * COCKPIT_VLLM_DIRECT=1 — an external direct vLLM that Cockpit does not own.
+#     Plexar Studio launches that container itself, so the provider MUST exist;
+#   * COCKPIT_VLLM_DIRECT=1 — an external direct vLLM that Plexar Studio does not own.
 # Deleting the machinery outright is a separate, larger decision and is not
 # taken here.
 COCKPIT_VLLM_DIRECT = os.getenv("COCKPIT_VLLM_DIRECT", "")
@@ -3908,7 +4011,7 @@ def _detect_wsl_distro() -> str | None:
 
     Returns None on any failure (WSL missing, timeout, unparsable output);
     callers must degrade gracefully rather than rejecting the models-dir path
-    outright -- the docker bind-mount may still work even if Cockpit can't
+    outright -- the docker bind-mount may still work even if Plexar Studio can't
     enumerate it from Windows.
     """
     if "name" in _WSL_DISTRO_CACHE:
@@ -3986,7 +4089,7 @@ def _validate_models_dir(raw_path: str) -> tuple[bool, str | None, str | None, s
         off traversal games where the pre-resolve string looks fine but
         resolves somewhere else entirely. EXCEPTION: a WSL-style path whose
         distro can't be detected is accepted anyway with an empty scan path
-        -- the mount may still be valid even though Cockpit can't verify it.
+        -- the mount may still be valid even though Plexar Studio can't verify it.
     """
     if not isinstance(raw_path, str) or not raw_path:
         return False, "path must be a non-empty string", None, None
@@ -4125,7 +4228,7 @@ def _endpoint_hint(p: dict) -> str | None:
 
 
 def _provider_managed(p: dict) -> bool:
-    """True when Cockpit owns this provider's service lifecycle.
+    """True when Plexar Studio owns this provider's service lifecycle.
 
     Resolved from the SAME determination each subsystem already uses, never a
     second guess:
@@ -4155,7 +4258,7 @@ def _provider_managed(p: dict) -> bool:
 async def get_local_providers():
     """List registered providers -- full URLs and auth are never sent to the
     browser; local providers carry a display-only host:port endpoint_hint and a
-    `managed` boolean saying whether Cockpit owns that service's lifecycle."""
+    `managed` boolean saying whether Plexar Studio owns that service's lifecycle."""
     return JSONResponse({
         "providers": [
             {
@@ -4172,7 +4275,6 @@ async def get_local_providers():
     })
 
 
-import urllib.request as _urllib_request
 
 
 class _NoRedirect(_urllib_request.HTTPRedirectHandler):
@@ -4504,7 +4606,7 @@ def _vllm_metrics(base_url: str, window: str) -> dict:
 # ── vLLM metrics persistence (crude, DB-free dataset) ─────
 #
 # vLLM's Prometheus counters reset to zero on every container restart, so a
-# restart would otherwise lose all history. Cockpit persists them under
+# restart would otherwise lose all history. Plexar Studio persists them under
 # ~/.claude-cockpit/ as a plain dataset the user can open directly:
 #   vllm-metrics.jsonl        -- append-only, one timestamped sample per line
 #   vllm-metrics-rollup.json  -- running lifetime total, reset-detected
@@ -4684,8 +4786,8 @@ async def _vllm_sampler_loop() -> None:
 
 # ── Self-contained fleet history (no Prometheus/Grafana needed) ──
 #
-# Cockpit is already the metrics hub; it samples EVERY provider to a local JSONL
-# time-series so the in-app History view can be derived from Cockpit alone. One
+# Plexar Studio is already the metrics hub; it samples EVERY provider to a local JSONL
+# time-series so the in-app History view can be derived from Plexar Studio alone. One
 # line per provider per tick. Age-capped so the file can't grow unbounded.
 
 _FLEET_LOG = str(app_paths.data_path("fleet-metrics.jsonl"))
@@ -4862,7 +4964,7 @@ def _looks_like(data, keys) -> bool:
 #
 # vLLM does its own continuous batching, so it must be served DIRECT (not
 # never behind a queue, which would serialize requests and kill vLLM's
-# throughput). Cockpit optionally owns a vLLM container: opt-in,
+# throughput). Plexar Studio optionally owns a vLLM container: opt-in,
 # double-bind guarded, best-effort, and
 # never blocking startup/shutdown.
 #
@@ -4932,7 +5034,7 @@ def _vllm_docker_argv(action: str = "run") -> list[str]:
 async def start_managed_vllm() -> bool:
     """Launch the managed vLLM container unless disabled or already answering.
 
-    Returns True when Cockpit's own vLLM container is (being) launched.
+    Returns True when Plexar Studio's own vLLM container is (being) launched.
 
     Opt-in is the SAME determination the rest of the module uses
     (_vllm_managed_intent: env var when set, else settings.json) so the toggle
@@ -4946,7 +5048,7 @@ async def start_managed_vllm() -> bool:
         await asyncio.to_thread(_broker_get, "/v1/models", "", _VLLM_URL)
         logger.info("External vLLM already at %s — not spawning managed one", _VLLM_URL)
         # Ownership went to the external process: drop "model-control" so the UI
-        # never offers a restart Cockpit is not entitled to perform.
+        # never offers a restart Plexar Studio is not entitled to perform.
         _MANAGED_VLLM["external"] = True
         _refresh_vllm_model_control()
         return False
@@ -5072,7 +5174,7 @@ def _normalize_plexar_raw_model(m: dict) -> dict:
         out["eta_seconds"] = envelope.get("eta_seconds")
         # Plexar's load/unload are keyed by INSTANCE, not by model name, and
         # the catalog can carry the same served name twice. Carrying the id
-        # through is what lets a picker toggle a row without Cockpit guessing
+        # through is what lets a picker toggle a row without Plexar Studio guessing
         # which instance a name meant.
         out["instance_id"] = envelope.get("instance_id")
 
@@ -5166,7 +5268,7 @@ def resolve_local_base_url(provider_id: str, terminal_id: str | None = None) -> 
 
     When ``terminal_id`` is given (and passes a strict allowlist regex), the
     returned URL is SESSION-SCOPED via a ``/s/{terminal_id}`` path segment so
-    the receiving shim can attribute the call to a specific Cockpit session
+    the receiving shim can attribute the call to a specific Plexar Studio session
     without needing any custom header support from the CLI. An invalid
     terminal_id is never interpolated into the URL -- falls back to the
     un-scoped form instead (same behavior as terminal_id=None).
@@ -5354,7 +5456,7 @@ async def get_vllm_models_dir(provider_id: str):
 
 @app.put("/api/local/{provider_id}/models-dir")
 async def set_vllm_models_dir(provider_id: str, request: Request):
-    """Reconfigure the HOST directory Cockpit scans for on-disk vLLM models.
+    """Reconfigure the HOST directory Plexar Studio scans for on-disk vLLM models.
 
     SECURITY: this is a filesystem path supplied by the browser, so it is
     validated defensively (see _validate_models_dir) even though it is
@@ -5703,9 +5805,9 @@ async def get_voice_voices():
 
 # ── Plexar reads (instances · reports · GPUs) ─────────────
 #
-# Cockpit KEEPS its own reporting. These are a SECOND source beside it, not a
+# Plexar Studio KEEPS its own reporting. These are a SECOND source beside it, not a
 # replacement: Plexar knows what the GPU did and what consumers experienced at
-# the gateway; Cockpit knows sessions, tokens and cost. Every Plexar figure
+# the gateway; Plexar Studio knows sessions, tokens and cost. Every Plexar figure
 # arrives carrying its own `source` and `window_exact` labels, and those are
 # passed through untouched — merging the two without saying which is which
 # produces numbers nobody can defend.
@@ -5752,11 +5854,11 @@ async def get_provider_reports(provider_id: str, range: str = "lifetime"):
 
 @app.get("/api/local/{provider_id}/identity")
 async def get_provider_identity(provider_id: str):
-    """Who Cockpit authenticates to the provider AS. Always 200.
+    """Who Plexar Studio authenticates to the provider AS. Always 200.
 
     Plexar contracts `/api/me` to answer 200 even unauthenticated, precisely so
     a consumer can tell "wrong credential" from "server down" — a 401 here
-    would collapse two states with opposite remedies. Cockpit preserves that:
+    would collapse two states with opposite remedies. Plexar Studio preserves that:
     this route reports the answer, it does not become one.
 
     The scope prose is Plexar's and is passed through verbatim. Hard-coding
@@ -5856,7 +5958,7 @@ async def _lms_load_bg(model_id: str) -> None:
 def _plexar_instance_for_model(provider: dict, model_id: str):
     """Resolve a served model name to the instance that serves it.
 
-    Cockpit's control routes are keyed by MODEL (that is what a picker row
+    Plexar Studio's control routes are keyed by MODEL (that is what a picker row
     is); Plexar's are keyed by INSTANCE. So this is a lookup, not a rename.
 
     THE COLLISION IS REAL AND NARROWER THAN THIS COMMENT USED TO CLAIM. Plexar
@@ -5902,7 +6004,7 @@ def _plexar_instance_for_model(provider: dict, model_id: str):
     if len(matches) > 1:
         return None, JSONResponse(
             {"error": (
-                f"{len(matches)} instances serve {model_id!r}; Cockpit will not guess "
+                f"{len(matches)} instances serve {model_id!r}; Plexar Studio will not guess "
                 "which one to control. Address it by instance in Plexar."
             )},
             status_code=409,
@@ -5981,8 +6083,8 @@ async def unload_provider_model(provider_id: str, model_id: str):
         return JSONResponse(
             {"error": (
                 "vLLM cannot unload a single model — it serves one model per process. "
-                "Stopping the process is the only unload, and Cockpit only does that for "
-                "a container it owns (Settings ▸ Providers ▸ vLLM ▸ \"Managed by Cockpit\", "
+                "Stopping the process is the only unload, and Plexar Studio only does that for "
+                "a container it owns (Settings ▸ Providers ▸ vLLM ▸ \"Managed by Plexar Studio\", "
                 "or COCKPIT_MANAGED_VLLM=1)."
             )},
             status_code=409,
@@ -6014,7 +6116,7 @@ async def restart_provider_model(provider_id: str, request: Request):
     Only valid for the managed vLLM provider; an EXTERNAL vLLM (nothing opted in
     — neither COCKPIT_MANAGED_VLLM=1 nor settings.json providers.vllm.managed —
     or the startup double-bind probe found something already serving) is not
-    Cockpit's to restart → 409. Killing a container the user started by hand
+    Plexar Studio's to restart → 409. Killing a container the user started by hand
     would be destructive, so the refusal names the ACTUAL cause (external server,
     save-not-yet-in-effect, or simply off) rather than a single generic line.
     """
@@ -6032,22 +6134,22 @@ async def restart_provider_model(provider_id: str, request: Request):
         preamble = (
             "vLLM has no model hot-swap API — one model per process, fixed by "
             "--model at launch — so changing model means restarting the process. "
-            "Cockpit can only do that for a container it owns. "
+            "Plexar Studio can only do that for a container it owns. "
         )
         if ownership["external"]:
             cause = (
-                "An external vLLM is already answering on this port, so Cockpit defers to it. "
+                "An external vLLM is already answering on this port, so Plexar Studio defers to it. "
                 "Restart it where you started it, with the new --model."
             )
         elif ownership["pending_restart"]:
             cause = (
-                "\"Managed by Cockpit\" is saved but not in effect yet — the container is "
-                "started during Cockpit startup, so restart Cockpit first."
+                "\"Managed by Plexar Studio\" is saved but not in effect yet — the container is "
+                "started during Plexar Studio startup, so restart Plexar Studio first."
             )
         else:
             cause = (
                 "This vLLM is external. Turn on Settings ▸ Providers ▸ vLLM ▸ \"Managed by "
-                "Cockpit\" (or start Cockpit with COCKPIT_MANAGED_VLLM=1) and restart Cockpit, "
+                "Plexar Studio\" (or start Plexar Studio with COCKPIT_MANAGED_VLLM=1) and restart Plexar Studio, "
                 "or restart vLLM where you started it, with the new --model."
             )
         return JSONResponse(
@@ -6060,7 +6162,7 @@ async def restart_provider_model(provider_id: str, request: Request):
             status_code=409,
         )
     # Reachable only if a COCKPIT_PROVIDERS_FILE entry strips the capability
-    # while Cockpit still owns the container.
+    # while Plexar Studio still owns the container.
     if "model-control" not in provider["capabilities"]:
         return JSONResponse({"error": "capability not available"}, status_code=404)
     try:
@@ -6190,7 +6292,7 @@ async def get_usage_report(range: str = "7d"):
 
 @app.get("/api/reporting/models")
 async def get_reporting_models(window: str = "lifetime"):
-    """Merged per-model usage report across every pipeline Cockpit observes:
+    """Merged per-model usage report across every pipeline Plexar Studio observes:
     Anthropic + OpenRouter (usage_events, from Claude Code JSONL) and local
     providers (local_runs, from the vLLM/LM Studio tagging shims), with
     per-repo attribution. This is the merge point -- see usage_tracker.model_report.
@@ -6253,7 +6355,7 @@ async def _pricing_refresh_loop() -> None:
 
     Runs the blocking urllib fetch via ``asyncio.to_thread`` so the event loop
     is never blocked. A network failure logs a warning and changes nothing --
-    the loop keeps going, and Cockpit keeps serving with the prices it already
+    the loop keeps going, and Plexar Studio keeps serving with the prices it already
     has.
     """
     try:
@@ -6326,12 +6428,12 @@ async def post_pricing_refresh():
 # Legacy routes: delegate to the default provider so old clients keep working.
 
 
-# ── Unified Prometheus exporter (Cockpit as the fleet metrics hub) ──
+# ── Unified Prometheus exporter (Plexar Studio as the fleet metrics hub) ──
 #
 # vLLM speaks Prometheus natively; LM Studio does NOT (the lane broker used to
 # synthesise counters for it, and that went with the broker in T11 -- so LM
 # Studio now contributes `up` and its model ceiling, and no run counters).
-# Cockpit already holds every provider's stats via its adapters and re-exports
+# Plexar Studio already holds every provider's stats via its adapters and re-exports
 # them ALL as one Prometheus target at GET /metrics, each series labeled by
 # provider — so Prometheus/Grafana see every backend (vLLM + LM Studio + future)
 # side by side from a single scrape. Read-only; best-effort per provider.
@@ -6400,15 +6502,33 @@ def _render_prometheus(pairs: list) -> str:
             emit("cockpit_provider_prompt_tokens_total", "Prompt tokens (lifetime)", pid, kind, tt.get("prompt"))
             emit("cockpit_provider_completion_tokens_total", "Completion tokens (lifetime)", pid, kind, tt.get("completion"))
             tps = m.get("tokens_per_sec") or {}
-            emit("cockpit_provider_tps", "Tokens/sec (completion ÷ wall)", pid, kind, tps.get("avg") if tps.get("avg") is not None else tps.get("current"))
+            emit(
+                "cockpit_provider_tps", "Tokens/sec (completion ÷ wall)", pid, kind,
+                tps.get("avg") if tps.get("avg") is not None else tps.get("current"),
+            )
             dec = m.get("decode_tokens_per_sec") or {}
-            emit("cockpit_provider_decode_tps", "Per-stream decode tokens/sec", pid, kind, dec.get("avg") if dec.get("avg") is not None else dec.get("current"))
+            emit(
+                "cockpit_provider_decode_tps", "Per-stream decode tokens/sec", pid, kind,
+                dec.get("avg") if dec.get("avg") is not None else dec.get("current"),
+            )
             ttft = m.get("ttft_ms") or {}
-            emit("cockpit_provider_ttft_p50_seconds", "Time-to-first-token p50", pid, kind, (ttft.get("p50") / 1000) if isinstance(ttft.get("p50"), (int, float)) else None)
-            emit("cockpit_provider_ttft_p95_seconds", "Time-to-first-token p95", pid, kind, (ttft.get("p95") / 1000) if isinstance(ttft.get("p95"), (int, float)) else None)
+            emit(
+                "cockpit_provider_ttft_p50_seconds", "Time-to-first-token p50", pid, kind,
+                (ttft.get("p50") / 1000) if isinstance(ttft.get("p50"), (int, float)) else None,
+            )
+            emit(
+                "cockpit_provider_ttft_p95_seconds", "Time-to-first-token p95", pid, kind,
+                (ttft.get("p95") / 1000) if isinstance(ttft.get("p95"), (int, float)) else None,
+            )
             rt = m.get("run_time_ms") or {}
-            emit("cockpit_provider_run_time_p50_seconds", "Wall time per run p50", pid, kind, (rt.get("p50") / 1000) if isinstance(rt.get("p50"), (int, float)) else None)
-            emit("cockpit_provider_run_time_p95_seconds", "Wall time per run p95", pid, kind, (rt.get("p95") / 1000) if isinstance(rt.get("p95"), (int, float)) else None)
+            emit(
+                "cockpit_provider_run_time_p50_seconds", "Wall time per run p50", pid, kind,
+                (rt.get("p50") / 1000) if isinstance(rt.get("p50"), (int, float)) else None,
+            )
+            emit(
+                "cockpit_provider_run_time_p95_seconds", "Wall time per run p95", pid, kind,
+                (rt.get("p95") / 1000) if isinstance(rt.get("p95"), (int, float)) else None,
+            )
             eng = m.get("engine") or {}
             emit("cockpit_provider_running", "Requests decoding now (in-engine)", pid, kind, eng.get("running"))
             emit("cockpit_provider_waiting", "Requests waiting (in-engine)", pid, kind, eng.get("waiting"))
@@ -6418,8 +6538,14 @@ def _render_prometheus(pairs: list) -> str:
             cout = ctx.get("out") or {}
             emit("cockpit_provider_req_prompt_tokens_avg", "Avg prompt (input) tokens per request", pid, kind, cin.get("avg"))
             emit("cockpit_provider_req_prompt_tokens_p95", "p95 prompt (input) tokens per request", pid, kind, cin.get("p95"))
-            emit("cockpit_provider_req_completion_tokens_avg", "Avg completion (output) tokens per request", pid, kind, cout.get("avg"))
-            emit("cockpit_provider_req_completion_tokens_p95", "p95 completion (output) tokens per request", pid, kind, cout.get("p95"))
+            emit(
+                "cockpit_provider_req_completion_tokens_avg", "Avg completion (output) tokens per request", pid, kind,
+                cout.get("avg"),
+            )
+            emit(
+                "cockpit_provider_req_completion_tokens_p95", "p95 completion (output) tokens per request", pid, kind,
+                cout.get("p95"),
+            )
             emit("cockpit_provider_model_max_tokens", "Model max context window (ceiling)", pid, kind, snap.get("model_max"))
         # `cockpit_provider_queue_depth` was emitted here from the lane
         # broker's /queue snapshot and is GONE with it (T11). The in-engine
@@ -6442,7 +6568,7 @@ async def prometheus_metrics():
 
 # ── Time-series history (Prometheus proxy for the in-app History view) ──
 #
-# Cockpit fronts its own themed History view instead of Grafana. PromQL stays
+# Plexar Studio fronts its own themed History view instead of Grafana. PromQL stays
 # SERVER-SIDE (curated named metrics only) — the browser sends a metric key +
 # provider + window, never raw PromQL, and never learns the Prometheus URL
 # (same SSRF stance as the broker proxy). Read-only.
@@ -6450,7 +6576,7 @@ async def prometheus_metrics():
 _PROMETHEUS_URL = os.getenv("COCKPIT_PROMETHEUS_URL", "http://127.0.0.1:9491").rstrip("/")
 
 # metric key -> PromQL template (%s = provider label regex). All are gauges the
-# Cockpit exporter emits, so query_range over them is a clean time-series.
+# Plexar Studio exporter emits, so query_range over them is a clean time-series.
 _TSDB_METRICS = {
     "throughput_tps": 'cockpit_provider_tps{provider=~"%s"}',
     "decode_tps": 'cockpit_provider_decode_tps{provider=~"%s"}',
@@ -6511,11 +6637,11 @@ async def tsdb_query_range(metric: str, provider: str = "all", window: str = "24
     return JSONResponse(data)
 
 
-# ── In-app history from Cockpit's OWN store (no Prometheus dependency) ──
+# ── In-app history from Plexar Studio's OWN store (no Prometheus dependency) ──
 
 @app.get("/api/history/status")
 async def history_status():
-    """History is derived from Cockpit's own JSONL — always 'reachable'; report
+    """History is derived from Plexar Studio's own JSONL — always 'reachable'; report
     how many samples have accrued so the UI can show an empty-until-warm state."""
     try:
         with open(_FLEET_LOG, "r", encoding="utf-8") as f:
@@ -6527,7 +6653,7 @@ async def history_status():
 
 @app.get("/api/history/query")
 async def history_query(metric: str, provider: str = "all", window: str = "24h"):
-    """Curated time-series from Cockpit's fleet log — the self-contained History
+    """Curated time-series from Plexar Studio's fleet log — the self-contained History
     view backend (replaces the Prometheus proxy; no external TSDB needed)."""
     field = _FLEET_METRICS.get(metric)
     if field is None:
@@ -6607,10 +6733,10 @@ def main():
     # LAN. HOST still overrides for anyone who explicitly wants that.
     host = os.getenv("HOST", "127.0.0.1")
     url = f"http://localhost:{port}"
-    logger.info("Claude Cockpit -> %s", url)
+    logger.info("Plexar Studio -> %s", url)
     if host not in _LOOPBACK_HOSTS:
         logger.warning(
-            "Cockpit is binding to %s, which is NOT loopback-only — the API has "
+            "Plexar Studio is binding to %s, which is NOT loopback-only — the API has "
             "no authentication, so it will be reachable by anyone on the LAN "
             "(filesystem browse/upload, arbitrary process spawn). Set HOST=127.0.0.1 "
             "unless you specifically intend to expose it.",

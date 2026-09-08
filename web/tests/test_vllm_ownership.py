@@ -217,13 +217,13 @@ async def test_restart_refusal_points_at_the_toggle_when_off(client, ownership):
         r = await c.post("/api/local/vllm-local/restart", json={"model": "/models/x"})
     assert r.status_code == 409
     body = r.json()
-    assert "Managed by Cockpit" in body["error"]
+    assert "Managed by Plexar Studio" in body["error"]
     assert "COCKPIT_MANAGED_VLLM=1" in body["error"]
     assert body["ownership"]["pending_restart"] is False
 
 
 @pytest.mark.asyncio
-async def test_restart_refusal_says_restart_cockpit_when_pending(client, monkeypatch, ownership):
+async def test_restart_refusal_says_restart_studio_when_pending(client, monkeypatch, ownership):
     ownership(None, False)
     monkeypatch.setattr(
         server_module.settings_store,
@@ -234,7 +234,7 @@ async def test_restart_refusal_says_restart_cockpit_when_pending(client, monkeyp
         r = await c.post("/api/local/vllm-local/restart", json={"model": "/models/x"})
     assert r.status_code == 409
     body = r.json()
-    assert "restart Cockpit first" in body["error"]
+    assert "restart Plexar Studio first" in body["error"]
     assert body["ownership"]["pending_restart"] is True
 
 

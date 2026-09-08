@@ -1,8 +1,8 @@
 """Persistent server-side settings store for user-configurable API keys.
 
-Currently stores a single value -- the OpenRouter API key a desktop-app user
-pastes in via the Settings UI -- in a small JSON config file under the user's
-home directory (``~/.claude-cockpit/config.json``). This is independent of
+Stores provider API keys entered via Settings in a small JSON config file
+under the resolved application data directory (normally
+``~/.plexar-studio/config.json``). This is independent of
 ``web/.env`` (which is read once via ``load_dotenv()`` in server.py); the UI
 key takes precedence, and the env var is the fallback for headless/dev setups.
 
@@ -30,8 +30,8 @@ CONFIG_DIR = app_paths.data_dir()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 # Sibling of config.json. config.json holds SECRETS (the OpenRouter key);
 # settings.json holds only non-secret user preferences and is safe to export.
-# NOTE: every other piece of cockpit state lives under ~/.claude-cockpit/, so
-# settings.json lives here too -- not under %APPDATA%.
+# Preferences share the resolved application data directory with the stores;
+# app_paths handles environment overrides and legacy data migrations.
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 _KEY_FIELD = "openrouter_api_key"

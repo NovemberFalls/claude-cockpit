@@ -5,7 +5,7 @@ const ONBOARDING_KEY = "cockpit-onboarding-suppressed";
 
 const STEPS = [
   {
-    eyebrow: "WELCOME TO COCKPIT",
+    eyebrow: "WELCOME TO PLEXAR STUDIO",
     title: "Run your whole fleet in one window",
     desc: "Up to eight Claude Code sessions side by side, grouped by project folder with live git status — a calm command center for parallel work.",
   },

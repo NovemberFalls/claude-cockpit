@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-cockpit"
-version = "1.12.1"
-description = "Multi-session Claude Code manager with a FastAPI backend and React/Vite frontend"
+name = "plexar-studio"
+version = "2.1.5"
+description = "Plexar Studio — a desktop workspace for Claude Code and Codex CLI sessions"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = []
@@ -22,7 +22,6 @@ web = [
     "python-dotenv>=1.0.0",
 ]
 
-[project.optional-dependencies.test]
 test = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",

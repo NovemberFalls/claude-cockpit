@@ -1,4 +1,4 @@
-"""PTY backend abstraction for Claude Cockpit.
+"""PTY backend abstraction for Plexar Studio.
 
 Defines the PtyProcess ABC and a get_backend() factory.  Adding support for
 a new platform (Linux, macOS) means implementing PtyProcess and registering
@@ -55,10 +55,10 @@ class PtyProcess(ABC):
 def get_backend() -> type:
     """Return the appropriate PtyProcess class for the current environment.
 
-    Selection priority on Windows:
-      1. ConPty (pure ctypes) inside a PyInstaller bundle — pywinpty's C
-         extension causes 0xC0000142 DLL failures in onefile bundles.
-      2. winpty.PtyProcess in development (installed via pywinpty).
+    Windows uses the same pure-ctypes ConPTY implementation in development
+    and bundles. pywinpty 3.0.3 was observed delivering input while returning
+    zero bytes, causing the paced writer to stop after the first chunk.
+    Keep the genuine zero-write failure guard and use our verified backend.
 
     To add Linux/macOS support, detect sys.platform here and return your
     backend class (must implement the PtyProcess interface above).
@@ -70,15 +70,10 @@ def get_backend() -> type:
         from unix_pty import UnixPtyProcess
         return UnixPtyProcess
 
-    # Windows — ConPTY for bundled (PyInstaller), winpty for development
+    # Windows — one verified write contract in dev and packaged builds.
     if sys.platform == "win32":
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            from conpty import PtyProcess as ConPtyProcess  # type: ignore[import]
-            return ConPtyProcess
-
-        import winpty  # type: ignore[import]
-        return winpty.PtyProcess
+        from conpty import PtyProcess as ConPtyProcess  # type: ignore[import]
+        return ConPtyProcess
 
     raise RuntimeError(
         f"No PTY backend available for platform '{sys.platform}'. "

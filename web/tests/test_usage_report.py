@@ -35,9 +35,14 @@ def tracker(tmp_path):
 
 
 @pytest.fixture()
-def client():
+async def client(tracker, monkeypatch):
+    # ASGITransport does not start the application's lifecycle. Always supply
+    # this test's open temporary database, never a real/global tracker that a
+    # previous lifecycle test may already have closed.
+    monkeypatch.setattr(server_module, "usage_tracker", tracker)
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://127.0.0.1:8420")
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8420") as instance:
+        yield instance
 
 
 def _iso(days_ago: float = 0) -> str:

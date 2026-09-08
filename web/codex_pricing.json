@@ -1,0 +1,18 @@
+{
+  "checked_at": "2026-09-07",
+  "source": "https://developers.openai.com/api/docs/pricing",
+  "basis": "Standard API-equivalent estimate; excludes subscription billing, tools, regional uplifts and unknown service tiers",
+  "long_context_threshold": 272000,
+  "threshold_sources": [
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+    "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+  ],
+  "models": {
+    "gpt-6-astra": {"input_per_mtok": 10, "cache_read_per_mtok": 1, "cache_write_per_mtok": 12.5, "output_per_mtok": 50},
+    "gpt-5.6-sol": {"input_per_mtok": 4, "cache_read_per_mtok": 0.4, "cache_write_per_mtok": 5, "output_per_mtok": 20},
+    "gpt-5.6-terra": {"input_per_mtok": 2, "cache_read_per_mtok": 0.2, "cache_write_per_mtok": 2.5, "output_per_mtok": 12},
+    "gpt-5.6-luna": {"input_per_mtok": 0.2, "cache_read_per_mtok": 0.02, "cache_write_per_mtok": 0.25, "output_per_mtok": 1.2}
+  }
+}

@@ -1,6 +1,6 @@
-"""Watchdog service for Claude Cockpit.
+"""Watchdog service for Plexar Studio.
 
-Starts the cockpit server as a subprocess and restarts it on crash.
+Starts the Plexar Studio server as a subprocess and restarts it on crash.
 Usage: python server_watchdog.py [--port PORT] [--host HOST]
 """
 
@@ -22,7 +22,7 @@ BACKOFF_DELAY = 30  # seconds to wait after too many rapid restarts
 
 
 def run_watchdog(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
-    """Monitor and restart the cockpit server."""
+    """Monitor and restart the Plexar Studio server."""
     server_dir = Path(__file__).parent
     python = sys.executable
     restart_times: list[float] = []
@@ -35,7 +35,7 @@ def run_watchdog(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    print(f"  Cockpit Watchdog started (pid {os.getpid()})")
+    print(f"  Plexar Studio Watchdog started (pid {os.getpid()})")
     print(f"  Server target: {host}:{port}")
 
     while not shutting_down:
@@ -52,7 +52,7 @@ def run_watchdog(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         if restart_times:
             env["NO_BROWSER"] = "1"
 
-        print("  [watchdog] Starting cockpit server...")
+        print("  [watchdog] Starting Plexar Studio server...")
         proc = subprocess.Popen(
             [python, "-m", "uvicorn", "server:app", "--host", host, "--port", str(port)],
             cwd=str(server_dir),
@@ -85,7 +85,7 @@ def run_watchdog(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Cockpit watchdog service")
+    parser = argparse.ArgumentParser(description="Plexar Studio watchdog service")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default=DEFAULT_HOST)
     args = parser.parse_args()

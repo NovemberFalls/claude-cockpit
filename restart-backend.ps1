@@ -1,4 +1,4 @@
-# Restart the Claude Cockpit backend
+# Restart the Plexar Studio backend
 $port = 8420
 $procId = (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).OwningProcess
 if ($procId) {

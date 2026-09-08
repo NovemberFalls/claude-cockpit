@@ -79,6 +79,7 @@ export default function CommandBar({
   // controls that set them were hidden one click away. One bar, one copy of
   // each control.
   controls,
+  usageSession = null,
 }) {
   const [limitsOpen, setLimitsOpen] = useState(false);
 
@@ -125,9 +126,9 @@ export default function CommandBar({
       <PaletteTrigger onOpenPalette={onOpenPalette} />
 
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
-        {/* Real 5-hour / weekly subscription utilization — the same figures the
-            CLI shows under /status ▸ Usage. */}
+        {/* The focused session owns this identity, independently of launch defaults. */}
         <UsageLimitsPill
+          session={usageSession}
           open={limitsOpen}
           onToggle={() => setLimitsOpen((v) => !v)}
           onClose={() => setLimitsOpen(false)}

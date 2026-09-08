@@ -227,6 +227,10 @@ export default function SessionsTable({ rows, statusByTerminalId, onOpenTrace, t
         border: "1px solid var(--cc-border)",
         overflow: "hidden",
         minWidth: 0,
+        minHeight: 180,
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
       }}
     >
       <div
@@ -236,6 +240,7 @@ export default function SessionsTable({ rows, statusByTerminalId, onOpenTrace, t
           justifyContent: "space-between",
           gap: 10,
           padding: "11px 16px 9px",
+          flexShrink: 0,
           borderBottom: "1px solid var(--cc-border)",
         }}
       >
@@ -260,7 +265,7 @@ export default function SessionsTable({ rows, statusByTerminalId, onOpenTrace, t
           No sessions match the current range and filters.
         </div>
       ) : (
-        <div style={{ maxHeight: 420, overflow: "auto", minWidth: 0 }}>
+        <div data-testid="sessions-scroll-body" style={{ flex: 1, minHeight: 0, overflow: "auto", minWidth: 0 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "auto" }}>
             <thead>
               <tr>

@@ -1,7 +1,7 @@
 """Client for Plexar — the vLLM face (``C:/Code/Personal/plexar-vllm``).
 
 Plexar owns vLLM container lifecycle and publishes a **fixed-bind**
-OpenAI-compatible gateway. Cockpit points at one address forever; model swaps,
+OpenAI-compatible gateway. Plexar Studio points at one address forever; model swaps,
 restarts and upgrades happen behind it.
 
 Why this module exists rather than another `_broker_get` call
@@ -13,13 +13,13 @@ Plexar draws a distinction the lane-broker contract has no room for:
 A restarting engine answers ``200`` on ``/v1/models`` and ``503`` +
 ``Retry-After`` on inference, carrying a state envelope that says *which* of
 ``serving | degraded | loading | unreachable | stopped | failed`` it is, why,
-and how long it expects to take. Collapsing that to Cockpit's boolean
+and how long it expects to take. Collapsing that to Plexar Studio's boolean
 ``reachable`` throws away the only information that tells a user whether to
 wait ten seconds or go fix something — and reports a dead engine behind a live
 gateway as healthy, which is worse than reporting nothing.
 
 So every read here preserves ``state`` / ``available`` / ``reason`` /
-``action`` / ``eta_seconds`` verbatim. Cockpit does not re-derive them and
+``action`` / ``eta_seconds`` verbatim. Plexar Studio does not re-derive them and
 must not invent them.
 
 Two data sources, never conflated (Plexar's rule, honoured here)
@@ -53,7 +53,7 @@ _TIMEOUT = 6.0
 _SERVABLE_STATES = ("serving", "degraded")
 
 # Ranges Plexar's reporting routes accept. Validated here so a bad value is a
-# 400 from Cockpit rather than an opaque proxy error.
+# 400 from Plexar Studio rather than an opaque proxy error.
 REPORT_RANGES = ("lifetime", "24h", "7d", "30d")
 
 # The bucketed-history route accepts a WIDER set of ranges than the summary
@@ -71,7 +71,7 @@ _ENVELOPE_KEYS = ("state", "available", "reason", "action", "eta_seconds", "sinc
 # that Cloudflare blocks outright (see auth_headers). Naming the product also
 # makes Plexar's own request records attributable to Studio rather than to an
 # anonymous script.
-_USER_AGENT = "PlexarStudio/1.0 (+https://github.com/anthropics/claude-cockpit)"
+_USER_AGENT = "PlexarStudio/1.0 (+https://github.com/NovemberFalls/plexar-studio)"
 
 
 def auth_headers(auth: Optional[dict]) -> dict:
@@ -337,7 +337,7 @@ def fetch_reports(base_url: str, report_range: str = "lifetime",
     """Plexar's ``/api/reports/summary`` — both sources, each figure labelled.
 
     Figures are passed through with their ``source`` and ``window_exact`` flags
-    intact. Cockpit must not strip those: a Prometheus counter is cumulative
+    intact. Plexar Studio must not strip those: a Prometheus counter is cumulative
     since engine start, so the same number means different things depending on
     which source produced it.
     """
@@ -442,7 +442,7 @@ def fetch_timeseries(
 
 
 def fetch_me(base_url: str, auth: Optional[dict] = None) -> dict:
-    """Plexar's ``/api/me`` — who Cockpit is authenticating as.
+    """Plexar's ``/api/me`` — who Plexar Studio is authenticating as.
 
     **Contracted to answer 200 even when nobody is authenticated**, and that is
     the reason to build against it rather than inferring identity from another
@@ -451,7 +451,7 @@ def fetch_me(base_url: str, auth: Optional[dict] = None) -> dict:
     remedies.
 
     ``scope_description`` and the ``scopes`` map are served BY PLEXAR and
-    rendered verbatim. Cockpit must not hard-code what a guest may do: that
+    rendered verbatim. Plexar Studio must not hard-code what a guest may do: that
     prose goes stale the first time the allow-list changes, and it has already
     changed once. Same rule as ``capacity_caveat``.
     """
@@ -482,7 +482,7 @@ def fetch_me(base_url: str, auth: Optional[dict] = None) -> dict:
     }
 
 
-#: The only lifecycle verbs Cockpit is allowed to send. `unload` frees the GPU
+#: The only lifecycle verbs Plexar Studio is allowed to send. `unload` frees the GPU
 #: but KEEPS the declaration; `load` starts it again with no config re-supply.
 #: `DELETE /api/instances/{id}` is deliberately NOT here — it forgets the
 #: instance entirely, so re-running the same model would mean re-entering its

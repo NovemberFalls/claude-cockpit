@@ -9,7 +9,7 @@
 
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import UsageLimitsPill from "../components/UsageLimitsPill.jsx";
 
@@ -55,6 +55,56 @@ afterEach(() => {
 });
 
 describe("UsageLimitsPill", () => {
+  it("reads Codex windows only from the selected terminal and labels them observed", async () => {
+    globalThis.fetch = mockFetch({ subscription_limits: { ...AVAILABLE, detail: "Observed in this Codex session; may lag account usage.", observed_at: "2026-09-07T20:00:00Z" } });
+    render(<UsageLimitsPill session={{ harness: "codex", terminalId: "codex/one" }} open />);
+    await screen.findByText(/may lag account usage/);
+    expect(screen.getByRole("button", { name: "Codex subscription usage limits" })).toBeInTheDocument();
+    expect(globalThis.fetch.mock.calls.every(([url]) => url === "/api/terminals/codex%2Fone/usage")).toBe(true);
+    expect(screen.getByText((content) => content.startsWith("Observed ") && content.includes("2026"))).toBeInTheDocument();
+  });
+
+  it("does not substitute Claude limits for missing Codex observations", async () => {
+    globalThis.fetch = mockFetch({ total_tokens: 123 });
+    render(<UsageLimitsPill session={{ harness: "codex", terminalId: "one" }} open />);
+    await screen.findByText(/No subscription limits have been observed/);
+    expect(screen.queryAllByRole("progressbar")).toHaveLength(0);
+    expect(globalThis.fetch.mock.calls.every(([url]) => !url.includes("anthropic"))).toBe(true);
+  });
+
+  it("ignores late responses across provider and Codex session switches", async () => {
+    const pending = [];
+    globalThis.fetch = vi.fn((url) => new Promise((resolve) => pending.push({ url, resolve })));
+    const view = render(<UsageLimitsPill session={{ harness: "claude-code", terminalId: "claude" }} open={false} />);
+    view.rerender(<UsageLimitsPill session={{ harness: "codex", terminalId: "one" }} open={false} />);
+    view.rerender(<UsageLimitsPill session={{ harness: "codex", terminalId: "two" }} open={false} />);
+    const response = (percent, codex) => ({ ok: true, json: async () => {
+      const payload = { available: true, limits: [{ kind: "weekly", label: "Weekly", percent }] };
+      return codex ? { subscription_limits: payload } : payload;
+    } });
+    await act(async () => pending[2].resolve(response(28, true)));
+    expect(screen.getByText("28%")).toBeInTheDocument();
+    await act(async () => { pending[0].resolve(response(99, false)); pending[1].resolve(response(88, true)); });
+    expect(screen.getByText("28%")).toBeInTheDocument();
+    expect(screen.queryByText("99%")).toBeNull();
+    expect(screen.queryByText("88%")).toBeNull();
+  });
+
+  it("does not fetch quota without a focused session", async () => {
+    globalThis.fetch = vi.fn();
+    render(<UsageLimitsPill session={null} open />);
+    await screen.findByText(/Focus a session/);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not show an expired Codex observation as current quota", async () => {
+    globalThis.fetch = mockFetch({ subscription_limits: { available: true, limits: [{ kind: "week", label: "Week", percent: 90, resets_at: "2000-01-01T00:00:00Z" }] } });
+    render(<UsageLimitsPill session={{ harness: "codex", terminalId: "one" }} open />);
+    await screen.findByText(/limits have reset/);
+    expect(screen.queryAllByRole("progressbar")).toHaveLength(0);
+    expect(screen.queryByText("90%")).toBeNull();
+  });
+
   it("shows the tightest limit in the pill, not the first or the average", async () => {
     globalThis.fetch = mockFetch(AVAILABLE);
     render(<UsageLimitsPill open={false} onToggle={() => {}} onClose={() => {}} />);
@@ -148,6 +198,7 @@ describe("UsageLimitsPill", () => {
     const onToggle = vi.fn();
     render(<UsageLimitsPill open={false} onToggle={onToggle} onClose={() => {}} />);
 
+    await screen.findByText("62%");
     fireEvent.click(screen.getByRole("button", { name: /usage limits/i }));
     expect(onToggle).toHaveBeenCalledTimes(1);
   });

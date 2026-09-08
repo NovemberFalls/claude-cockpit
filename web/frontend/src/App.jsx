@@ -202,12 +202,18 @@ function loadSavedLocations() {
   );
 }
 
-function loadSavedSessions() { return lsLoad(SESSIONS_KEY); }
+function loadSavedSessions() {
+  return lsLoad(SESSIONS_KEY).map((s) => ({ ...s, harness: s.harness || getModelHarness(s.model) }));
+}
 
 function saveSessions(sessions) {
   const toSave = sessions
-    .filter((s) => s.status !== "error" && s.status !== "history")
-    .map(({ name, model, workdir }) => ({ name, model, workdir }));
+    .filter((s) => s.status !== "history")
+    .map(({ name, model, workdir, terminalId, harness, codex_session_id,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions }) => ({
+      name, model, workdir, terminalId, harness, codex_session_id,
+      claude_session_id, permissionMode, effort, fast, bypassPermissions,
+    }));
   lsSave(SESSIONS_KEY, toSave);
 }
 
@@ -459,6 +465,7 @@ export default function App() {
   const [dragOverGroup, setDragOverGroup] = useState(null);
   /** The pane container, so a folder click can scroll it. */
   const stageRef = useRef(null);
+  const [visibleFolder, setVisibleFolder] = useState(null);
   /** Slot ceiling when looking for somewhere to put a session. The grid can
    *  only show `layout` of them; scroll mode has no ceiling, which is the
    *  whole point — a session that exists but has no slot is invisible, and
@@ -678,6 +685,7 @@ export default function App() {
     const usePermissionMode = options.permissionMode ?? permissionMode;
     const useEffort = options.effort ?? effort;
     const useHarness = options.harness ?? harness;
+    const useFast = options.fast ?? fast;
 
     addLocations([dir]);
 
@@ -692,6 +700,11 @@ export default function App() {
       name: sessionName,
       terminalId: null,
       model: useModel,
+      harness: useHarness,
+      permissionMode: usePermissionMode,
+      effort: useEffort,
+      fast: useFast,
+      codex_session_id: useHarness === "codex" ? options.resumeSessionId || null : null,
       status: "starting",
       workdir: dir,
       bypassPermissions: !!options.bypassPermissions,
@@ -728,7 +741,7 @@ export default function App() {
         effort: useEffort,
         // Which CLI to spawn ("claude-code" | "codex"); the backend validates it.
         harness: useHarness,
-        fast: isOpus && fast,
+        fast: isOpus && useFast,
         ...(getModelProvider(useModel) === "openrouter"
           ? { provider: "openrouter", providerModel: useModel }
           : {}),
@@ -752,8 +765,8 @@ export default function App() {
       });
       const data = await res.json();
 
-      if (data.error) {
-        toast(data.error, "error");
+      if (!res.ok || data.error) {
+        toast(data.error || "Failed to create session", "error");
         setSessions((prev) =>
           prev.map((s) => s.id === localId ? { ...s, status: "error" } : s)
         );
@@ -762,7 +775,8 @@ export default function App() {
 
       setSessions((prev) =>
         prev.map((s) =>
-          s.id === localId ? { ...s, terminalId: data.id, status: "running" } : s
+          s.id === localId ? { ...s, terminalId: data.id, status: "running",
+            codex_session_id: data.codex_session_id || s.codex_session_id } : s
         )
       );
     } catch (_err) {
@@ -774,11 +788,8 @@ export default function App() {
   }, [model, harness, permissionMode, effort, fast, slotCapacity, addLocations, toast]);
 
   // Remove a session (kills terminal on server) with 12s undo window.
-  // Undo resumes via claude_session_id (exact session) if available, or
-  // continueSession: true (most-recent session in workdir) as a fallback.
-  // Note: claude_session_id is populated by the polling loop from /api/terminals
-  // if the backend exposes that field. If it doesn't, undo falls back to
-  // continueSession: true, which resumes the most-recent session in the workdir.
+  // Codex undo requires its exact chat identity; Claude retains its established
+  // most-recent-in-directory fallback when no exact identity is available.
   const removeSession = useCallback(async (localId) => {
     const session = sessions.find((s) => s.id === localId);
     if (!session) return;
@@ -797,7 +808,8 @@ export default function App() {
     // produced any meaningful state (status was 'starting' or 'error' and
     // there is no claude_session_id to resume from).
     const canResume = session.terminalId && (
-      !!session.claude_session_id || session.status === "running"
+      session.harness === "codex" ? !!session.codex_session_id
+        : !!session.claude_session_id || session.status === "running"
     );
     if (!canResume) return;
 
@@ -812,9 +824,11 @@ export default function App() {
             session.name,
             session.workdir,
             session.model,
-            session.claude_session_id
-              ? { resumeSessionId: session.claude_session_id, bypassPermissions: session.bypassPermissions }
-              : { continueSession: true, bypassPermissions: session.bypassPermissions }
+            { harness: session.harness, permissionMode: session.permissionMode,
+              effort: session.effort, fast: session.fast, bypassPermissions: session.bypassPermissions,
+              ...(session.codex_session_id || session.claude_session_id
+                ? { resumeSessionId: session.codex_session_id || session.claude_session_id }
+                : { continueSession: true }) }
           );
         },
       }
@@ -933,6 +947,41 @@ export default function App() {
     [renderRows],
   );
 
+  // Track the first folder whose panes still occupy the viewport. Sticky
+  // headers keep their screen position after their original row has passed,
+  // so use each group's final pane as its end boundary instead of comparing
+  // header tops. This reads layout only; pane order and terminal identity stay
+  // untouched. Coalesce wheel/trackpad events to one measurement per frame.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !scrollMode || activeSection !== "work") return;
+    let frame = null;
+    const measure = () => {
+      frame = null;
+      const headers = [...stage.querySelectorAll("[data-folder-head]")];
+      const top = stage.getBoundingClientRect().top;
+      const current = headers.find((header, index) => {
+        const lastPane = headers[index + 1]?.previousElementSibling || stage.lastElementChild;
+        return lastPane && lastPane.getBoundingClientRect().bottom > top + header.getBoundingClientRect().height;
+      }) || headers.at(-1);
+      setVisibleFolder(current?.dataset.folderHead ?? null);
+    };
+    const schedule = () => {
+      if (frame === null) frame = requestAnimationFrame(measure);
+    };
+    stage.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    const observer = new ResizeObserver(schedule);
+    observer.observe(stage);
+    schedule();
+    return () => {
+      stage.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      observer.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [scrollMode, activeSection, backendReady, orderedGroupKeys]);
+
   /** Move a folder group so it takes `toKey`'s position. Writes the WHOLE
    *  visible order, not just the moved pair, so the stored list always
    *  describes what the user is looking at. */
@@ -998,18 +1047,14 @@ export default function App() {
   }, []);
 
   // Persist sessions to localStorage
-  const sessionCountRef = useRef(0);
+  const [sessionsHydrated, setSessionsHydrated] = useState(false);
   useEffect(() => {
-    if (sessions.length !== sessionCountRef.current) {
-      sessionCountRef.current = sessions.length;
-      if (sessions.length > 0) saveSessions(sessions);
-      else { try { localStorage.removeItem(SESSIONS_KEY); } catch (_) {} }
-    }
-  }, [sessions]);
+    if (sessionsHydrated) saveSessions(sessions);
+  }, [sessions, sessionsHydrated]);
 
   // Restore saved sessions once backend is ready.
-  // Reattaches to surviving backend terminals by name match instead of spawning
-  // new processes (which caused duplicate "ghost" sessions).
+  // Reattach by identity, or resume a known Codex chat after a backend restart.
+  // Never substitute an arbitrary most-recent chat for a missing identity.
   const restoredRef = useRef(false);
   useEffect(() => {
     if (!backendReady || restoredRef.current) return;
@@ -1017,29 +1062,31 @@ export default function App() {
 
     (async () => {
       const saved = loadSavedSessions();
-      if (!saved.length) return;
+      if (!saved.length) { setSessionsHydrated(true); return; }
 
       try {
         const res = await fetch("/api/terminals");
+        if (!res.ok) throw new Error("Session restore unavailable");
         const data = await res.json();
         const backendTerminals = data.terminals || [];
 
-        if (backendTerminals.length === 0) {
-          // Backend restarted — old sessions are gone. Clear stale data.
-          console.log("[cockpit] Backend has no terminals — clearing stale saved sessions");
-          localStorage.removeItem(SESSIONS_KEY);
-          return;
-        }
-
-        // Match saved sessions to surviving backend terminals by name.
-        // Reattach instead of creating new processes to avoid duplicates.
-        // Unmatched backend terminals will be picked up by the polling loop.
+        // Exact identity takes precedence over the legacy name/directory match.
         const claimed = new Set();
         const reattached = [];
+        const toResume = [];
         for (const s of saved) {
-          const match = backendTerminals.find(
-            (t) => t.alive && !claimed.has(t.id) && t.name === s.name
-          );
+          const available = backendTerminals.filter((t) => t.alive && !claimed.has(t.id));
+          let match = available.find((t) => t.id === s.terminalId);
+          if (!match && s.codex_session_id) {
+            match = available.find((t) => t.harness === "codex" && t.codex_session_id === s.codex_session_id);
+          }
+          // Legacy records have no identity. Only accept a unique name AND
+          // directory match; never attach a known identity to a different chat.
+          if (!match && !s.terminalId && !s.codex_session_id) {
+            const candidates = available.filter((t) => t.name === s.name &&
+              t.working_dir === s.workdir && (t.harness || getModelHarness(t.model)) === s.harness);
+            if (candidates.length === 1) match = candidates[0];
+          }
           if (match) {
             claimed.add(match.id);
             reattached.push({
@@ -1047,6 +1094,11 @@ export default function App() {
               name: s.name,
               terminalId: match.id,
               model: s.model || match.model || "sonnet",
+              harness: match.harness || s.harness || "claude-code",
+              permissionMode: s.permissionMode,
+              effort: s.effort,
+              fast: s.fast,
+              codex_session_id: match.codex_session_id || s.codex_session_id || null,
               status: "running",
               workdir: s.workdir || match.working_dir || "",
               bypassPermissions: match.bypass_permissions || false,
@@ -1059,6 +1111,12 @@ export default function App() {
               // and removeSession will fall back to continueSession: true.
               claude_session_id: match.claude_session_id || null,
             });
+          } else if (s.harness === "codex") {
+            if (s.codex_session_id) toResume.push(s);
+            else {
+              reattached.push({ ...s, id: nextLocalId++, terminalId: null, status: "error" });
+              toast(`Cannot restore "${s.name}": its Codex session ID was not recorded. Saved details were preserved.`, "error");
+            }
           }
         }
 
@@ -1068,16 +1126,23 @@ export default function App() {
           setActiveIds(reattached.map((s) => s.id).slice(0, layout));
           addLocations(reattached.map((s) => s.workdir).filter(Boolean));
         } else {
-          // No saved sessions matched surviving terminals — stale data
-          console.log("[cockpit] No saved sessions matched surviving terminals — clearing");
-          localStorage.removeItem(SESSIONS_KEY);
+          setSessions([]);
+          setActiveIds([]);
         }
+        for (const s of toResume) {
+          await createSession(s.name, s.workdir, s.model, {
+            harness: "codex", resumeSessionId: s.codex_session_id,
+            permissionMode: s.permissionMode, effort: s.effort, fast: s.fast,
+            bypassPermissions: s.bypassPermissions,
+          });
+        }
+        setSessionsHydrated(true);
       } catch (_) {
         // Backend unreachable — don't restore, don't clear
         return;
       }
     })();
-  }, [backendReady, layout, addLocations]);
+  }, [backendReady, layout, addLocations, createSession, toast]);
 
   // Request notification permission
   const notifRequested = useRef(false);
@@ -1117,17 +1182,19 @@ export default function App() {
               const newCost = t.cost || 0;
               const newContextPercent = t.context_percent ?? null;
               const newClaudeSessionId = t.claude_session_id || null;
+              const newCodexSessionId = t.codex_session_id || s.codex_session_id || null;
               if (
                 s.activityState === newState &&
                 s.tokens === newTokens &&
                 s.cost === newCost &&
                 s.context_percent === newContextPercent &&
-                s.claude_session_id === newClaudeSessionId
+                s.claude_session_id === newClaudeSessionId &&
+                s.codex_session_id === newCodexSessionId
               ) {
                 return s;
               }
               changed = true;
-              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId };
+              return { ...s, activityState: newState, tokens: newTokens, cost: newCost, context_percent: newContextPercent, claude_session_id: newClaudeSessionId, codex_session_id: newCodexSessionId };
             });
 
             const result = changed ? updated : prev;
@@ -1146,6 +1213,7 @@ export default function App() {
         if (pollFailCount.current >= 3) {
           console.warn("[cockpit] Backend unreachable — entering recovery mode");
           setBackendReady(false);
+          setSessionsHydrated(false);
           restoredRef.current = false; // Allow session restore on reconnect
         }
       }
@@ -2592,6 +2660,7 @@ export default function App() {
             <CommandBar
               title={SECTION_TITLES[activeSection] || "Workspace"}
               workspaceName={activeWorkspaceName}
+              usageSession={focusedSession}
               onOpenPalette={openPalette}
               controls={
                 <TopBar
@@ -2660,6 +2729,7 @@ export default function App() {
                   activeIds={(scrollMode ? activeIds : activeIds.slice(0, layout)).filter((id) => id != null)}
                   onSelect={selectSession}
                   onFocusFolder={scrollToFolder}
+                  visibleFolder={scrollMode ? visibleFolder : null}
                   onNew={() => setShowNewDialog(true)}
                   onNewAt={(dir) => createSession("", dir, undefined, { bypassPermissions: getLocationBypass(dir) })}
                   onToggleLocationBypass={toggleLocationBypass}

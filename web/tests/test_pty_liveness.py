@@ -46,6 +46,32 @@ def _session(alive_flag=True, process_alive=True, write_raises=None):
     return s
 
 
+@pytest.mark.parametrize("operation,cause", [
+    ("get_terminal", "get-process-exited"),
+    ("_write_pty_sync", "write-process-exited"),
+])
+def test_liveness_transition_has_one_info_cause(operation, cause, caplog):
+    manager = PtyManager()
+    session = _session(process_alive=False)
+    session.id = "audit-fixture"
+    manager.sessions[session.id] = session
+    logger = logging.getLogger("cockpit.pty")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="cockpit.pty"):
+            method = getattr(manager, operation)
+            args = (session.id, "hello") if operation == "_write_pty_sync" else (session.id,)
+            method(*args)
+            method(*args)
+        matches = [record for record in caplog.records if f"cause={cause}" in record.message]
+        assert len(matches) == 1
+        assert "audit-fixture" in matches[0].message
+        assert session.alive is False
+    finally:
+        logger.removeHandler(caplog.handler)
+        manager._pty_executor.shutdown(wait=True)
+
+
 @pytest.fixture()
 def mgr():
     m = PtyManager.__new__(PtyManager)

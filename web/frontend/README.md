@@ -1,16 +1,39 @@
-# React + Vite
+# Plexar Studio frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React, Vite and xterm.js provide the desktop workspace for Claude Code and Codex CLI sessions. The local Python server owns PTYs, native conversation bindings and usage data; the frontend renders terminals, saved messages, reports and settings.
 
-Currently, two official plugins are available:
+See the [project README](../../README.md) for CLI authentication, configuration and desktop packaging.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Development
 
-## React Compiler
+Use Node.js 20.19+ or 22.12+. From the repository root in PowerShell:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```powershell
+npm --prefix web/frontend ci
+python -m pip install -r web/requirements.txt
+python web/server.py
+```
 
-## Expanding the ESLint configuration
+In a second terminal, also from the repository root:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```powershell
+npm --prefix web/frontend run dev
+```
+
+Open `http://localhost:5174`. Vite proxies API requests and terminal sockets to `http://localhost:8420`. The Windows CLI/PTY path is native and does not require WSL.
+
+## Checks
+
+```powershell
+npm --prefix web/frontend test
+npm --prefix web/frontend run lint
+npm --prefix web/frontend run build
+```
+
+Tests cover terminal identity, replay ordering, native-history pagination and usage rendering. Browser rendering and real CLI interaction require their own checks; a mocked terminal does not establish visual or input behavior.
+
+## Desktop bundle
+
+Build the frontend before freezing the Python sidecar. The installed app serves the frontend embedded in that sidecar. Follow the [desktop build sequence](../../README.md#building-the-desktop-app-yourself), including `verify_sidecar_bundle.py`, before building the Tauri installer.
+
+The public app is **Plexar Studio**. Existing internal storage keys, sidecar bundle name and installed application identifier remain compatible with earlier versions. Do not rename those identifiers as a cosmetic change.

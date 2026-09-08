@@ -58,6 +58,17 @@ const CLI_NOT_FOUND = {
 
 const VERSION = { app: "1.10.1", cli: "1.10.1", python: "3.11.9", platform: "win32" };
 
+it("explains the installed CLI's separate manual update workflow", async () => {
+  globalThis.fetch = mockFetch({ cli: CLI_ENV });
+  render(<ClaudeCliSettings />);
+  const note = screen.getByTestId("cli-update-note");
+  expect(note).toHaveTextContent("auto-updates are disabled");
+  expect(note).toHaveTextContent("Finish those sessions");
+  expect(note).toHaveTextContent("outside Studio");
+  expect(note).toHaveTextContent("Updating Plexar Studio does not update Claude Code");
+  await waitFor(() => expect(screen.getByTestId("cli-version")).toHaveTextContent("1.10.1"));
+});
+
 /** Route every fetch by URL so the page's two parallel reads stay independent. */
 function mockFetch({ cli, version = VERSION, cliStatus = 200, cliThrows = false }) {
   return vi.fn(async (url) => {

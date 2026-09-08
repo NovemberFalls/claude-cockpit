@@ -31,7 +31,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import logging_config
 logging_config.setup("WARNING")
 
-import server as server_module
 from server import app
 import vllm_shim
 
@@ -322,7 +321,7 @@ async def test_streaming_tool_call_fragments_reassemble():
     events = []
     for raw in events_raw:
         # each event is "event: X\ndata: {...}\n\n"
-        data_line = [l for l in raw.split("\n") if l.startswith("data:")][0]
+        data_line = [line for line in raw.split("\n") if line.startswith("data:")][0]
         events.append(json.loads(data_line[len("data:"):].strip()))
 
     types = [e["type"] for e in events]
@@ -375,7 +374,7 @@ async def test_streaming_empty_upstream_still_well_formed():
 
     events = []
     for raw in events_raw:
-        data_line = [l for l in raw.split("\n") if l.startswith("data:")][0]
+        data_line = [line for line in raw.split("\n") if line.startswith("data:")][0]
         events.append(json.loads(data_line[len("data:"):].strip()))
 
     types = [e["type"] for e in events]
@@ -519,7 +518,7 @@ async def test_route_streaming_end_to_end(client, monkeypatch):
         block = block.strip()
         if not block:
             continue
-        data_line = [l for l in block.split("\n") if l.startswith("data:")][0]
+        data_line = [line for line in block.split("\n") if line.startswith("data:")][0]
         events.append(json.loads(data_line[len("data:"):].strip()))
 
     types = [e["type"] for e in events]

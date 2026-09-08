@@ -2,17 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Gauge } from "lucide-react";
 
 /**
- * Anthropic subscription limits — the 5-hour / weekly bars from `claude /status`.
- *
- * These are REAL server-reported percentages, not an estimate derived from
- * locally-tracked tokens. The backend (`/api/anthropic/usage`) either returns
- * true utilization or reports `available: false` with a reason; this component
- * renders the reason rather than an empty bar, because a 0% bar and "we could
- * not read your usage" look identical and mean opposite things.
- *
- * Owns its own poll. It is the only consumer of this endpoint, the payload is
- * tiny, and the server caches for 60s — so a shared store (as `/models` needs)
- * would be ceremony without a second reader to justify it.
+ * Subscription limits follow the focused pane. Claude reads account usage;
+ * Codex reads observed native windows from that terminal's bound rollout.
+ * Never infer quotas from token counts or substitute another provider's data.
+ * Unavailable observations show their reason, rather than a misleading 0%.
  */
 
 // 5 minutes. A 60s poll earned repeated HTTP 429s from Anthropic: this endpoint
@@ -110,38 +103,67 @@ function LimitBar({ limit }) {
   );
 }
 
-export default function UsageLimitsPill({ open, onToggle, onClose }) {
+export default function UsageLimitsPill(props) {
+  // The keyed boundary clears data synchronously when focus changes. A pending
+  // response from another pane must never paint under the new provider label.
+  const session = props.session === undefined ? { harness: "claude-code" } : props.session;
+  const identity = session ? `${session.harness || "claude-code"}:${session.terminalId || ""}` : "none";
+  return <UsageLimitsView key={identity} {...props} session={session} />;
+}
+
+function UsageLimitsView({ open, onToggle, onClose, session }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  // Held in a ref so the poll effect does not re-subscribe on every fetch.
-  const openRef = useRef(open);
-  openRef.current = open;
+  const request = useRef(0);
+  const mounted = useRef(true);
+  const harness = session?.harness || "claude-code";
+  const terminalId = session?.terminalId;
+  const hasSession = Boolean(session);
+  const isCodex = hasSession && harness === "codex";
+  const provider = !hasSession ? "Session" : isCodex ? "Codex" : "Claude";
 
   const load = useCallback(async (force = false) => {
+    const generation = ++request.current;
+    if (!hasSession || (harness === "codex" && !terminalId)) {
+      setData({ available: false, detail: !hasSession ? "Focus a session to view its subscription limits." : "Codex session limits are not available yet." });
+      setLoading(false);
+      return;
+    }
     try {
-      const res = await fetch(`/api/anthropic/usage${force ? "?refresh=true" : ""}`);
+      const url = harness === "codex"
+        ? `/api/terminals/${encodeURIComponent(terminalId)}/usage`
+        : `/api/anthropic/usage${force ? "?refresh=true" : ""}`;
+      const res = await fetch(url);
       if (!res.ok) return;
-      setData(await res.json());
+      const payload = await res.json();
+      if (!mounted.current || generation !== request.current) return;
+      setData(harness === "codex" ? payload.subscription_limits || {
+        available: false, detail: "No subscription limits have been observed in this Codex session.",
+      } : payload);
     } catch {
       // Best-effort background read — a failed poll keeps the last known
       // state rather than blanking a panel the user may be reading.
     } finally {
-      setLoading(false);
+      if (mounted.current && generation === request.current) setLoading(false);
     }
-  }, []);
+  }, [hasSession, harness, terminalId]);
 
   useEffect(() => {
+    mounted.current = true;
     load();
-    const id = setInterval(() => load(), POLL_MS);
-    return () => clearInterval(id);
-  }, [load]);
+    const id = setInterval(() => load(), isCodex ? 15_000 : POLL_MS);
+    return () => { mounted.current = false; request.current += 1; clearInterval(id); };
+  }, [load, isCodex]);
 
   // Opening the popover is an explicit "show me now" — bypass the server cache.
   useEffect(() => {
     if (open) load(true);
   }, [open, load]);
 
-  const limits = data?.available ? data.limits : [];
+  const expired = isCodex && data?.limits?.some((limit) => limit.resets_at && new Date(limit.resets_at).getTime() <= Date.now());
+  const limits = data?.available && Array.isArray(data.limits)
+    ? data.limits.filter((limit) => Number.isFinite(limit.percent)
+      && !(isCodex && limit.resets_at && new Date(limit.resets_at).getTime() <= Date.now())) : [];
   // The pill shows the tightest constraint, since that is the one that will
   // actually stop work.
   const peak = limits.length ? Math.max(...limits.map((l) => l.percent)) : null;
@@ -163,8 +185,8 @@ export default function UsageLimitsPill({ open, onToggle, onClose }) {
               : toneFor(peak, peakSeverity),
           border: peak === null ? "none" : "1px solid var(--border-color)",
         }}
-        title="Claude subscription limits — session & weekly"
-        aria-label="Claude subscription usage limits"
+        title={`${provider} subscription limits${isCodex ? " — observed in the focused session" : ""}`}
+        aria-label={`${provider} subscription usage limits`}
         aria-expanded={open}
         aria-haspopup="dialog"
       >
@@ -181,7 +203,7 @@ export default function UsageLimitsPill({ open, onToggle, onClose }) {
           <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden="true" />
           <div
             role="dialog"
-            aria-label="Claude subscription limits"
+            aria-label={`${provider} subscription limits`}
             className="absolute right-0 mt-1 rounded-lg z-50"
             style={{
               width: 300,
@@ -202,7 +224,7 @@ export default function UsageLimitsPill({ open, onToggle, onClose }) {
                 className="text-[11px] uppercase tracking-wider"
                 style={{ color: "var(--text-secondary)", fontWeight: 600 }}
               >
-                Claude Limits
+                {provider} Limits
               </span>
             </div>
 
@@ -236,15 +258,22 @@ export default function UsageLimitsPill({ open, onToggle, onClose }) {
                     color: "var(--text-muted)",
                   }}
                 >
-                  Reported by Anthropic for this account — the same figures as
-                  <code style={{ margin: "0 3px" }}>/status</code>.
+                  {isCodex ? data.detail || "Observed in this Codex session; may lag account usage." : <>
+                    Reported by Anthropic for this account — the same figures as
+                    <code style={{ margin: "0 3px" }}>/status</code>.
+                  </>}
                 </div>
               </>
             ) : (
               /* Never render an empty bar here: "we could not read your usage"
                  and "0% used" look identical and mean opposite things. */
               <div style={{ padding: "12px", fontSize: 12, color: "var(--text-muted)" }}>
-                {data?.detail || "Usage limits are unavailable."}
+                {expired ? "Last observed Codex limits have reset. Waiting for a new observation." : data?.detail || "Usage limits are unavailable."}
+              </div>
+            )}
+            {isCodex && data?.observed_at && (
+              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-muted)" }}>
+                Observed {new Date(data.observed_at).toLocaleString()}
               </div>
             )}
           </div>

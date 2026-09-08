@@ -8,7 +8,6 @@ import os
 import time
 import types
 
-import pytest
 
 from pty_manager import PtyManager as PTYManager
 

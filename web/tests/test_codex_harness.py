@@ -77,13 +77,25 @@ def mgr():
 
 
 class TestCodexCommand:
-    def test_base_command_is_exactly_codex_dash_m_model(self, mgr):
-        """harness='codex' + a Codex model id → `codex -m <id>`, nothing else."""
+    @pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+    @pytest.mark.parametrize("harness", ["codex", "claude-code"])
+    def test_embedded_codex_preserves_terminal_scrollback(self, mgr, provider, harness):
+        with patch("settings_store.resolve_openrouter_key",
+                   return_value=("sk-or-test-key", "settings")):
+            _, cmd, _ = _call_create(
+                mgr, name="t", workdir="C:\\Code", harness=harness,
+                model="gpt-5.6-terra" if harness == "codex" else "sonnet",
+                provider=provider, provider_model="qwen/qwen3-coder-next",
+            )
+        assert cmd.split().count("--no-alt-screen") == (1 if harness == "codex" else 0)
+
+    def test_base_command_selects_model_and_inline_rendering(self, mgr):
+        """Embedded Codex selects the model and keeps normal-buffer history."""
         _, cmd, _ = _call_create(
             mgr, name="t", workdir="C:\\Code",
             harness="codex", model="gpt-5.6-terra",
         )
-        assert cmd == "codex -m gpt-5.6-terra"
+        assert cmd == "codex -m gpt-5.6-terra --no-alt-screen"
         # The claude CLI must not be anywhere near this command.
         assert "claude" not in cmd
         assert "--model" not in cmd
@@ -205,7 +217,7 @@ class TestCodexPermissionMapping:
             mgr, name="t", workdir="C:\\Code",
             harness="codex", model="gpt-5.6-terra", permission_mode="default",
         )
-        assert cmd == "codex -m gpt-5.6-terra"
+        assert cmd == "codex -m gpt-5.6-terra --no-alt-screen"
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -255,21 +267,20 @@ def test_fast_is_skipped_under_codex_and_leaks_no_temp_file(mgr):
 
 
 # ---------------------------------------------------------------------------
-# 6 — resume / continue are ignored rather than fabricated
+# 6 — native Codex resume subcommand preserves its own transcript identity
 # ---------------------------------------------------------------------------
 
 
 class TestCodexResume:
-    def test_resume_session_id_produces_no_flag_and_no_lock(self, mgr):
+    def test_resume_session_id_uses_native_subcommand(self, mgr):
         session, cmd, _ = _call_create(
             mgr, name="t", workdir="C:\\Code",
             harness="codex", model="gpt-5.6-terra",
             resume_session_id="abc123def456",
         )
         assert "--resume" not in cmd
-        assert "abc123def456" not in cmd
-        # Recording the id would claim a lock on a Claude transcript this
-        # session will never write to.
+        assert cmd.startswith("codex resume abc123def456 -m gpt-5.6-terra --no-alt-screen")
+        assert session.codex_session_id == "abc123def456"
         assert session.claude_session_id is None
 
     def test_continue_last_produces_no_flag(self, mgr):
@@ -278,6 +289,7 @@ class TestCodexResume:
             harness="codex", model="gpt-5.6-terra", continue_last=True,
         )
         assert "--continue" not in cmd
+        assert cmd.startswith("codex resume --last ")
         assert session.claude_session_id is None
 
     def test_claude_harness_still_resumes(self, mgr):
@@ -429,7 +441,7 @@ class TestHarnessValidation:
         rejected outright if the Anthropic path were still in force."""
         _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
                                  harness="codex", model="gpt-5.3-codex-spark")
-        assert cmd == "codex -m gpt-5.3-codex-spark"
+        assert cmd == "codex -m gpt-5.3-codex-spark --no-alt-screen"
 
     @pytest.mark.parametrize("model", ["claude-opus-5", "claude-opus-5[1m]",
                                        "claude-sonnet-5", "sonnet", "opus", "haiku",
@@ -478,7 +490,7 @@ class TestHarnessValidation:
         catch Anthropic's own ids, not to police OpenAI's namespace."""
         _, cmd, _ = _call_create(mgr, name="t", workdir="C:\\Code",
                                  harness="codex", model="gpt-6-claude-compat")
-        assert cmd == "codex -m gpt-6-claude-compat"
+        assert cmd == "codex -m gpt-6-claude-compat --no-alt-screen"
 
 
 # ---------------------------------------------------------------------------

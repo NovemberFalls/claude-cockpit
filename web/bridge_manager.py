@@ -1,4 +1,4 @@
-"""Peer-bridge manager for Claude Cockpit.
+"""Peer-bridge manager for Plexar Studio.
 
 Provides two relay modes between any two live PTY sessions:
 

@@ -9,7 +9,6 @@ consulted rather than the guard being hardcoded-refuse-all.
 
 from __future__ import annotations
 
-import importlib
 
 import pytest
 from httpx import ASGITransport, AsyncClient

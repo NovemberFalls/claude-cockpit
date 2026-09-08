@@ -1,8 +1,6 @@
 """Tests for web/usage_tracker.py — pricing, cost math, ingest, and summaries."""
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 

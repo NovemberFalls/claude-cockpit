@@ -35,7 +35,6 @@ logging_config.setup("WARNING")
 
 import server as server_module
 from server import app
-import lmstudio_proxy
 from usage_tracker import UsageTracker
 
 

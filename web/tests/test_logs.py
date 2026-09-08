@@ -244,6 +244,93 @@ async def test_logs_lines_clamped_at_both_ends(client, log_dir):
 
 
 # ---------------------------------------------------------------------------
+# All retained logs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_logs_all_includes_retained_files_oldest_first(client, log_dir):
+    log_dir.mkdir()
+    for suffix, text in [("", "newest\n"), (".1", "recent\n"),
+                         (".2", "older\n"), (".3", "oldest\n"), (".4", "excluded\n")]:
+        (log_dir / f"cockpit.log{suffix}").write_text(text, encoding="utf-8")
+    async with client as c:
+        body = (await c.get("/api/logs?lines=all")).json()
+        numeric = (await c.get("/api/logs?lines=2000")).json()
+    assert body["lines"] == ["oldest", "older", "recent", "newest"]
+    assert body["scope"] == "retained"
+    assert body["files_read"] == ["cockpit.log.3", "cockpit.log.2", "cockpit.log.1", "cockpit.log"]
+    assert body["read_errors"] == []
+    assert body["truncated"] is False
+    assert numeric["lines"] == ["newest"]
+    assert numeric["scope"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_logs_all_redacts_backups_too(client, log_dir):
+    log_dir.mkdir()
+    secret = "sk-ant-api03-AAAAbbbbCCCCddddEEEE"
+    (log_dir / "cockpit.log.1").write_text(f"old {secret}\n", encoding="utf-8")
+    (log_dir / "cockpit.log").write_text("Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n", encoding="utf-8")
+    async with client as c:
+        body = (await c.get("/api/logs?lines=all")).json()
+    assert len(body["lines"]) == 2
+    assert all("<redacted>" in line for line in body["lines"])
+    assert secret not in str(body)
+    assert "abcdefghijklmnopqrstuvwxyz" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_logs_all_caps_bytes_and_discards_partial_old_line(client, log_dir, monkeypatch):
+    monkeypatch.setattr(logging_config, "LOG_MAX_BYTES", 8)
+    log_dir.mkdir()
+    (log_dir / "cockpit.log").write_bytes(b"new1\nnew2\n")
+    (log_dir / "cockpit.log.1").write_bytes(b"x" * 40 + b"\nold\n")
+    (log_dir / "cockpit.log.2").write_bytes(b"outside budget\n")
+    async with client as c:
+        body = (await c.get("/api/logs?lines=all")).json()
+    assert body["lines"] == ["old", "new1", "new2"]
+    assert body["truncated"] is True
+    assert body["rotation"]["max_total_bytes"] == 32
+    assert body["size_bytes"] == 70
+
+
+@pytest.mark.asyncio
+async def test_logs_all_reports_unreadable_backup(client, log_dir, monkeypatch):
+    from pathlib import Path
+
+    log_dir.mkdir()
+    (log_dir / "cockpit.log").write_text("current\n", encoding="utf-8")
+    blocked = log_dir / "cockpit.log.1"
+    blocked.write_text("unreadable\n", encoding="utf-8")
+    original = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError("fixture: unreadable backup")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    async with client as c:
+        body = (await c.get("/api/logs?lines=all")).json()
+    assert body["lines"] == ["current"]
+    assert body["read_errors"] == ["cockpit.log.1"]
+    assert body["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_logs_all_missing_files_is_honest_empty(client, log_dir):
+    async with client as c:
+        body = (await c.get("/api/logs?lines=all")).json()
+    assert body["lines"] == []
+    assert body["scope"] == "retained"
+    assert body["files_read"] == []
+    assert body["read_errors"] == []
+    assert body["truncated"] is False
+    assert body["size_bytes"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Level
 # ---------------------------------------------------------------------------
 

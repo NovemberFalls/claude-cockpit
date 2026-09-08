@@ -75,7 +75,7 @@ def test_trim_drops_stale(_tmp_fleet):
     fresh = {"ts": now, "provider": "p", "kind": "k", "tps": 2}
     server_module._append_fleet_samples([old, fresh])   # append+trim
     with open(server_module._FLEET_LOG, encoding="utf-8") as f:
-        rows = [json.loads(l) for l in f]
+        rows = [json.loads(line) for line in f]
     assert all(r["ts"] >= now - server_module._FLEET_RETENTION_S for r in rows)
     assert any(r["tps"] == 2 for r in rows)
 

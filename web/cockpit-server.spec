@@ -17,6 +17,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (frontend_dist, 'frontend_dist'),
+        (os.path.join(root, 'codex_pricing.json'), '.'),
         # GET /api/version reads the app version out of package.json -- the same
         # file tauri.conf.json points at and vite injects as VITE_APP_VERSION.
         # Without it bundled, _app_version() finds nothing in the sidecar and the
@@ -65,7 +66,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='claude-cockpit',
+    name='plexar-studio-server',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -1,6 +1,6 @@
-"""PTY session manager for Claude Cockpit.
+"""PTY session manager for Plexar Studio.
 
-Spawns interactive Claude CLI processes via Windows ConPTY (pywinpty)
+Spawns interactive CLI processes via Windows ConPTY
 and bridges them to WebSocket connections.
 """
 
@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import settings_store
+from terminal_history import TerminalHistory
 
 logger = logging.getLogger("cockpit.pty")
 
@@ -199,7 +200,7 @@ def resolve_claude_cli(search_path: str) -> tuple[str, str]:
         if found:
             logger.warning(
                 "`claude` was not on the inherited PATH; found it at %s via the "
-                "fallback probe. Cockpit's PATH is likely stale — restarting it "
+                "fallback probe. Plexar Studio's PATH is likely stale — restarting it "
                 "from a fresh shell avoids this lookup.",
                 found,
             )
@@ -207,7 +208,7 @@ def resolve_claude_cli(search_path: str) -> tuple[str, str]:
 
     raise ClaudeCliNotFound(
         "Could not find the `claude` CLI. Install Claude Code "
-        "(https://claude.com/download), then restart Claude Cockpit so it "
+        "(https://claude.com/download), then restart Plexar Studio so it "
         "picks up the new PATH. If `claude` is installed somewhere unusual, "
         f"set the {_CLAUDE_CLI_PATH_ENV} environment variable to its full "
         "path. Searched PATH plus: " + ", ".join(searched),
@@ -271,7 +272,7 @@ def resolve_codex_cli(search_path: str) -> tuple[str, str]:
         if found:
             logger.warning(
                 "`codex` was not on the inherited PATH; found it at %s via the "
-                "fallback probe. Cockpit's PATH is likely stale — restarting it "
+                "fallback probe. Plexar Studio's PATH is likely stale — restarting it "
                 "from a fresh shell avoids this lookup.",
                 found,
             )
@@ -449,6 +450,13 @@ class TerminalSession:
     harness: str = "claude-code"
     working_dir: str = ""
     claude_session_id: Optional[str] = None  # for --resume
+    codex_session_id: Optional[str] = None
+    codex_rollout_path: Optional[str] = None
+    codex_usage: dict = field(default_factory=dict)
+    codex_usage_reader: Any = None
+    codex_usage_lock: Any = field(default_factory=threading.Lock)
+    codex_usage_checked: float = 0.0
+    history: TerminalHistory = field(default_factory=TerminalHistory)
     bypass_permissions: bool = False
     permission_mode: str = "default"
     effort: str = ""
@@ -740,7 +748,7 @@ class PtyManager:
                 name = proc.name().lower()
                 # Only kill if it's actually a claude/node process (PID could have been reused)
                 if "claude" in name or "node" in name:
-                    logger.info("Killing orphaned cockpit child: %s (PID %d)", proc.name(), pid)
+                    logger.info("Killing orphaned Plexar Studio child: %s (PID %d)", proc.name(), pid)
                     proc.kill()
                     killed += 1
                 else:
@@ -752,9 +760,9 @@ class PtyManager:
         self._clear_child_pids()
 
         if killed:
-            logger.info("Cleaned up %d orphaned cockpit process(es)", killed)
+            logger.info("Cleaned up %d orphaned Plexar Studio process(es)", killed)
         else:
-            logger.debug("No orphaned cockpit processes found")
+            logger.debug("No orphaned Plexar Studio processes found")
 
     def cleanup_idle_sessions(self):
         """Kill sessions that have been idle longer than IDLE_TIMEOUT.
@@ -1244,7 +1252,10 @@ class PtyManager:
             # route for model selection, so the id (or the OpenRouter slug)
             # always rides the command line. Both are regex-validated above.
             codex_model = provider_model if provider == "openrouter" else model
-            cmd = f"codex -m {codex_model}"
+            # Embedded panes need the normal screen buffer: Codex's alternate
+            # screen has no terminal scrollback. Its inline mode is the Codex
+            # equivalent of CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN above.
+            cmd = f"codex -m {codex_model} --no-alt-screen"
             if provider == "openrouter":
                 # Codex's own config-override syntax. wire_api=responses
                 # because that is the only wire protocol Codex speaks, and
@@ -1264,17 +1275,18 @@ class PtyManager:
             cmd = "claude"
         else:
             cmd = f"claude --model {model}"
+        if harness == "claude-code":
+            # Names cross both shlex and (for .cmd installs) cmd.exe /c.
+            # Keep one quoted argument. Unsupported names retain their exact
+            # UI label; explicit later renames still use the existing relay.
+            if name.startswith("-") or any(ord(char) < 32 or ord(char) == 127 or char in '\"\\%!$`&|<>^()' for char in name):
+                logger.info("Terminal %s: CLI --name omitted because label needs unsafe command quoting",
+                            terminal_id)
+            else:
+                cmd += f' --name "{name}"'
         if harness == "codex" and (resume_session_id or continue_last):
-            # `codex resume <id>` / `codex resume --last` are a SUBCOMMAND, not
-            # a flag — they cannot be appended to `codex -m ...`, and the id
-            # space is Codex's own rollout store, not Claude's session uuids.
-            # Ignore rather than fabricate a flag that does not exist; the
-            # session spawns fresh and says so in the log.
-            logger.warning(
-                "Codex harness: resume/continue requested (resume=%r, continue=%s) "
-                "but `codex resume` is a subcommand — spawning a fresh session instead",
-                resume_session_id, continue_last,
-            )
+            target = resume_session_id if resume_session_id else "--last"
+            cmd = cmd.replace("codex ", f"codex resume {target} ", 1)
         elif resume_session_id:
             cmd += f" --resume {resume_session_id}"
         elif continue_last:
@@ -1433,10 +1445,9 @@ class PtyManager:
             provider=provider,
             harness=harness,
             working_dir=workdir,
-            # Under codex the resume id was ignored above (no such flag), so
-            # recording it would claim a lock on a Claude transcript this
-            # session will never write.
+            # Each harness keeps its own native transcript identity.
             claude_session_id=None if harness == "codex" else (resume_session_id or None),
+            codex_session_id=(resume_session_id or None) if harness == "codex" else None,
             bypass_permissions=effective_bypass,
             permission_mode=permission_mode,
             effort=effort,
@@ -1452,6 +1463,7 @@ class PtyManager:
         # Node.js has a chance to parse it) risks a race on a loaded system.
         session._fast_settings_path = _fast_settings_path
         self.sessions[terminal_id] = session
+        logger.info("Terminal %s alive=true cause=spawned harness=%s", terminal_id, harness)
 
         # Track child PID for crash-recovery cleanup
         child_pid = self._get_child_pid(session)
@@ -1490,6 +1502,8 @@ class PtyManager:
                 session.pty.terminate(force=True)
         except Exception:
             logger.warning("Failed to terminate PTY %s", terminal_id, exc_info=True)
+        if session.alive:
+            logger.info("Terminal %s alive=false cause=kill-requested", terminal_id)
         session.alive = False
         return True
 
@@ -1667,6 +1681,8 @@ class PtyManager:
         """
         alive = session.pty.isalive()
         if not alive:
+            if session.alive:
+                logger.info("Terminal %s alive=false cause=list-process-exited", session.id)
             session.alive = False
         else:
             session.tracker.tick()
@@ -1679,6 +1695,7 @@ class PtyManager:
             "created_at": session.created_at,
             "working_dir": session.working_dir,
             "claude_session_id": session.claude_session_id,
+            "codex_session_id": session.codex_session_id,
             "jsonl_path": self._get_jsonl_path(session),
             "bypass_permissions": session.bypass_permissions,
             "cols": session.cols,
@@ -1687,7 +1704,10 @@ class PtyManager:
             "activity_state": session.tracker.state,
             "tokens": session.tracker.total_tokens,
             "cost": session.tracker.total_cost,
-            "context_percent": session.tracker.context_percent,
+            "context_percent": (
+                session.codex_usage.get("context_percent")
+                if session.harness == "codex" else session.tracker.context_percent
+            ),
         }
 
     def list_terminals(self) -> list[dict]:
@@ -1699,11 +1719,85 @@ class PtyManager:
         """
         return [self._session_to_dict(session) for session in self.sessions.values()]
 
+    def refresh_codex_usage(self, session, usage_store=None):
+        """Bind only the owned process's rollout; unknown identity stays unknown."""
+        from codex_usage import CodexUsageReader, discover_rollout, reference_pricing
+        with session.codex_usage_lock:
+            now = time.monotonic()
+            if now - session.codex_usage_checked < 2:
+                return dict(session.codex_usage)
+            session.codex_usage_checked = now
+            previous_path = session.codex_rollout_path
+            candidate_path = previous_path
+            binding_status = "retained"
+            if session.alive and session.pty.isalive():
+                pid = getattr(session.pty, "pid", None)
+                if not isinstance(pid, int):
+                    pid = getattr(getattr(session.pty, "_pi", None), "dwProcessId", None)
+                if isinstance(pid, int) and pid > 0:
+                    claimed = [other.codex_rollout_path for other in self.sessions.values()
+                               if other.id != session.id and other.alive and other.codex_rollout_path]
+                    path = discover_rollout(pid, session.working_dir, claimed,
+                                            expected_session_id=None if previous_path else session.codex_session_id)
+                    if path:
+                        candidate_path = str(path)
+                        binding_status = "verified"
+                    else:
+                        binding_status = "last_known"
+            if not candidate_path:
+                return {"usage_available": False, "total_tokens": None, "est_cost_usd": None,
+                        "context_percent": None, "context_tokens": None, "context_window": None}
+            if session.codex_usage_reader is None:
+                session.codex_usage_reader = CodexUsageReader()
+            reader = session.codex_usage_reader
+            pending_paths = getattr(session, "codex_pending_paths", set())
+            session.codex_pending_paths = pending_paths
+
+            def flush_events(path):
+                if usage_store is None:
+                    pending_paths.add(path)
+                    return
+                events = reader.take_events(path)
+                if events:
+                    try:
+                        usage_store.ingest_codex_events(session.id, path, events, session.working_dir)
+                    except Exception:
+                        reader.restore_events(path, events)
+                        raise
+                pending_paths.discard(path)
+
+            switching = previous_path is not None and candidate_path != previous_path
+            if switching:
+                # Read the old chat's final append before handing the pane over.
+                # Retain its reader/event queue if this caller has no store.
+                reader.read(previous_path, reference_pricing())
+                flush_events(previous_path)
+            data = reader.read(candidate_path, reference_pricing())
+            if not data.get("session_id") or (
+                    session.codex_session_id and not switching
+                    and data.get("session_id") != session.codex_session_id):
+                session.codex_rollout_path = None
+                session.codex_usage = {}
+                logger.warning("Codex transcript identity mismatch for terminal %s", session.id)
+                return {"usage_available": False, "est_cost_usd": None}
+            session.codex_rollout_path = candidate_path
+            if data.get("session_id"):
+                session.codex_session_id = data["session_id"]
+            data["est_cost_usd"] = data.pop("estimated_cost_usd", None)
+            data["effort"] = session.effort or None
+            data["binding_status"] = binding_status
+            session.codex_usage = data
+            flush_events(candidate_path)
+            if usage_store is not None:
+                for pending_path in list(pending_paths):
+                    flush_events(pending_path)
+            return dict(data)
+
     def rename_terminal(self, terminal_id: str, name: str) -> Optional[TerminalSession]:
-        """Rename a terminal's Cockpit-side display name.
+        """Rename a terminal's Plexar Studio-side display name.
 
         This does NOT touch the underlying Claude Code session — it only
-        updates the label shown in the Cockpit UI (``GET /api/terminals``).
+        updates the label shown in the Plexar Studio UI (``GET /api/terminals``).
         Callers that also want to sync the name into the Claude Code session
         itself (via the ``/rename`` slash command) do so separately after
         this call succeeds — see server.py's PATCH /api/terminals/{id} route.
@@ -1725,6 +1819,8 @@ class PtyManager:
         """Get a terminal session by ID."""
         session = self.sessions.get(terminal_id)
         if session and not session.pty.isalive():
+            if session.alive:
+                logger.info("Terminal %s alive=false cause=get-process-exited", session.id)
             session.alive = False
         return session
 
@@ -1745,6 +1841,8 @@ class PtyManager:
             logger.warning("PTY read timed out for %s", terminal_id)
             return ""
         except EOFError:
+            if session.alive:
+                logger.info("Terminal %s alive=false cause=read-eof", terminal_id)
             session.alive = False
             return ""
         except Exception:
@@ -1766,7 +1864,7 @@ class PtyManager:
     async def write_pty_async(self, terminal_id: str, data: str) -> bool:
         """Write to PTY stdin (non-blocking, runs in executor with timeout).
 
-        For large payloads (>8KB), writes in chunks with async yields between
+        For payloads above the paced-write ceiling, writes in chunks with async yields between
         them so the ConPTY pipe buffer can drain.  Timeout scales with data
         size to support multi-thousand-line pastes.
         """
@@ -1780,10 +1878,8 @@ class PtyManager:
             data_len = len(data.encode("utf-8")) if isinstance(data, str) else len(data)
             timeout = max(5.0, 5.0 + (data_len / 32768))
 
-            # Single write for anything up to _SINGLE_WRITE_MAX (64 KB), which
-            # covers every bridge message and every ordinary paste.  Keeping the
-            # payload in one call is what guarantees the bracketed-paste markers
-            # arrive intact — see _SINGLE_WRITE_MAX.
+            # Small writes avoid pacing overhead. Larger pastes keep pacing
+            # and escape-aware boundaries so the head and markers both survive.
             if data_len <= _SINGLE_WRITE_MAX:
                 try:
                     return await asyncio.wait_for(
@@ -1910,6 +2006,8 @@ class PtyManager:
             return False
         try:
             if not session.pty.isalive():
+                if session.alive:
+                    logger.info("Terminal %s alive=false cause=write-process-exited", terminal_id)
                 session.alive = False
                 return False
             data_bytes = data.encode("utf-8")

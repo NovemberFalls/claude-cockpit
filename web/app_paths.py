@@ -102,7 +102,7 @@ def _markers(d: Path, names) -> list[str]:
 BREADCRUMB = "MOVED-TO-PLEXAR.txt"
 
 _BREADCRUMB_TEXT = (
-    "Claude Cockpit is now Plexar.\n\n"
+    "Claude Cockpit is now Plexar Studio.\n\n"
     "Your settings, usage history, pricing snapshots and chats were moved to:\n"
     "    {new}\n\n"
     "Nothing was deleted. If you go back to an older build, it will look in\n"

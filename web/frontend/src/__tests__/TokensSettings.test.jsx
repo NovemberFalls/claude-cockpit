@@ -48,7 +48,7 @@ function makeTheme({ tokenOverrides = {}, userPalettes = {}, glowStrength = 30 }
     theme: THEME,
     themes: [
       { id: "va-night", label: "Visual Assist Night", group: "dark" },
-      { id: "cockpit-blue", label: "Cockpit Blue", group: "dark" },
+      { id: "cockpit-blue", label: "Plexar Studio Blue", group: "dark" },
     ],
     switchTheme: vi.fn(),
     accent: null,

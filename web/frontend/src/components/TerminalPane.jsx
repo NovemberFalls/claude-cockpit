@@ -8,8 +8,11 @@ import { X, GripVertical, GitFork, Search, Link2, ExternalLink, Workflow, Octago
 import { useTheme } from "../hooks/useTheme";
 import StateIcon from "./StateIcon";
 import WorkflowsPanel from "./WorkflowsPanel";
+import CodexUsageBadge from "./CodexUsageBadge";
+import CodexTranscript from "./CodexTranscript";
 import PaneActionsMenu from "./PaneActionsMenu";
-import { useModelCatalog } from "../modelCatalog";
+import { useModelCatalog, getModelHarness } from "../modelCatalog";
+import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import { isContainerMeasurable, dimsChanged, debounce } from "../utils/terminalFit";
 import { getPlatformInfo, getPlatformInfoSync, PLATFORM_INFO_PENDING, buildWindowsPtyOption } from "../utils/platformInfo";
 import { buildXtermTheme } from "../utils/xtermTheme";
@@ -39,6 +42,16 @@ const TerminalPane = forwardRef(function TerminalPane({
   const fitRef = useRef(null);        // FitAddon instance
   const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);         // WebSocket
+  const connectedTerminalIdRef = useRef(null);
+  const replayCursorRef = useRef(createReplayCursor());
+  const [historyWarning, setHistoryWarning] = useState(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const transcriptOpenRef = useRef(false);
+  transcriptOpenRef.current = Boolean(showTranscript);
+  const codexRef = useRef(false);
+  codexRef.current = session.harness === "codex" || getModelHarness(session.model) === "codex";
+  const terminalIdRef = useRef(session.terminalId);
+  terminalIdRef.current = session.terminalId;
   const resizeObserver = useRef(null);
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
@@ -151,16 +164,19 @@ const TerminalPane = forwardRef(function TerminalPane({
     if (originRefused.current) return;
 
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${terminalId}`);
+    const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${terminalId}${replayQuery(replayCursorRef.current)}`);
     wsRef.current = ws;
+    connectedTerminalIdRef.current = terminalId;
 
     ws.onopen = () => {
+      if (wsRef.current !== ws) return;
       reconnectAttempts.current = 0;
       // Fit on connect to send initial dimensions
       safeFit();
     };
 
     ws.onmessage = (evt) => {
+      if (wsRef.current !== ws) return;
       // Handle heartbeat pings from server
       if (evt.data && evt.data.startsWith('{"type":"ping"}')) {
         try { ws.send('{"type":"pong"}'); } catch {}
@@ -179,7 +195,17 @@ const TerminalPane = forwardRef(function TerminalPane({
       // Batch writes: accumulate data and flush once per animation frame.
       // During heavy output, this reduces hundreds of xterm.write() calls
       // per second down to ~60 (one per frame), preventing UI freezes.
-      pendingDataRef.current += evt.data;
+      const enqueue = (data) => { pendingDataRef.current += data; };
+      if (!consumeReplayFrame(evt.data, replayCursorRef.current, {
+        enqueue,
+        warning: setHistoryWarning,
+        reset: () => {
+          cancelAnimationFrame(writeRafRef.current);
+          writeRafRef.current = null;
+          pendingDataRef.current = "";
+          xtermRef.current?.write("\x1bc");
+        },
+      })) enqueue(evt.data);
       if (!writeRafRef.current) {
         writeRafRef.current = requestAnimationFrame(() => {
           if (xtermRef.current && pendingDataRef.current) {
@@ -192,6 +218,7 @@ const TerminalPane = forwardRef(function TerminalPane({
     };
 
     ws.onclose = (evt) => {
+      if (wsRef.current !== ws) return;
       // Don't reconnect if intentionally closed or terminal not found on server
       if (evt.code === 1000 || evt.code === 4004) {
         if (evt.code === 4004 && xtermRef.current) {
@@ -205,6 +232,7 @@ const TerminalPane = forwardRef(function TerminalPane({
       // A refused origin arrives as 1006, indistinguishable here from a dead
       // backend — the server's 4403 never survives the failed handshake. Ask.
       diagnoseSocketFailure().then((verdict) => {
+        if (wsRef.current !== ws) return;
         if (verdict !== WS_REFUSED) return;
         originRefused.current = true;
         clearTimeout(reconnectTimer.current);
@@ -267,11 +295,12 @@ const TerminalPane = forwardRef(function TerminalPane({
         // the async platform-info fetch is in flight is not missed.
         theme: buildXtermTheme(xtermThemeInputsRef.current.theme, xtermThemeInputsRef.current),
         allowTransparency: false,
-        scrollback: 10000,
+        scrollback: codexRef.current ? 50000 : 10000,
         convertEol: true,
         ...(windowsPty ? { windowsPty } : {}),
       });
 
+      preserveCodexScrollback(term, () => codexRef.current);
       const fitAddon = new FitAddon();
       const webLinksAddon = new WebLinksAddon((_event, uri) => {
         fetch("/api/open-url", {
@@ -369,6 +398,10 @@ const TerminalPane = forwardRef(function TerminalPane({
         }
       };
       const termEl = termRef.current;
+      const historyScroll = attachCodexHistoryScroll(term, termEl, {
+        enabled: () => codexRef.current && !transcriptOpenRef.current,
+        onHistory: () => setShowTranscript("scroll"),
+      });
       termEl.addEventListener("paste", pasteHandler, { capture: true });
 
       // Alt+V paste handler — mirrors the Ctrl+V paste handler above but reads from
@@ -503,18 +536,22 @@ const TerminalPane = forwardRef(function TerminalPane({
       document.addEventListener("visibilitychange", handleVisibilityChange);
 
       // Connect to PTY if we have a terminalId
-      if (session.terminalId) {
-        connectWs(session.terminalId);
+      if (terminalIdRef.current) {
+        connectWs(terminalIdRef.current);
       }
 
       cleanup = () => {
+        historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
         debouncedFit.cancel();
         clearTimeout(reconnectTimer.current);
         cancelAnimationFrame(writeRafRef.current);
         resizeObserver.current?.disconnect();
-        wsRef.current?.close();
+        const socket = wsRef.current;
+        wsRef.current = null;
+        connectedTerminalIdRef.current = null;
+        socket?.close();
         // Dispose CanvasAddon explicitly BEFORE term.dispose() so its internal
         // renderer-recreation runs while the linkifier is still alive. If we let
         // term.dispose() drive it, xterm tears down the linkifier MutableDisposable
@@ -591,13 +628,24 @@ const TerminalPane = forwardRef(function TerminalPane({
 
   // Connect/reconnect when terminalId changes
   useEffect(() => {
-    if (session.terminalId && xtermRef.current) {
+    if (session.terminalId && xtermRef.current && connectedTerminalIdRef.current !== session.terminalId) {
+      // The mount effect already connects when platform info is cached. Only a
+      // genuinely different PTY should replace that socket and erase its buffer.
       // Close old connection and cancel pending reconnects
       clearTimeout(reconnectTimer.current);
       reconnectAttempts.current = 0;
-      wsRef.current?.close();
-      // Reset terminal
-      xtermRef.current.clear();
+      const socket = wsRef.current;
+      wsRef.current = null;
+      socket?.close();
+      cancelAnimationFrame(writeRafRef.current);
+      pendingDataRef.current = "";
+      writeRafRef.current = null;
+      replayCursorRef.current = createReplayCursor();
+      setHistoryWarning(null);
+      // Queue a full reset after any old data already submitted to xterm's
+      // async parser; clear() retains the cursor line and cannot order writes.
+      xtermRef.current.write("\x1bc");
+      xtermRef.current.options.scrollback = codexRef.current ? 50000 : 10000;
       // A different terminalId is a different backend PTY that has no
       // knowledge of the size we last reported to the previous one — forget
       // the dedupe cache so the post-connect safeFit() always sends fresh
@@ -737,7 +785,12 @@ const TerminalPane = forwardRef(function TerminalPane({
       <div
         className="flex items-center justify-between px-3 flex-shrink-0"
         style={{
-          height: 38,
+          height: codexRef.current ? "auto" : 38,
+          minHeight: 38,
+          flexWrap: codexRef.current ? "wrap" : "nowrap",
+          rowGap: 6,
+          paddingTop: codexRef.current ? 6 : undefined,
+          paddingBottom: codexRef.current ? 6 : undefined,
           borderBottom: "1px solid var(--cc-line, var(--border-color))",
           cursor: onSwap ? "grab" : "default",
         }}
@@ -833,6 +886,9 @@ const TerminalPane = forwardRef(function TerminalPane({
           >
             {modelLabel}
           </span>
+          {(usage?.effort || session.effort) && <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0" title="Thinking effort" style={{ color: "var(--cc-muted, var(--text-muted))", backgroundColor: "var(--bg-surface)" }}>
+            {(usage?.effort || session.effort) === "xhigh" ? "xHigh" : (usage?.effort || session.effort)}
+          </span>}
           {session.bypassPermissions && (
             <span
               className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0"
@@ -846,21 +902,11 @@ const TerminalPane = forwardRef(function TerminalPane({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {usage && (
+        <div className="flex items-center gap-2 flex-shrink-0" style={codexRef.current ? { flexWrap: "wrap", maxWidth: "100%" } : undefined}>
+          {codexRef.current && <button type="button" onClick={() => setShowTranscript(true)} title="Read saved Codex messages" style={{ fontSize: 10 }}>Conversation history</button>}
+          {codexRef.current && <CodexUsageBadge usage={usage} />}
+          {!codexRef.current && usage && (
             <div className="pane-usage-stats flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
-              {usage.effort && (
-                <span
-                  className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
-                  style={{
-                    color: "var(--text-muted)",
-                    backgroundColor: "var(--bg-surface)",
-                  }}
-                  title="Thinking effort"
-                >
-                  {usage.effort}
-                </span>
-              )}
               <span
                 className="text-[10px] truncate"
                 style={{ color: "var(--cc-muted, var(--text-muted))" }}
@@ -884,7 +930,7 @@ const TerminalPane = forwardRef(function TerminalPane({
               )}
             </div>
           )}
-          {session.context_percent != null && (
+          {!codexRef.current && session.context_percent != null && (
             <span
               className="flex items-center gap-0.5 flex-shrink-0"
               title={`Context used: ${Math.round(session.context_percent)}%`}
@@ -1137,6 +1183,7 @@ const TerminalPane = forwardRef(function TerminalPane({
           parent) would inflate FitAddon's computed cols/rows by the padding
           size, since it is included in the measured box but never
           subtracted — a small but constant resize-accuracy bug. */}
+      {historyWarning && <div role="status" style={{ flexShrink: 0, padding: "4px 8px", fontSize: 11, color: "var(--cc-waiting)" }}>{historyWarning}</div>}
       <div
         className="flex-1 min-h-0"
         style={{
@@ -1148,6 +1195,7 @@ const TerminalPane = forwardRef(function TerminalPane({
         onDragOver={handleDragOver}
       >
         <div ref={termRef} className="w-full h-full" />
+        {codexRef.current && showTranscript && <CodexTranscript key={session.terminalId} terminalId={session.terminalId} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
         {activeBridge && (
           <div
             style={{

@@ -285,3 +285,11 @@ def test_refusal_detail_survives_a_shape_we_have_not_seen():
     assert isinstance(out["detail"], str)
     out = pc._refused(_http_error(400, {"error": ["a", "list"]}))
     assert isinstance(out["detail"], str)
+
+
+def test_request_headers_identify_canonical_studio_project():
+    headers = pc.auth_headers(None)
+    assert headers["User-Agent"] == (
+        "PlexarStudio/1.0 (+https://github.com/NovemberFalls/plexar-studio)"
+    )
+    assert "Authorization" not in headers

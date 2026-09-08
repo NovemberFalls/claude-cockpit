@@ -419,6 +419,13 @@ export default function ClaudeCliSettings() {
           </>
         )}
 
+        <Callout token="var(--cc-accent)" icon={Terminal} testId="cli-update-note">
+          Claude Code auto-updates are disabled in Studio sessions because several sessions can
+          share the same executable. Finish those sessions before updating Claude Code manually
+          outside Studio, then press Re-check to read the installed version. Updating Plexar Studio
+          does not update Claude Code.
+        </Callout>
+
         {/* not_found is the serious condition on this page: with no binary,
             every "New session" fails. It gets an alert and instructions. */}
         {notFound && !error && (

@@ -108,9 +108,9 @@ class TestGetBackendRouting:
         from unix_pty import UnixPtyProcess
         assert result is UnixPtyProcess
 
-    def test_win32_without_meipass_returns_winpty_pty_process(self):
-        """Windows dev mode (no _MEIPASS) must return winpty.PtyProcess."""
-        mock_winpty = _make_mock_winpty()
+    def test_win32_without_meipass_returns_conpty_pty_process(self):
+        """Development uses the packaged backend's verified write contract."""
+        mock_conpty = _make_mock_conpty()
         mock_sys = MagicMock()
         mock_sys.platform = "win32"
         # getattr(mock_sys, "_MEIPASS", None) must evaluate falsy.
@@ -118,11 +118,11 @@ class TestGetBackendRouting:
         mock_sys.configure_mock(**{"_MEIPASS": None})
 
         with patch("pty_backend.sys", mock_sys), \
-             patch.dict(sys.modules, {"winpty": mock_winpty}):
+             patch.dict(sys.modules, {"conpty": mock_conpty}):
             from pty_backend import get_backend
             result = get_backend()
 
-        assert result is mock_winpty.PtyProcess
+        assert result is mock_conpty.PtyProcess
 
     def test_win32_with_meipass_returns_conpty_pty_process(self):
         """Windows bundled mode (_MEIPASS set) must return conpty.PtyProcess."""

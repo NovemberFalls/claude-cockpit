@@ -84,6 +84,28 @@ afterEach(() => {
 
 const logsGets = () => calls.filter((c) => c.method === "GET" && /^\/api\/logs\?/.test(c.url));
 
+describe("DiagnosticsSettings retained history", () => {
+  it("requests ALL as a string and describes the actual retained scope", async () => {
+    render(<DiagnosticsSettings />);
+    await waitFor(() => expect(screen.getByTestId("logs-shown")).toHaveTextContent("6"));
+    logsPayload = { ...LOGS, scope: "retained", truncated: false, files_read: ["cockpit.log.1", "cockpit.log"] };
+    fireEvent.click(screen.getByRole("radio", { name: "Lines to load: ALL" }));
+    await waitFor(() => expect(screen.getByTestId("logs-whole-file")).toHaveTextContent("all retained log files"));
+    expect(logsGets().at(-1).url).toBe("/api/logs?lines=all");
+    expect(screen.getByTestId("logs-filter-scope-note")).toHaveTextContent("loaded retained history");
+    expect(screen.getByTestId("logs-filter-scope-note")).not.toHaveTextContent("not the whole file");
+  });
+
+  it("does not call an incomplete retained load complete", async () => {
+    logsPayload = { ...LOGS, scope: "retained", truncated: true, read_errors: ["cockpit.log.2"] };
+    render(<DiagnosticsSettings />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not read: cockpit.log.2");
+    expect(screen.getByTestId("logs-truncated")).toHaveTextContent("Incomplete retained history");
+    expect(screen.queryByTestId("logs-whole-file")).not.toBeInTheDocument();
+    expect(screen.getByTestId("logs-filter-scope-note")).toHaveTextContent("does not rule out matches");
+  });
+});
+
 describe("pure helpers", () => {
   it("parseLogLine extracts ts/level/logger/message", () => {
     const row = parseLogLine(LINES[3]);

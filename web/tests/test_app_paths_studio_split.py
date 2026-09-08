@@ -157,19 +157,29 @@ def test_the_five_states_are_pairwise_distinct(tmp_path, monkeypatch):
 
     outcomes = {}
 
-    h = tmp_path / "env"; h.mkdir(); _mk(h / ".plexar-studio", "usage.sqlite3")
+    h = tmp_path / "env"
+    h.mkdir()
+    _mk(h / ".plexar-studio", "usage.sqlite3")
     outcomes["env-set"] = resolve(h, env=h / "named").name
 
-    h = tmp_path / "studio"; h.mkdir(); _mk(h / ".plexar-studio", "usage.sqlite3")
+    h = tmp_path / "studio"
+    h.mkdir()
+    _mk(h / ".plexar-studio", "usage.sqlite3")
     outcomes["studio-exists"] = resolve(h).name
 
-    h = tmp_path / "presplit"; h.mkdir(); _mk(h / ".plexar", "usage.sqlite3")
+    h = tmp_path / "presplit"
+    h.mkdir()
+    _mk(h / ".plexar", "usage.sqlite3")
     outcomes["pre-split"] = resolve(h).name
 
-    h = tmp_path / "rigonly"; h.mkdir(); _mk(h / ".plexar", "plexar.sqlite3", "secrets.json")
+    h = tmp_path / "rigonly"
+    h.mkdir()
+    _mk(h / ".plexar", "plexar.sqlite3", "secrets.json")
     outcomes["rig-only"] = resolve(h).name
 
-    h = tmp_path / "shared"; h.mkdir(); _mk(h / ".plexar", "usage.sqlite3", "plexar.sqlite3")
+    h = tmp_path / "shared"
+    h.mkdir()
+    _mk(h / ".plexar", "usage.sqlite3", "plexar.sqlite3")
     outcomes["shared"] = resolve(h).name
 
     # DECLARED, not discovered.

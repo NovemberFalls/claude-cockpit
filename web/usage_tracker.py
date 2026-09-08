@@ -401,6 +401,43 @@ class UsageTracker:
 
     # -- ingestion ------------------------------------------------------------
 
+    def ingest_codex_events(self, terminal_id, jsonl_path, events, workdir=None):
+        """Persist normalized Codex deltas, deduped by native session/event ID.
+
+        A resumed pane gets a new terminal ID; existing events retain their
+        original attribution. ``codex://<id>`` also dedupes a moved rollout.
+        Reference API estimates are labelled backfill, never actual billing.
+        SQL errors propagate so the caller can restore its pending event queue.
+        """
+        import math
+        rows = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            sid, uuid = event.get("session_id"), event.get("uuid")
+            ts, model = event.get("timestamp"), event.get("model")
+            if not all(isinstance(value, str) and value for value in (sid, uuid, ts, model)):
+                continue
+            if not uuid.startswith(f"codex:{sid}:"):
+                continue
+            counts = [event.get(key) for key in ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")]
+            if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
+                continue
+            cost = event.get("estimated_cost_usd")
+            known = isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0
+            rows.append((terminal_id, f"codex://{sid}", uuid, ts, model, *counts, workdir,
+                         cost if known else 0.0, PRICE_SOURCE_BACKFILL if known else PRICE_SOURCE_UNPRICED))
+        if not rows:
+            return 0
+        with self._lock:
+            with self._conn:
+                cursor = self._conn.executemany(
+                    """INSERT OR IGNORE INTO usage_events
+                    (terminal_id,jsonl_path,message_uuid,ts,model,input_tokens,output_tokens,
+                     cache_creation_tokens,cache_read_tokens,workdir,cost_usd,price_source)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                return cursor.rowcount
+
     def record_local_run(
         self,
         *,
@@ -710,7 +747,6 @@ class UsageTracker:
         if day is None:
             day = date.today().isoformat()
         # Match rows whose ISO timestamp date component equals `day`.
-        like = f"{day}%"
         with self._lock:
             rows = self._conn.execute(
                 "SELECT terminal_id, model, input_tokens, output_tokens, "
@@ -1200,7 +1236,6 @@ class UsageTracker:
 
         api_rows, local_rows, tool_rows = self._window_rows(cutoff, None)
 
-        tot_local = 0
         by_day: dict[str, dict] = {}
         by_model: dict[tuple, dict] = {}
         sessions: dict[str, dict] = {}

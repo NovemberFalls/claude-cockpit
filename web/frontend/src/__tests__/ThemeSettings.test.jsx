@@ -36,7 +36,7 @@ const PALETTES = [
   },
   {
     id: "cockpit-blue",
-    label: "Cockpit Blue",
+    label: "Plexar Studio Blue",
     group: "dark",
     bg: "#0f1620",
     surface: "#16202c",
@@ -114,7 +114,7 @@ describe("ThemeSettings", () => {
       expect(screen.getByTestId("palette-va-night")).toBeInTheDocument();
       expect(screen.getByTestId("palette-cockpit-blue")).toBeInTheDocument();
       expect(screen.getByText("Visual Assist Night")).toBeInTheDocument();
-      expect(screen.getByText("Cockpit Blue")).toBeInTheDocument();
+      expect(screen.getByText("Plexar Studio Blue")).toBeInTheDocument();
     });
 
     it("marks the active palette pressed and the other not", () => {

@@ -246,3 +246,7 @@ def test_app_version_comes_from_package_json():
         pytest.skip("frontend/package.json not present in this checkout")
     expected = json.loads(pkg.read_text(encoding="utf-8"))["version"]
     assert server_module._app_version() == expected
+
+
+def test_openapi_identifies_plexar_studio():
+    assert app.openapi()["info"]["title"] == "Plexar Studio API"

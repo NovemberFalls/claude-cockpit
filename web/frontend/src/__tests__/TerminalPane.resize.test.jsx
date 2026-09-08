@@ -270,6 +270,7 @@ describe("TerminalPane — resize observer (debounce + dedupe)", () => {
   it("sends {cols, rows} once a resize tick settles", async () => {
     await renderPane();
     wsSendSpy.mockClear(); // ignore the initial mount fit's send
+    mockTerm.cols = 140; // An actual geometry change; the mount size is already sent.
 
     expect(capturedResizeCallback).toBeTypeOf("function");
     await act(async () => {
@@ -277,12 +278,13 @@ describe("TerminalPane — resize observer (debounce + dedupe)", () => {
       await vi.advanceTimersByTimeAsync(150);
     });
 
-    expect(sentResizes()).toEqual([{ type: "resize", cols: 136, rows: 26 }]);
+    expect(sentResizes()).toEqual([{ type: "resize", cols: 140, rows: 26 }]);
   });
 
   it("collapses a rapid burst of ticks into a single send", async () => {
     await renderPane();
     wsSendSpy.mockClear();
+    mockTerm.cols = 140;
 
     await act(async () => {
       for (let i = 0; i < 20; i++) {
@@ -298,6 +300,7 @@ describe("TerminalPane — resize observer (debounce + dedupe)", () => {
   it("does not resend when a later tick settles on the same dims", async () => {
     await renderPane();
     wsSendSpy.mockClear();
+    mockTerm.cols = 140;
 
     await act(async () => {
       capturedResizeCallback();
@@ -317,12 +320,13 @@ describe("TerminalPane — resize observer (debounce + dedupe)", () => {
   it("resends when a later tick settles on different dims", async () => {
     await renderPane();
     wsSendSpy.mockClear();
+    mockTerm.cols = 140;
 
     await act(async () => {
       capturedResizeCallback();
       await vi.advanceTimersByTimeAsync(150);
     });
-    expect(sentResizes()).toEqual([{ type: "resize", cols: 136, rows: 26 }]);
+    expect(sentResizes()).toEqual([{ type: "resize", cols: 140, rows: 26 }]);
 
     mockTerm.cols = 180;
     mockTerm.rows = 30;
@@ -331,7 +335,7 @@ describe("TerminalPane — resize observer (debounce + dedupe)", () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     expect(sentResizes()).toEqual([
-      { type: "resize", cols: 136, rows: 26 },
+      { type: "resize", cols: 140, rows: 26 },
       { type: "resize", cols: 180, rows: 30 },
     ]);
   });
@@ -483,6 +487,8 @@ describe("TerminalPane — terminalId change resets the dedupe cache", () => {
           terminalZoom: 13,
         }),
       );
+    });
+    await act(async () => {
       // The mock WebSocket never auto-fires onopen (unlike a real socket) —
       // simulate the reconnect completing, which is what actually triggers
       // safeFit() again in production (see connectWs's ws.onopen handler).

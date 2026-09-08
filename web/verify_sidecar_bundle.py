@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "frontend" / "dist"
-DEFAULT_EXE = ROOT / "dist" / "claude-cockpit.exe"
+DEFAULT_EXE = ROOT / "dist" / "plexar-studio-server.exe"
 
 
 def _embedded_index(exe: Path) -> bytes:

@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { CheckCircle, CircleX, Info, TriangleAlert } from "lucide-react";
 
 let toastId = 0;
@@ -7,8 +7,22 @@ let toastId = 0;
 export function useToast() {
   const [toasts, setToasts] = useState([]);
   const timers = useRef({});
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    const activeTimers = timers.current;
+    return () => {
+      mounted.current = false;
+      for (const id of Object.keys(activeTimers)) {
+        clearTimeout(activeTimers[id]);
+        delete activeTimers[id];
+      }
+    };
+  }, []);
 
   const toast = useCallback((message, type = "info", duration = 4000, action = null) => {
+    if (!mounted.current) return null;
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, message, type, action }]);
     if (duration > 0) {

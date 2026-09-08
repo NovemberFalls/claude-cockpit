@@ -2,6 +2,7 @@
 ; Must be aggressive: Windows holds exe file locks until process fully exits.
 !macro NSIS_HOOK_PREINSTALL
   ; First pass: kill by image name (covers both sidecar and Tauri app)
+  nsExec::ExecToLog 'cmd /c taskkill /f /im plexar-studio.exe 2>nul'
   nsExec::ExecToLog 'cmd /c taskkill /f /im cockpit-server-x86_64-pc-windows-msvc.exe 2>nul'
   nsExec::ExecToLog 'cmd /c taskkill /f /im cockpit-server.exe 2>nul'
   nsExec::ExecToLog 'cmd /c taskkill /f /im claude-cockpit.exe 2>nul'
@@ -12,6 +13,7 @@
   Sleep 500
 
   ; Third pass: one more taskkill in case something respawned
+  nsExec::ExecToLog 'cmd /c taskkill /f /im plexar-studio.exe 2>nul'
   nsExec::ExecToLog 'cmd /c taskkill /f /im cockpit-server-x86_64-pc-windows-msvc.exe 2>nul'
   nsExec::ExecToLog 'cmd /c taskkill /f /im claude-cockpit.exe 2>nul'
 

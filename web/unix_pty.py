@@ -1,4 +1,4 @@
-"""Unix (Linux/macOS) PTY backend for Claude Cockpit.
+"""Unix (Linux/macOS) PTY backend for Plexar Studio.
 
 Uses the ptyprocess library to spawn and manage pseudo-terminal processes.
 This is the non-Windows counterpart to conpty.py.

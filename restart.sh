@@ -1,8 +1,10 @@
 #!/bin/bash
-# Restart Claude Cockpit backend
+# Restart Plexar Studio backend
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd -- "$SCRIPT_DIR/web" || exit 1
 PORT=8420
 
-echo "=== Cockpit Backend Restart ==="
+echo "=== Plexar Studio Backend Restart ==="
 
 # Kill existing process on port 8420
 PID=$(netstat -ano 2>/dev/null | grep ":${PORT}.*LISTEN" | awk '{print $NF}' | head -1)
@@ -16,7 +18,6 @@ else
 fi
 
 # Start backend
-cd /c/Code/Personal/claude-cockpit/web
 echo "Starting backend..."
 nohup python server.py >> /tmp/cockpit.log 2>&1 &
 echo "Started. PID=$!"

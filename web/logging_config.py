@@ -1,10 +1,10 @@
-"""Logging configuration for Claude Cockpit.
+"""Logging configuration for Plexar Studio.
 
 Two sinks, both fed by the same formatter:
 
   * stderr  -- the original behaviour, kept unchanged (dev console, sidecar
     stdout capture by Tauri).
-  * ``~/.claude-cockpit/logs/cockpit.log`` -- a size-bounded rotating file so
+  * ``~/.plexar-studio/logs/cockpit.log`` -- a size-bounded rotating file so
     the Diagnostics page's claim that logs live on disk is actually true, and
     so a user can send a log after the fact.
 

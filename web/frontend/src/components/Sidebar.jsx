@@ -239,7 +239,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }) {
   );
 }
 
-function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder }) {
+function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onDelete, gitStatuses, onNewAt, onContextMenu, onFocusFolder, visibleFolder }) {
   const sessionsHere = sessionsByDir[norm(node.path)] || [];
   const hasChildren = node.children.length > 0 || sessionsHere.length > 0;
   const [expanded, setExpanded] = useState(true);
@@ -255,6 +255,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
           color: "var(--cc-dim)",
           paddingLeft: `${depth * 12 + 6}px`,
           paddingRight: "6px",
+          background: visibleFolder === norm(node.path) ? "color-mix(in srgb, var(--cc-accent) 14%, transparent)" : undefined,
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -289,6 +290,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
           }}
           onDoubleClick={() => onNewAt(node.path)}
           title={node.path}
+          aria-current={visibleFolder === norm(node.path) ? "location" : undefined}
         >
           <FolderOpen size={12} style={{ color: "var(--cc-accent)", flexShrink: 0 }} />
           <span className="text-xs truncate" style={{ color: "var(--cc-fg)", fontWeight: 700 }}>{node.name}</span>
@@ -342,7 +344,7 @@ function LocationNode({ node, depth = 0, sessionsByDir, activeIds, onSelect, onD
             </div>
           )}
           {node.children.map((child) => (
-            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} />
+            <LocationNode key={child.path} node={child} depth={depth + 1} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={onContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
           ))}
         </>
       )}
@@ -365,6 +367,7 @@ export default function Sidebar({
   // reports whether it actually did; the folder row falls back to
   // expand/collapse when it returns false.
   onFocusFolder,
+  visibleFolder = null,
   open,
   savedLocations,
   onAddLocations,
@@ -603,7 +606,7 @@ export default function Sidebar({
             </div>
             <div className="flex flex-col" style={{ gap: "1px" }}>
               {locationTree.map((node) => (
-                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} />
+                <LocationNode key={node.path} node={node} depth={0} sessionsByDir={sessionsByDir} activeIds={activeIds} onSelect={onSelect} onDelete={onDelete} gitStatuses={gitStatuses} onNewAt={onNewAt} onContextMenu={handleContextMenu} onFocusFolder={onFocusFolder} visibleFolder={visibleFolder} />
               ))}
             </div>
           </>

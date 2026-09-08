@@ -23,7 +23,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pty_manager import (  # noqa: E402
     _split_preserving_escapes,
-    _SINGLE_WRITE_MAX,
     _CHUNK_SIZE,
 )
 

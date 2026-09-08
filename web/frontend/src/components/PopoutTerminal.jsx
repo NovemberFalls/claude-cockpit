@@ -1,10 +1,13 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { useTheme } from "../hooks/useTheme";
 import { MODELS } from "./TopBar";
+import CodexTranscript from "./CodexTranscript";
+import { getModelHarness } from "../modelCatalog";
+import { createReplayCursor, replayQuery, consumeReplayFrame, preserveCodexScrollback, attachCodexHistoryScroll } from "../utils/terminalReplay";
 import {
   isContainerMeasurable,
   dimsChanged,
@@ -17,7 +20,7 @@ import { buildXtermTheme } from "../utils/xtermTheme";
 import { diagnoseSocketFailure, WS_REFUSED, REFUSED_MESSAGE } from "../wsDiagnose";
 import "@xterm/xterm/css/xterm.css";
 
-export default function PopoutTerminal({ terminalId, name, model }) {
+export default function PopoutTerminal({ terminalId, name, model, harness }) {
   // Long OpenRouter slugs would overflow the pill — show the friendly label
   // when known, falling back to the raw string (mirrors TerminalPane.jsx).
   const modelLabel = MODELS.find((m) => m.id === model)?.label || model;
@@ -26,6 +29,13 @@ export default function PopoutTerminal({ terminalId, name, model }) {
   const fitRef = useRef(null);
   const canvasAddonRef = useRef(null); // CanvasAddon instance (for explicit pre-dispose)
   const wsRef = useRef(null);
+  const replayCursorRef = useRef(createReplayCursor());
+  const [historyWarning, setHistoryWarning] = useState(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const transcriptOpenRef = useRef(false);
+  transcriptOpenRef.current = Boolean(showTranscript);
+  const codexRef = useRef(false);
+  codexRef.current = harness === "codex" || getModelHarness(model) === "codex";
   const lastSentDimsRef = useRef(null); // { cols, rows } last successfully sent to the backend — dedupes redundant resize sends
   const reconnectTimer = useRef(null);
   const reconnectAttempts = useRef(0);
@@ -151,11 +161,12 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         lineHeight: 1.3,
         theme: buildXtermTheme(xtermThemeInputsRef.current.theme, xtermThemeInputsRef.current),
         allowTransparency: false,
-        scrollback: 10000,
+        scrollback: codexRef.current ? 50000 : 10000,
         convertEol: true,
         ...(windowsPty ? { windowsPty } : {}),
       });
 
+      preserveCodexScrollback(term, () => codexRef.current);
       const fitAddon = new FitAddon();
       const webLinksAddon = new WebLinksAddon((_event, uri) => {
         fetch("/api/open-url", {
@@ -290,6 +301,10 @@ export default function PopoutTerminal({ terminalId, name, model }) {
       };
 
       const termEl = termRef.current;
+      const historyScroll = attachCodexHistoryScroll(term, termEl, {
+        enabled: () => codexRef.current && !transcriptOpenRef.current,
+        onHistory: () => setShowTranscript("scroll"),
+      });
       termEl.addEventListener("paste", pasteHandler, { capture: true });
 
       // customKeyEventHandler — mirrors TerminalPane exactly:
@@ -368,15 +383,17 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         const wsBase = location.hostname === "localhost"
           ? `ws://localhost:8420`
           : `${proto}//${location.host}`;
-        const ws = new WebSocket(`${wsBase}/ws/terminal/${tid}`);
+        const ws = new WebSocket(`${wsBase}/ws/terminal/${tid}${replayQuery(replayCursorRef.current)}`);
         wsRef.current = ws;
 
         ws.onopen = () => {
+          if (wsRef.current !== ws) return;
           reconnectAttempts.current = 0;
           safeFit();
         };
 
         ws.onmessage = (evt) => {
+          if (wsRef.current !== ws) return;
           if (evt.data && evt.data.startsWith('{"type":"ping"}')) {
             try { ws.send('{"type":"pong"}'); } catch {}
             return;
@@ -388,7 +405,17 @@ export default function PopoutTerminal({ terminalId, name, model }) {
             lastSentDimsRef.current = null;
             return;
           }
-          pendingDataRef.current += evt.data;
+          const enqueue = (data) => { pendingDataRef.current += data; };
+          if (!consumeReplayFrame(evt.data, replayCursorRef.current, {
+            enqueue,
+            warning: setHistoryWarning,
+            reset: () => {
+              cancelAnimationFrame(writeRafRef.current);
+              writeRafRef.current = null;
+              pendingDataRef.current = "";
+              xtermRef.current?.write("\x1bc");
+            },
+          })) enqueue(evt.data);
           if (!writeRafRef.current) {
             writeRafRef.current = requestAnimationFrame(() => {
               if (xtermRef.current && pendingDataRef.current) {
@@ -401,9 +428,11 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         };
 
         ws.onclose = (evt) => {
+          if (wsRef.current !== ws) return;
           if (evt.code !== 1000 && evt.code !== 4004) {
             // See TerminalPane: 1006 hides both "origin refused" and "backend down".
             diagnoseSocketFailure().then((verdict) => {
+              if (wsRef.current !== ws) return;
               if (verdict !== WS_REFUSED) return;
               originRefused.current = true;
               clearTimeout(reconnectTimer.current);
@@ -432,13 +461,16 @@ export default function PopoutTerminal({ terminalId, name, model }) {
       connectWs(terminalId);
 
       cleanup = () => {
+        historyScroll.dispose();
         termEl.removeEventListener("paste", pasteHandler, { capture: true });
         document.removeEventListener("visibilitychange", handleVisibilityChange);
         debouncedFit.cancel();
         clearTimeout(reconnectTimer.current);
         cancelAnimationFrame(writeRafRef.current);
         resizeObserver.disconnect();
-        wsRef.current?.close();
+        const socket = wsRef.current;
+        wsRef.current = null;
+        socket?.close();
         // Dispose CanvasAddon explicitly BEFORE term.dispose() so its internal
         // renderer-recreation runs while the linkifier is still alive. If we let
         // term.dispose() drive it, xterm tears down the linkifier MutableDisposable
@@ -525,8 +557,10 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         >
           {modelLabel}
         </span>
+        {codexRef.current && <button type="button" onClick={() => setShowTranscript(true)} style={{ fontSize: 10 }}>Conversation history</button>}
       </div>
 
+      {historyWarning && <div role="status" style={{ flexShrink: 0, padding: "4px 8px", fontSize: 11, color: "var(--cc-waiting)" }}>{historyWarning}</div>}
       {/* Terminal area. Padding lives on termRef's parent, not termRef itself
           — see the matching comment in TerminalPane.jsx for why: FitAddon
           reads padding from term.element (always 0) but measures available
@@ -542,6 +576,7 @@ export default function PopoutTerminal({ terminalId, name, model }) {
         }}
       >
         <div ref={termRef} style={{ width: "100%", height: "100%" }} />
+        {codexRef.current && showTranscript && <CodexTranscript key={terminalId} terminalId={terminalId} presentation={showTranscript === "scroll" ? "scroll" : "dialog"} onClose={() => { setShowTranscript(false); xtermRef.current?.focus(); }} />}
       </div>
     </div>
   );

@@ -71,8 +71,8 @@ if (cargoVersion !== version) {
 //     and nothing would say so. `npm ci` restores package-lock's version into
 //     node_modules metadata, and Cargo.lock is what a clean `cargo build`
 //     actually resolves. Two more places the number lives, both silent.
-//     NOTE the package NAME stays `claude-cockpit` in Cargo.lock — S25 froze
-//     every identifier on purpose. Only the version moves.
+//     The app executable uses the current product name. Installed data and
+//     updater identity remain stable independently of the Cargo package name.
 const lockPath = join(FRONTEND, "package-lock.json");
 const lock = JSON.parse(readFileSync(lockPath, "utf8"));
 if (lock.version !== version) {
@@ -87,21 +87,19 @@ if (lock.packages?.[""]?.version !== version) {
 }
 
 const cargoLock = readFileSync(join(FRONTEND, "src-tauri", "Cargo.lock"), "utf8");
-const lockEntry = /\[\[package\]\]\s+name = "claude-cockpit"\s+version = "([^"]+)"/.exec(cargoLock)?.[1];
+const lockEntry = /\[\[package\]\]\s+name = "plexar-studio"\s+version = "([^"]+)"/.exec(cargoLock)?.[1];
 if (!lockEntry) {
   fail(
-    `Cargo.lock has no [[package]] entry named "claude-cockpit".
+    `Cargo.lock has no [[package]] entry named "plexar-studio".
 ` +
-    `  Either the lock is missing or the crate was renamed — S25 froze that name
-` +
-    `  deliberately, so a rename here is a compatibility break, not a typo.`
+    `  Keep the Cargo manifest, lockfile and app entry point on the same product name.`
   );
 }
 if (lockEntry !== version) {
   fail(
-    `Cargo.lock says claude-cockpit ${lockEntry}, package.json is ${version}.
+    `Cargo.lock says plexar-studio ${lockEntry}, package.json is ${version}.
 ` +
-    `  Run \`cargo update -p claude-cockpit\` (or build once) after bumping Cargo.toml.`
+    `  Run \`cargo update -p plexar-studio\` (or build once) after bumping Cargo.toml.`
   );
 }
 

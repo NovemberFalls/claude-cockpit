@@ -803,12 +803,14 @@ export default function ReportsView({
           note="Every day in the range is drawn, including idle ones — a zero column means nothing ran that day, not that the day is missing."
         />
         <div
+          data-testid="reports-overview-tables"
           style={{
             display: "grid",
             gridTemplateColumns: "minmax(0, 340px) minmax(0, 1fr)",
+            flex: "1 0 220px",
             gap: 16,
             minWidth: 0,
-            alignItems: "start",
+            alignItems: "stretch",
           }}
         >
           <SpendByModel byModel={filteredModels} />
@@ -913,7 +915,7 @@ export default function ReportsView({
         {body}
 
         {!loading && !error && data?.generated_at ? (
-          <div style={{ fontSize: 9, color: "var(--cc-muted)", letterSpacing: ".06em" }}>
+          <div style={{ flexShrink: 0, fontSize: 9, color: "var(--cc-muted)", letterSpacing: ".06em" }}>
             Generated {data.generated_at} · range {data.range || range} · fetched once, not polled
           </div>
         ) : null}

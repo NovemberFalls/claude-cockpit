@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Claude Cockpit",
+  "description": "Default capabilities for Plexar Studio",
   "windows": ["main", "popout-*"],
   "remote": {
     "urls": ["http://localhost:8420/*"]

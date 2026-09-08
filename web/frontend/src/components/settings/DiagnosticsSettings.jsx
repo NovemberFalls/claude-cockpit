@@ -68,7 +68,7 @@ const LABEL = {
 };
 
 const LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"];
-const LINE_COUNTS = [200, 500, 1000, 2000];
+const LINE_COUNTS = [200, 500, 1000, 2000, "all"];
 const DEFAULT_LINES = 500;
 const FOLLOW_MS = 3000;
 
@@ -459,12 +459,13 @@ export default function DiagnosticsSettings() {
 
   const fileLogging = payload ? payload.file_logging !== false : true;
   const rotation = payload?.rotation || null;
+  const retained = payload?.scope === "retained";
   const filtering = levelFilter !== "ALL" || textFilter.trim().length > 0;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, gap: 16, padding: 16, minWidth: 0 }}>
       {/* ── Log level (live, not a draft) ──────────────── */}
-      <div style={CARD} data-testid="card-log-level">
+      <div style={{ ...CARD, flexShrink: 0 }} data-testid="card-log-level">
         <CardHeader icon={Bug} token="var(--cc-accent)" name="Log level" />
 
         <div
@@ -532,7 +533,7 @@ export default function DiagnosticsSettings() {
       </div>
 
       {/* ── Log file ───────────────────────────────────── */}
-      <div style={CARD} data-testid="card-logs">
+      <div style={{ ...CARD, flex: 1, display: "flex", flexDirection: "column" }} data-testid="card-logs">
         <CardHeader icon={FileText} token="var(--cc-type)" name="Log file">
           <span style={{ marginLeft: "auto" }} />
           <ActionButton
@@ -582,15 +583,20 @@ export default function DiagnosticsSettings() {
             <span style={{ color: "var(--cc-muted)" }}> lines</span>
             {payload?.truncated === true && (
               <span data-testid="logs-truncated" style={{ color: "var(--cc-waiting)", marginLeft: 6 }}>
-                tail only — earlier lines are in the file but were not loaded
+                {retained
+                  ? "Incomplete retained history — the byte limit or a file read error omitted content"
+                  : "tail only — earlier lines are in the file but were not loaded"}
               </span>
             )}
             {payload?.truncated === false && (
               <span data-testid="logs-whole-file" style={{ color: "var(--cc-muted)", marginLeft: 6 }}>
-                (the whole file)
+                {retained ? "(all retained log files)" : "(the whole file)"}
               </span>
             )}
           </div>
+          {Array.isArray(payload?.read_errors) && payload.read_errors.length > 0 && (
+            <div role="alert">Could not read: {payload.read_errors.join(", ")}. The loaded lines are incomplete.</div>
+          )}
           {rotation && (
             <div data-testid="logs-rotation">
               <span style={{ color: "var(--cc-muted)" }}>history kept: </span>
@@ -618,6 +624,7 @@ export default function DiagnosticsSettings() {
           <Segmented
             label="Lines to load"
             options={LINE_COUNTS}
+            format={(value) => value === "all" ? "ALL" : value}
             value={lineCount}
             onChange={setLineCount}
             testIdPrefix="logs-lines"
@@ -696,7 +703,8 @@ export default function DiagnosticsSettings() {
               aria-label="Plexar Studio log tail"
               style={{
                 marginTop: 4,
-                height: 420,
+                flex: "1 0 220px",
+                minHeight: 220,
                 overflow: "auto",
                 borderRadius: 9,
                 background: "var(--cc-term)",
@@ -742,10 +750,17 @@ export default function DiagnosticsSettings() {
               data-testid="logs-filter-scope-note"
               style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", paddingTop: 8 }}
             >
+              {retained ? <>
+                Both filters apply to the <strong>loaded retained history</strong>, including rotated
+                log files. Older history beyond the retention limit is no longer available.
+                {payload?.truncated && " This load is incomplete; an empty filter result does not rule out matches in omitted content."}
+                {" "}Newest lines are at the bottom.
+              </> : <>
               Both filters apply to the <strong>loaded tail only</strong> — the{" "}
               {rawLines.length} newest lines fetched above, not the whole file. An empty result
               means the text is not in this tail; load more lines before concluding it is not in the
               log at all. Newest lines are at the bottom.
+              </>}
               {filtering && (
                 <>
                   {" "}
