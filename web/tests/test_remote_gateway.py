@@ -84,6 +84,12 @@ class Backend:
             {"path": "C:/hist/one", "last_used": "2026-09-01T00:00:00+00:00"},
             {"path": "C:/hist/two", "last_used": "2026-08-01T00:00:00+00:00"},
         ]
+        # Set by the rig fixture to a real tmp directory.
+        self.upload_root = None
+        self.claude_messages = []
+        self.codex_page = {"messages": [], "before": None, "has_more": False, "available": True}
+        self.saved = []
+        self.save_error = None
         self.models_reply = {
             "models": [
                 {"id": "claude-opus-5", "display_name": "Claude Opus 5"},
@@ -106,7 +112,27 @@ class Backend:
             delete_session=self._delete,
             recent_workdirs=self._recent_workdirs,
             anthropic_models=self._models,
+            messages_claude=self._claude_messages,
+            transcript_codex=self._codex_transcript,
+            upload_dir=lambda: str(self.upload_root),
+            save_upload=self._save_upload,
         )
+
+    def _claude_messages(self, session):
+        return self.claude_messages
+
+    def _codex_transcript(self, session, before, limit):
+        self.codex_args = (before, limit)
+        return self.codex_page
+
+    async def _save_upload(self, filename, content):
+        if self.save_error:
+            raise ValueError(self.save_error)
+        dest = os.path.join(str(self.upload_root), filename)
+        with open(dest, "wb") as handle:
+            handle.write(content)
+        self.saved.append((filename, len(content)))
+        return dest
 
     def _get_session(self, terminal_id):
         return next((s for s in self.sessions if s["id"] == terminal_id), None)
@@ -156,6 +182,8 @@ class Backend:
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
     backend = Backend()
+    backend.upload_root = tmp_path / "uploads"
+    backend.upload_root.mkdir()
     store = DeviceStore(tmp_path / "remote_devices.json")
     # The saved-locations file is resolved through this one function precisely
     # so a test never writes into the user's real ~/.plexar-studio.
@@ -1101,3 +1129,297 @@ async def test_registry_closes_a_devices_sockets():
     assert sock.closed == 4401
     assert reg.count("dv_1") == 0
     reg.unregister("dv_1", sock)  # idempotent
+
+
+
+# -- the chat view: messages, uploads, files --------------------------------
+
+
+def claude_entry(uuid, role, content, *, entry_type=None, ts="2026-09-08T00:00:00Z"):
+    """One jsonl_watcher-shaped entry. `type` defaults to the role."""
+    return {
+        "id": uuid,
+        "type": entry_type or role,
+        "role": role,
+        "content": content,
+        "timestamp": ts,
+        "parentId": None,
+    }
+
+
+def chat_rig(rig, *, entries=None, harness="claude-code", workdir=None):
+    """Pair a device and point the single session at *harness*/*workdir*."""
+    backend, store, client = rig
+    backend.sessions[0]["harness"] = harness
+    if workdir is not None:
+        backend.sessions[0]["working_dir"] = str(workdir)
+    if entries is not None:
+        backend.claude_messages = entries
+    return backend, client, auth(pair(client, store)["token"])
+
+
+def test_messages_map_every_claude_block_type(rig):
+    entries = [
+        claude_entry("u1", "user", [{"type": "text", "text": "hello"}]),
+        claude_entry(
+            "a1",
+            "assistant",
+            [
+                {"type": "text", "text": "hi"},
+                {"type": "thinking", "text": "hmm"},
+                {"type": "tool_use", "tool_name": "Read", "tool_id": "tu1", "input": {}},
+            ],
+        ),
+        claude_entry(
+            "r1",
+            "user",
+            [{"type": "tool_result", "tool_use_id": "tu1", "content": "x" * 3000}],
+            entry_type="tool_result",
+        ),
+        claude_entry("s1", "system", [{"type": "text", "text": "note"}]),
+    ]
+    _backend, client, headers = chat_rig(rig, entries=entries)
+    body = client.get("/remote/v1/sessions/t1/messages", headers=headers).json()
+    assert body["harness"] == "claude-code"
+    assert body["activity_state"] == "idle"
+    assert body["complete"] is True
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["user", "assistant", "tool", "system"]
+    assert body["messages"][0]["blocks"] == [{"type": "text", "text": "hello"}]
+    assert body["messages"][1]["blocks"] == [
+        {"type": "text", "text": "hi"},
+        {"type": "thinking", "text": "hmm"},
+        {"type": "tool_use", "name": "Read"},
+    ]
+    result = body["messages"][2]["blocks"][0]
+    assert result["type"] == "tool_result" and len(result["text"]) == 2000
+    assert body["messages"][0]["timestamp"] == "2026-09-08T00:00:00Z"
+
+
+def test_user_image_paths_become_image_blocks_including_quoted(rig, tmp_path):
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    spaced = workdir / "my shot.png"
+    spaced.write_bytes(b"x")
+    backend, _store, _client = rig
+    upload_png = os.path.join(str(backend.upload_root), "a.png")
+    with open(upload_png, "wb") as handle:
+        handle.write(b"x")
+    entries = [
+        claude_entry(
+            "u1",
+            "user",
+            [{"type": "text", "text": 'look at %s and "%s"' % (upload_png, spaced)}],
+        ),
+        # OUTSIDE both roots -- must NOT become an image block.
+        claude_entry(
+            "u2", "user", [{"type": "text", "text": str(tmp_path / "elsewhere.png")}]
+        ),
+        # An assistant message naming an in-root image is still text only.
+        claude_entry("a1", "assistant", [{"type": "text", "text": upload_png}]),
+    ]
+    _backend, client, headers = chat_rig(rig, entries=entries, workdir=workdir)
+    messages = client.get("/remote/v1/sessions/t1/messages", headers=headers).json()["messages"]
+    images = [b for b in messages[0]["blocks"] if b["type"] == "image"]
+    assert [b["path"] for b in images] == [upload_png, str(spaced)]
+    assert all(b["type"] != "image" for b in messages[1]["blocks"])
+    assert all(b["type"] != "image" for b in messages[2]["blocks"])
+
+
+def test_messages_paging_after_before_and_unknown_cursor(rig):
+    entries = [claude_entry("m%d" % i, "user", [{"type": "text", "text": str(i)}]) for i in range(10)]
+    _backend, client, headers = chat_rig(rig, entries=entries)
+
+    tail = client.get("/remote/v1/sessions/t1/messages?limit=3", headers=headers).json()
+    assert [m["id"] for m in tail["messages"]] == ["m7", "m8", "m9"]
+    assert tail["complete"] is False and "cursor_reset" not in tail
+
+    after = client.get("/remote/v1/sessions/t1/messages?after=m7&limit=5", headers=headers).json()
+    assert [m["id"] for m in after["messages"]] == ["m8", "m9"]
+    assert after["complete"] is True
+
+    before = client.get("/remote/v1/sessions/t1/messages?before=m7&limit=3", headers=headers).json()
+    assert [m["id"] for m in before["messages"]] == ["m4", "m5", "m6"]
+    assert before["complete"] is False
+
+    start = client.get("/remote/v1/sessions/t1/messages?before=m2&limit=5", headers=headers).json()
+    assert [m["id"] for m in start["messages"]] == ["m0", "m1"]
+    assert start["complete"] is True
+
+    unknown = client.get("/remote/v1/sessions/t1/messages?after=nope&limit=2", headers=headers).json()
+    assert [m["id"] for m in unknown["messages"]] == ["m8", "m9"]
+    assert unknown["cursor_reset"] is True
+
+
+def test_messages_limit_is_clamped_and_empty_transcript_is_a_200(rig):
+    _backend, client, headers = chat_rig(rig, entries=[])
+    body = client.get("/remote/v1/sessions/t1/messages?limit=9999", headers=headers).json()
+    assert body == {
+        "messages": [],
+        "harness": "claude-code",
+        "activity_state": "idle",
+        "complete": True,
+    }
+
+
+def test_messages_404_for_an_unknown_session(rig):
+    _backend, store, client = rig
+    headers = auth(pair(client, store)["token"])
+    resp = client.get("/remote/v1/sessions/nope/messages", headers=headers)
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "unknown session"}
+
+
+def test_codex_messages_map_by_index_and_page(rig):
+    backend, client, headers = chat_rig(rig, harness="codex")
+    backend.codex_page = {
+        "messages": [
+            {"index": 10, "role": "user", "text": "hi", "timestamp": "2026-09-08T00:00:00Z"},
+            {"index": 20, "role": "assistant", "text": "yo", "timestamp": None},
+        ],
+        "before": 10,
+        "has_more": True,
+        "available": True,
+    }
+    body = client.get("/remote/v1/sessions/t1/messages?limit=2", headers=headers).json()
+    assert body["harness"] == "codex"
+    assert body["complete"] is False
+    assert [m["id"] for m in body["messages"]] == ["10", "20"]
+    assert body["messages"][0]["blocks"] == [{"type": "text", "text": "hi"}]
+    assert body["messages"][1]["timestamp"] is None
+
+    after = client.get("/remote/v1/sessions/t1/messages?after=10", headers=headers).json()
+    assert [m["id"] for m in after["messages"]] == ["20"]
+    assert after["complete"] is True
+
+    client.get("/remote/v1/sessions/t1/messages?before=20&limit=7", headers=headers)
+    assert backend.codex_args == (20, 7)
+
+    reset = client.get("/remote/v1/sessions/t1/messages?before=abc", headers=headers).json()
+    assert reset["cursor_reset"] is True
+    assert backend.codex_args[0] is None
+
+
+def test_messages_503_when_the_backend_cannot_read_them(rig):
+    backend, store, client = rig
+    wired = backend.as_remote_backend()
+    remote_gateway.configure(
+        remote_gateway.RemoteBackend(**{**wired.__dict__, "messages_claude": None}), store
+    )
+    headers = auth(pair(client, store)["token"])
+    assert client.get("/remote/v1/sessions/t1/messages", headers=headers).status_code == 503
+
+
+# -- upload ------------------------------------------------------------------
+
+
+def test_upload_saves_files_and_returns_absolute_paths(rig):
+    backend, client, headers = chat_rig(rig)
+    resp = client.post(
+        "/remote/v1/sessions/t1/upload",
+        headers=headers,
+        files=[
+            ("files", ("a.png", b"one", "image/png")),
+            ("files", ("b.png", b"two", "image/png")),
+        ],
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["errors"] == []
+    assert len(body["paths"]) == 2
+    assert all(os.path.isabs(p) for p in body["paths"])
+    assert backend.saved == [("a.png", 3), ("b.png", 3)]
+
+
+def test_upload_refuses_more_than_four_and_reports_per_file_errors(rig):
+    backend, client, headers = chat_rig(rig)
+    too_many = [("files", ("%d.png" % i, b"x", "image/png")) for i in range(5)]
+    resp = client.post("/remote/v1/sessions/t1/upload", headers=headers, files=too_many)
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "at most 4 files"}
+
+    backend.save_error = "Rejected 'x.exe': unsupported file type '.exe'"
+    resp = client.post(
+        "/remote/v1/sessions/t1/upload",
+        headers=headers,
+        files=[("files", ("x.exe", b"x", "application/octet-stream"))],
+    )
+    assert resp.status_code == 201
+    assert resp.json() == {"paths": [], "errors": [backend.save_error]}
+
+
+def test_upload_404s_for_an_unknown_session(rig):
+    _backend, client, headers = chat_rig(rig)
+    resp = client.post(
+        "/remote/v1/sessions/nope/upload",
+        headers=headers,
+        files=[("files", ("a.png", b"x", "image/png"))],
+    )
+    assert resp.status_code == 404
+
+
+# -- files -------------------------------------------------------------------
+
+
+def test_files_serves_an_image_under_the_upload_dir(rig):
+    backend, client, headers = chat_rig(rig)
+    target = os.path.join(str(backend.upload_root), "shot.png")
+    with open(target, "wb") as handle:
+        handle.write(b"\x89PNG\r\n")
+    resp = client.get("/remote/v1/files", params={"path": target}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/png")
+    assert resp.content == b"\x89PNG\r\n"
+
+
+def test_files_serves_an_image_under_a_live_sessions_workdir(rig, tmp_path):
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    target = workdir / "pic.jpg"
+    target.write_bytes(b"jpegbytes")
+    _backend, client, headers = chat_rig(rig, workdir=workdir)
+    resp = client.get("/remote/v1/files", params={"path": str(target)}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/jpeg")
+
+
+@pytest.mark.parametrize("case", ["wrong_ext", "outside", "traversal", "unc", "missing", "empty"])
+def test_files_refuses_everything_else_with_one_body(rig, tmp_path, case):
+    workdir = tmp_path / "proj"
+    workdir.mkdir(exist_ok=True)
+    backend, client, headers = chat_rig(rig, workdir=workdir)
+    upload_root = str(backend.upload_root)
+    script = os.path.join(upload_root, "evil.py")
+    with open(script, "wb") as handle:
+        handle.write(b"print(1)")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"x")
+    paths = {
+        "wrong_ext": script,
+        "outside": str(outside),
+        "traversal": os.path.join(upload_root, "..", "outside.png"),
+        "unc": "\\\\evil-host\\share\\pic.png",
+        "missing": os.path.join(upload_root, "nope.png"),
+        "empty": "",
+    }
+    resp = client.get("/remote/v1/files", params={"path": paths[case]}, headers=headers)
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not served"}
+
+
+def test_files_refuses_an_oversized_image(rig, monkeypatch):
+    backend, client, headers = chat_rig(rig)
+    target = os.path.join(str(backend.upload_root), "big.png")
+    monkeypatch.setattr(remote_gateway, "FILES_MAX_BYTES", 16)
+    with open(target, "wb") as handle:
+        handle.write(b"x" * 64)
+    resp = client.get("/remote/v1/files", params={"path": target}, headers=headers)
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "not served"}
+
+
+def test_chat_routes_need_a_device_token(rig):
+    _backend, _store, client = rig
+    assert client.get("/remote/v1/sessions/t1/messages").status_code == 401
+    assert client.get("/remote/v1/files", params={"path": "C:/x.png"}).status_code == 401
+    assert client.post("/remote/v1/sessions/t1/upload").status_code == 401

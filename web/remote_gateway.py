@@ -32,8 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, WebSocket
+from fastapi.responses import FileResponse, JSONResponse
 
 import app_paths
 from remote_devices import Device, DeviceStore, PairingError
@@ -130,6 +130,12 @@ class RemoteBackend:
     delete_session: Callable[[str], Awaitable[bool] | bool] | None = None
     recent_workdirs: Callable[[int], list[dict]] | None = None
     anthropic_models: Callable[[], Awaitable[dict]] | None = None
+    # Stage 2 (chat view). Same defaulting rule as the four above: absent means
+    # the route answers 503/404, never 500.
+    messages_claude: Callable[[Any], list[dict]] | None = None
+    transcript_codex: Callable[[Any, int | None, int], Awaitable[dict] | Any] | None = None
+    upload_dir: Callable[[], str] | None = None
+    save_upload: Callable[[str, bytes], Awaitable[str] | str] | None = None
 
 
 class StreamRegistry:
@@ -1060,3 +1066,412 @@ async def catalog(device: Device = Depends(require_device)):
         "permission_modes": [{"id": mode_id, "label": label} for mode_id, label in PERMISSION_MODES],
         "efforts": list(EFFORTS),
     }
+
+
+# ---------------------------------------------------------------------------
+# The chat view: one message shape for both harnesses, uploads, and the ONE
+# route that hands a file's bytes back to the phone.
+# ---------------------------------------------------------------------------
+
+#: Images only, and the same five the desktop's own thumbnail route serves.
+#: SVG is absent deliberately -- it is a script-bearing document, and this route
+#: exists solely to draw a picture.
+SERVABLE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+#: A phone screenshot is a couple of megabytes; ten is generous and still small
+#: enough that a refusal is a bug report rather than a slow tab.
+FILES_MAX_BYTES = 10 * 1024 * 1024
+
+MAX_UPLOAD_FILES = 4
+
+MESSAGE_LIMIT_DEFAULT = 50
+MESSAGE_LIMIT_MAX = 200
+
+#: A tool_result can be enormous; the phone renders it collapsed behind a chip
+#: and never needs the whole thing.
+_TOOL_RESULT_MAX = 2000
+
+_IMAGE_EXT_ALTERNATION = "png|jpe?g|gif|webp"
+
+#: Absolute paths ending in an image extension, as they appear inside a user
+#: message's text -- which is exactly how the desktop's clipboard paste injects
+#: them. Quoted first (a quoted path may contain spaces); the bare forms stop at
+#: whitespace. Windows and POSIX are both matched regardless of the platform the
+#: server runs on, because these strings come from the DESKTOP, not from this
+#: process's filesystem.
+_IMAGE_PATH_RE = re.compile(
+    r'"((?:[A-Za-z]:[\\/]|/)[^"\r\n]*?\.(?:' + _IMAGE_EXT_ALTERNATION + r'))"'
+    r"|"
+    r'((?:[A-Za-z]:[\\/]|/)[^\s"\r\n]*?\.(?:' + _IMAGE_EXT_ALTERNATION + r"))",
+    re.IGNORECASE,
+)
+
+
+def _session_field(session: Any, name: str, default: Any = None) -> Any:
+    """Read *name* off a TerminalSession OR off a plain dict.
+
+    ``get_session`` is wired to ``pty_manager.get_terminal`` in production and
+    returns an object; the gateway's own tests hand back the dict the sessions
+    list is made of. Both must work, or the tests stop testing production.
+    """
+    if isinstance(session, dict):
+        return session.get(name, default)
+    return getattr(session, name, default)
+
+
+def _real(path: Any) -> str:
+    """``os.path.realpath`` that never raises. "" when it cannot be resolved."""
+    if not isinstance(path, str) or not path.strip():
+        return ""
+    try:
+        return os.path.realpath(path.strip())
+    except (OSError, ValueError):
+        logger.debug("Could not resolve path %r", path, exc_info=True)
+        return ""
+
+
+def _within(candidate: str, root: str) -> bool:
+    """True when *candidate* is *root* itself or lies beneath it.
+
+    A separator-terminated prefix, never a bare ``startswith``: "C:\\uploads2"
+    starts with "C:\\uploads" and is a DIFFERENT directory. Case is folded on
+    Windows only -- folding on Linux would merge two real directories.
+    """
+    if not candidate or not root:
+        return False
+    left, right = candidate, root
+    if os.name == "nt":
+        left, right = left.casefold(), right.casefold()
+    if left == right:
+        return True
+    return left.startswith(right.rstrip("\\/") + os.sep)
+
+
+def _serve_roots(backend: RemoteBackend, session: Any = None) -> list[str]:
+    """Realpath'd roots a file may be served from: the upload dir, plus the
+    working_dir of every live session (or of *session* alone when given)."""
+    roots: list[str] = []
+    if backend.upload_dir is not None:
+        try:
+            roots.append(_real(backend.upload_dir()))
+        except Exception:  # noqa: BLE001 - a bad upload dir must not 500 the route
+            logger.warning("Failed reading the upload dir for the files route", exc_info=True)
+    if session is not None:
+        roots.append(_real(_session_field(session, "working_dir")))
+    else:
+        try:
+            sessions = backend.list_sessions() or []
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed listing sessions for the files route", exc_info=True)
+            sessions = []
+        for entry in sessions:
+            roots.append(_real(_session_field(entry, "working_dir")))
+    return [r for r in roots if r]
+
+
+def _image_paths_in(text: str, roots: list[str]) -> list[str]:
+    """Absolute image paths in *text* that resolve inside one of *roots*.
+
+    The containment check is the whole point: a message that merely MENTIONS
+    "/etc/logo.png" must not turn into an image block the phone will then ask
+    the files route for.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    found: list[str] = []
+    for match in _IMAGE_PATH_RE.finditer(text):
+        raw = match.group(1) or match.group(2)
+        if not raw:
+            continue
+        resolved = _real(raw)
+        if not resolved or not any(_within(resolved, root) for root in roots):
+            continue
+        if raw not in found:
+            found.append(raw)
+    return found
+
+
+def _claude_message(entry: dict, roots: list[str]) -> dict | None:
+    """One jsonl_watcher dict -> the unified shape, or None when it carries
+    nothing a chat view can draw."""
+    if not isinstance(entry, dict):
+        return None
+    entry_type = entry.get("type")
+    role = entry.get("role")
+    # A tool_result entry is written with role "user" (the harness replies to
+    # itself); calling that "user" on the phone would put the tool's output in
+    # the human's bubble.
+    if entry_type == "tool_result":
+        role = "tool"
+    if role not in ("user", "assistant", "system", "tool"):
+        return None
+    blocks: list[dict] = []
+    raw_blocks = entry.get("content")
+    for block in raw_blocks if isinstance(raw_blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                blocks.append({"type": "text", "text": text})
+        elif kind == "thinking":
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                blocks.append({"type": "thinking", "text": text})
+        elif kind == "tool_use":
+            blocks.append({"type": "tool_use", "name": str(block.get("tool_name") or "unknown")})
+        elif kind == "tool_result":
+            blocks.append(
+                {"type": "tool_result", "text": str(block.get("content") or "")[:_TOOL_RESULT_MAX]}
+            )
+    if role == "user":
+        for block in list(blocks):
+            if block["type"] != "text":
+                continue
+            for path in _image_paths_in(block["text"], roots):
+                blocks.append({"type": "image", "path": path})
+    if not blocks:
+        return None
+    timestamp = entry.get("timestamp")
+    return {
+        "id": str(entry.get("id") or ""),
+        "role": role,
+        "timestamp": timestamp if isinstance(timestamp, str) and timestamp else None,
+        "blocks": blocks,
+    }
+
+
+def _codex_message(row: Any) -> dict | None:
+    """One ``transcript_page`` row -> the unified shape. Text only: a Codex
+    rollout page carries no tool or thinking blocks."""
+    if not isinstance(row, dict):
+        return None
+    role = row.get("role")
+    if role not in ("user", "assistant"):
+        return None
+    text = row.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    timestamp = row.get("timestamp")
+    return {
+        "id": str(row.get("index")),
+        "role": role,
+        "timestamp": timestamp if isinstance(timestamp, str) and timestamp else None,
+        "blocks": [{"type": "text", "text": text}],
+    }
+
+
+def _page_by_id(
+    items: list[dict], after: str | None, before: str | None, limit: int
+) -> tuple[list[dict], bool, bool]:
+    """Slice *items* around an opaque cursor. -> (page, complete, cursor_reset).
+
+    An UNKNOWN cursor is treated as absent -- the tail, plus ``cursor_reset``.
+    Refusing it would strand a phone whose stored id belongs to a transcript
+    that has since been rewritten, with no way back; guessing a position would
+    be worse still.
+    """
+    ids = [m["id"] for m in items]
+    if after is not None:
+        if after in ids:
+            start = ids.index(after) + 1
+            # Everything before `after` is already on the phone, so nothing is
+            # missing ahead of this page by construction.
+            return items[start : start + limit], True, False
+        return items[-limit:], len(items) <= limit, True
+    if before is not None:
+        if before in ids:
+            end = ids.index(before)
+            start = max(0, end - limit)
+            return items[start:end], start == 0, False
+        return items[-limit:], len(items) <= limit, True
+    return items[-limit:], len(items) <= limit, False
+
+
+def _clamp_limit(limit: int) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return MESSAGE_LIMIT_DEFAULT
+    return max(1, min(MESSAGE_LIMIT_MAX, value))
+
+
+@router.get("/sessions/{terminal_id}/messages")
+async def list_messages(
+    terminal_id: str,
+    after: str | None = None,
+    before: str | None = None,
+    limit: int = MESSAGE_LIMIT_DEFAULT,
+    device: Device = Depends(require_device),
+):
+    """The session's conversation, in ONE shape whichever harness produced it.
+
+    A harness with no transcript yet is an empty list and a 200, not a 404: the
+    phone has just opened a brand-new session and there is nothing wrong.
+    """
+    backend, _store_ = _require_configured()
+    session = backend.get_session(terminal_id)
+    if session is None:
+        return _error(404, "unknown session")
+    limit = _clamp_limit(limit)
+    harness = str(_session_field(session, "harness", "claude-code") or "claude-code")
+    activity_state = _session_field(session, "activity_state")
+    if activity_state is None:
+        # A real TerminalSession has no activity_state attribute: the state
+        # lives on its tracker (that is what _session_to_dict serializes). Only
+        # the dict-shaped test doubles carry it as a key. Without this branch the
+        # phone's typing indicator never lit in production.
+        activity_state = getattr(getattr(session, "tracker", None), "state", None)
+    messages: list[dict] = []
+    complete = True
+    cursor_reset = False
+
+    if harness == "claude-code":
+        if backend.messages_claude is None:
+            return _error(503, "messages are not available")
+        try:
+            raw = await _maybe_await(backend.messages_claude(session)) or []
+        except OSError:
+            logger.warning("Failed reading Claude messages for %s", terminal_id, exc_info=True)
+            raw = []
+        roots = _serve_roots(backend, session)
+        mapped = [m for m in (_claude_message(e, roots) for e in raw) if m]
+        messages, complete, cursor_reset = _page_by_id(mapped, after, before, limit)
+    else:
+        if backend.transcript_codex is None:
+            return _error(503, "messages are not available")
+        # Codex ids are the rollout's byte offsets, so its own `before` paging
+        # is used directly rather than re-sliced here. `after` has no native
+        # equivalent: take the newest page and drop what the phone already has.
+        cursor = before if before is not None else None
+        before_index: int | None = None
+        if cursor is not None:
+            try:
+                before_index = int(cursor)
+            except (TypeError, ValueError):
+                cursor_reset = True
+        try:
+            page = _as_dict(await _maybe_await(backend.transcript_codex(session, before_index, limit)))
+        except OSError:
+            logger.warning("Failed reading the Codex transcript for %s", terminal_id, exc_info=True)
+            page = {}
+        rows = page.get("messages")
+        mapped = [m for m in (_codex_message(r) for r in (rows if isinstance(rows, list) else [])) if m]
+        complete = not bool(page.get("has_more"))
+        if after is not None:
+            try:
+                after_index = int(after)
+            except (TypeError, ValueError):
+                cursor_reset = True
+            else:
+                kept = [m for m in mapped if int(m["id"]) > after_index]
+                if len(kept) != len(mapped):
+                    # We dropped only messages the phone already holds, so
+                    # nothing is missing ahead of this page.
+                    complete = True
+                mapped = kept
+        messages = mapped
+
+    body = {
+        "messages": messages,
+        "harness": harness,
+        "activity_state": activity_state,
+        "complete": bool(complete),
+    }
+    if cursor_reset:
+        body["cursor_reset"] = True
+    return body
+
+
+@router.post("/sessions/{terminal_id}/upload", status_code=201)
+async def upload_to_session(
+    terminal_id: str,
+    files: list[UploadFile] = File(...),
+    device: Device = Depends(require_device),
+):
+    """Store 1..4 attachments and hand back the absolute paths the CLI can read.
+
+    Per-file failures are REPORTED, not fatal: three good screenshots and one
+    rejected .exe should send three screenshots, and the phone shows the one
+    error beside them.
+    """
+    backend, _store_ = _require_configured()
+    if backend.save_upload is None:
+        return _error(503, "uploads are not available")
+    if backend.get_session(terminal_id) is None:
+        return _error(404, "unknown session")
+    if not files:
+        return _error(400, "at least one file is required")
+    if len(files) > MAX_UPLOAD_FILES:
+        return _error(400, f"at most {MAX_UPLOAD_FILES} files")
+    paths: list[str] = []
+    errors: list[str] = []
+    for upload in files:
+        content = await upload.read()
+        try:
+            saved = await _maybe_await(backend.save_upload(upload.filename or "", content))
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if isinstance(saved, str) and saved:
+            paths.append(saved)
+        else:
+            errors.append(f"Rejected '{upload.filename}'")
+    return {"paths": paths, "errors": errors}
+
+
+def _refuse_file(path: str, why: str) -> JSONResponse:
+    logger.debug("Remote files route refused %r: %s", path, why)
+    return _error(404, "not served")
+
+
+@router.get("/files")
+async def get_file(path: str = "", device: Device = Depends(require_device)):
+    """Hand back ONE image the phone is entitled to see.
+
+    Every refusal is the SAME 404 body. A probe must not learn from the reply
+    whether a path exists, is the wrong type, or sits outside the roots -- those
+    are three different facts about the desktop's filesystem and none of them is
+    the phone's business.
+    """
+    backend, _store_ = _require_configured()
+    raw = (path or "").strip()
+    if not raw:
+        return _refuse_file(raw, "empty path")
+    # UNC is refused BEFORE resolution: "\\\\host\\share" is a network location,
+    # and no root this route serves from is ever one.
+    if raw.startswith("\\\\") or (os.name == "nt" and raw.startswith("//")):
+        return _refuse_file(raw, "UNC path")
+    ext = os.path.splitext(raw)[1].lower()
+    if ext not in SERVABLE_IMAGE_EXTENSIONS:
+        return _refuse_file(raw, f"extension {ext!r} is not servable")
+    resolved = _real(raw)
+    if not resolved:
+        return _refuse_file(raw, "unresolvable")
+    if resolved.startswith("\\\\"):
+        return _refuse_file(raw, "resolved to a UNC path")
+    roots = _serve_roots(backend)
+    if not any(_within(resolved, root) for root in roots):
+        return _refuse_file(raw, "outside every served root")
+    if not os.path.isfile(resolved):
+        return _refuse_file(raw, "not a file")
+    try:
+        size = os.path.getsize(resolved)
+    except OSError:
+        return _refuse_file(raw, "could not stat")
+    if size > FILES_MAX_BYTES:
+        return _refuse_file(raw, f"{size} bytes exceeds the cap")
+    return FileResponse(
+        resolved,
+        media_type=_IMAGE_MEDIA_TYPES.get(ext, "application/octet-stream"),
+        headers={"Cache-Control": "no-store"},
+    )

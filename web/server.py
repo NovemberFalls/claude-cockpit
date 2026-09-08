@@ -531,58 +531,84 @@ def _evict_for_locked(needed: int) -> int:
     return freed
 
 
+async def _save_one_upload(filename: str, content: bytes) -> tuple[str | None, str | None]:
+    """Validate and store ONE upload. Returns (saved_path, error) -- exactly one
+    of the two is set.
+
+    This is the WHOLE body of the per-file loop POST /api/upload used to inline,
+    extracted so the phone's /remote/v1/.../upload cannot drift from it. The
+    quota accounting (`_upload_dir_size`, `_upload_lock`, `_evict_for_locked`)
+    is unchanged and still the one place it happens.
+    """
+    global _upload_dir_size
+
+    ext = Path(filename or "").suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return None, f"Rejected '{filename}': unsupported file type '{ext}'"
+
+    file_size = len(content)
+    if file_size > MAX_FILE_SIZE:
+        return None, f"Rejected '{filename}': exceeds 50MB limit"
+
+    # Security: strip directory components from the user-supplied filename.
+    # The name comes from the multipart Content-Disposition header and is fully
+    # attacker-controlled.  A value like "../../etc/cron.d/evil" would cause
+    # pathlib to resolve the destination outside UPLOAD_DIR.  Path.name returns
+    # only the final component ("evil"), neutralising the traversal.  The
+    # `or "upload"` fallback handles the edge case where the filename is *only*
+    # directory separators (e.g. "../../"), which yields an empty string.
+    stripped_name = Path(filename or "").name or "upload"
+
+    # Lock the quota-check-and-write as an atomic unit.  Without this,
+    # two concurrent requests could both read the same _upload_dir_size,
+    # both pass the check, and together exceed the 200MB limit.
+    async with _upload_lock:
+        # Make room rather than refuse -- see MAX_UPLOAD_DIR_SIZE.
+        _evict_for_locked(file_size)
+        if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
+            # Only reachable if eviction could not free enough, which means
+            # the dir is full of files we failed to delete. Say that, rather
+            # than "full": the remedy is different.
+            return None, (
+                f"Rejected '{filename}': upload cache is full and could not "
+                f"be cleared. Restart Plexar Studio to reset it."
+            )
+
+        safe_name = f"{uuid.uuid4().hex[:8]}_{stripped_name}"
+        dest = UPLOAD_DIR / safe_name
+        dest.write_bytes(content)
+        _upload_dir_size += file_size
+
+    return str(dest), None
+
+
+async def _remote_save_upload(filename: str, content: bytes) -> str:
+    """`RemoteBackend.save_upload`: the same rules, as a path-or-raise.
+
+    A thin adapter over `_save_one_upload`, NOT a second implementation -- the
+    gateway's contract wants a path back, and a rejection is a ValueError the
+    route turns into one line of its `errors` list.
+    """
+    path, error = await _save_one_upload(filename, content)
+    if error:
+        raise ValueError(error)
+    return path or ""
+
+
 @app.post("/api/upload")
 async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     """Accept multipart file uploads, save to temp dir, return paths."""
-    global _upload_dir_size
     saved_paths: list[str] = []
     errors: list[str] = []
 
     for upload in files:
-        ext = Path(upload.filename or "").suffix.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            errors.append(f"Rejected '{upload.filename}': unsupported file type '{ext}'")
-            continue
-
         content = await upload.read()
-        file_size = len(content)
-
-        if file_size > MAX_FILE_SIZE:
-            errors.append(f"Rejected '{upload.filename}': exceeds 50MB limit")
+        saved, error = await _save_one_upload(upload.filename or "", content)
+        if error:
+            errors.append(error)
             continue
-
-        # Security: strip directory components from the user-supplied filename.
-        # upload.filename comes from the multipart Content-Disposition header and
-        # is fully attacker-controlled.  A value like "../../etc/cron.d/evil"
-        # would cause pathlib to resolve the destination outside UPLOAD_DIR.
-        # Path.name returns only the final component ("evil"), neutralising the
-        # traversal.  The `or "upload"` fallback handles the edge case where the
-        # filename is *only* directory separators (e.g. "../../"), which yields
-        # an empty string after .name.
-        stripped_name = Path(upload.filename or "").name or "upload"
-
-        # Lock the quota-check-and-write as an atomic unit.  Without this,
-        # two concurrent requests could both read the same _upload_dir_size,
-        # both pass the check, and together exceed the 200MB limit.
-        async with _upload_lock:
-            # Make room rather than refuse -- see MAX_UPLOAD_DIR_SIZE.
-            _evict_for_locked(file_size)
-            if _upload_dir_size + file_size > MAX_UPLOAD_DIR_SIZE:
-                # Only reachable if eviction could not free enough, which means
-                # the dir is full of files we failed to delete. Say that, rather
-                # than "full": the remedy is different.
-                errors.append(
-                    f"Rejected '{upload.filename}': upload cache is full and could not "
-                    f"be cleared. Restart Plexar Studio to reset it."
-                )
-                continue
-
-            safe_name = f"{uuid.uuid4().hex[:8]}_{stripped_name}"
-            dest = UPLOAD_DIR / safe_name
-            dest.write_bytes(content)
-            _upload_dir_size += file_size
-
-        saved_paths.append(str(dest))
+        if saved:
+            saved_paths.append(saved)
 
     result: dict = {"paths": saved_paths}
     if errors:
@@ -6891,6 +6917,32 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
 app.include_router(remote_gateway.router)
 app.include_router(remote_gateway.admin_router)
 
+def _remote_claude_messages(session) -> list[dict]:
+    """`RemoteBackend.messages_claude`: this session's JSONL, parsed, or [].
+
+    The path comes from `pty_manager._get_jsonl_path` — the SAME discovery the
+    rest of Studio uses, including its refusal to hand a non-claude-code session
+    somebody else's transcript. A session that has not written one yet is an
+    empty list, not an error.
+    """
+    from jsonl_watcher import read_all_messages
+
+    path = pty_manager._get_jsonl_path(session)
+    if not path:
+        return []
+    return read_all_messages(str(path))
+
+
+def _remote_codex_transcript(session, before: int | None, limit: int):
+    """`RemoteBackend.transcript_codex`: the EXACT route the desktop reads.
+
+    Keyed by terminal id rather than by the session object only because that is
+    the route's own signature; going through it keeps the rebinding guard and
+    the usage refresh that route performs.
+    """
+    return get_codex_transcript(getattr(session, "id", "") or "", before, limit)
+
+
 # Wired at IMPORT time, not in lifespan: a TestClient-based test constructs the
 # app without ever running startup, and an unconfigured gateway would 500 there
 # while working in production — the kind of split that hides a real defect.
@@ -6912,6 +6964,10 @@ remote_gateway.configure(
         delete_session=pty_manager.kill_terminal,
         recent_workdirs=usage_tracker.recent_workdirs,
         anthropic_models=get_models,
+        messages_claude=_remote_claude_messages,
+        transcript_codex=_remote_codex_transcript,
+        upload_dir=lambda: str(UPLOAD_DIR),
+        save_upload=_remote_save_upload,
     ),
     DeviceStore(app_paths.data_path("remote_devices.json")),
 )

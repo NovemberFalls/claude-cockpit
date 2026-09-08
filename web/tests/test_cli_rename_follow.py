@@ -171,6 +171,10 @@ class TestRefreshCliTitle:
         # cockpit.* loggers do not propagate to root, so attach caplog's handler
         # to the logger under test directly rather than relying on propagation.
         logger = logging.getLogger("cockpit.pty")
+        # Another module's logging_config.setup() can leave this logger above
+        # INFO when the whole suite runs; the assertion below counts INFO lines,
+        # so pin the level here rather than depending on test order.
+        caplog.set_level(logging.INFO, logger="cockpit.pty")
         logger.addHandler(caplog.handler)
         try:
             assert self.mgr._refresh_cli_title(s) == "Stable"
