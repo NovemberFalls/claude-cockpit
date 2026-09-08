@@ -672,6 +672,31 @@ export default function App() {
     return savedLocations.find((l) => l.path === dir)?.bypassPermissions || false;
   }, [savedLocations]);
 
+  // Publish savedLocations to the desktop's remote gateway so Plexar Mobile's
+  // folder picker can offer them (Studio Remote v1, SPEC §2). Debounced 1s,
+  // fire-and-forget: this is background sync, never a user-facing error.
+  // An empty list is skipped UNTIL something has actually been published —
+  // otherwise a fresh install with no saved locations would PUT an empty
+  // array on every mount — but once a location has been published, a later
+  // removal down to zero MUST still be sent so the phone's list clears too.
+  const remoteLocationsTimerRef = useRef(null);
+  const remoteLocationsPublishedRef = useRef(false);
+  useEffect(() => {
+    if (savedLocations.length === 0 && !remoteLocationsPublishedRef.current) return;
+    remoteLocationsPublishedRef.current = true;
+    if (remoteLocationsTimerRef.current) clearTimeout(remoteLocationsTimerRef.current);
+    remoteLocationsTimerRef.current = setTimeout(() => {
+      fetch("/api/remote/locations", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locations: savedLocations.map((l) => ({ path: l.path, name: l.name || null })),
+        }),
+      }).catch((err) => console.debug("[cockpit] remote locations publish failed", err));
+    }, 1000);
+    return () => clearTimeout(remoteLocationsTimerRef.current);
+  }, [savedLocations]);
+
   // Create a new terminal session
   const createSession = useCallback(async (name, workdir, sessionModel, options = {}) => {
     const localId = nextLocalId++;
