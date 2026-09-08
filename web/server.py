@@ -6877,6 +6877,14 @@ remote_gateway.configure(
         submit=_paste_and_submit,
         write_raw=pty_manager.write_pty_async,
         interrupt=lambda terminal_id: pty_manager.write_pty_async(terminal_id, "\x1b"),
+        # The four below are wired to the EXACT callables the desktop's own
+        # routes use, not to copies: browse_directories is GET /api/browse,
+        # kill_terminal is DELETE /api/terminals/{id}, get_models is
+        # GET /api/models. A wrapper here would be a second code path to drift.
+        browse=browse_directories,
+        delete_session=pty_manager.kill_terminal,
+        recent_workdirs=usage_tracker.recent_workdirs,
+        anthropic_models=get_models,
     ),
     DeviceStore(app_paths.data_path("remote_devices.json")),
 )

@@ -16,22 +16,26 @@ callables, so the gateway can be exercised on its own against fakes.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
 import re
 import shutil
 import socket
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse
 
+import app_paths
 from remote_devices import Device, DeviceStore, PairingError
 
 logger = logging.getLogger("cockpit.remote")
@@ -52,14 +56,67 @@ SESSION_FIELDS = (
     "created_at",
 )
 
+# The ONLY per-row fields a phone gets from a folder listing. `entry_count`,
+# `dirty` and `skipped` exist in the desktop's own /api/browse rows and are
+# deliberately dropped: they are the desktop picker's affordances, and a remote
+# surface should not carry the desktop's whole record just because it is there.
+BROWSE_ENTRY_FIELDS = ("path", "name", "git", "branch", "session_count")
+
 # (device_id, request_id) pairs already applied. Bounded, because it is a
 # convenience against a retried tap on a flaky cellular link, not a durable log.
 _IDEMPOTENCY_MAX = 256
 
+# The four permission modes `_create_terminal_from_body` understands, with the
+# words a phone shows for them. Ids are the WIRE values and must match
+# `permissionMode` exactly; the labels are ours.
+PERMISSION_MODES = (
+    ("default", "Ask before edits"),
+    ("acceptEdits", "Accept edits"),
+    ("plan", "Plan only"),
+    ("bypassPermissions", "Bypass permissions"),
+)
+_PERMISSION_MODE_IDS = frozenset(mode_id for mode_id, _label in PERMISSION_MODES)
+
+EFFORTS = ("low", "medium", "high", "xhigh")
+
+# Codex publishes no live `/v1/models` equivalent, so its catalog is a static
+# list on BOTH sides of the app -- here, and in
+# `web/frontend/src/modelCatalog.js`'s CODEX_MODEL_GROUPS. Two static lists is
+# exactly the drift hazard `modelCatalog.js` exists to prevent for Anthropic,
+# so `tests/test_remote_codex_catalog_sync.py` reads that file and asserts set
+# equality with these ids. Change one, change the other, or the suite reddens.
+CODEX_MODELS = (
+    ("gpt-6-astra", "GPT-6 Astra"),
+    ("gpt-5.6-sol", "GPT-5.6 Sol"),
+    ("gpt-5.6-terra", "GPT-5.6 Terra"),
+    ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ("gpt-5.5", "GPT-5.5"),
+    ("gpt-5.3-codex-spark", "Codex Spark"),
+)
+CODEX_DEFAULT_MODEL = "gpt-6-astra"
+
+# Saved folders the desktop publishes for the phone's "Saved" tab.
+LOCATIONS_FILENAME = "remote_locations.json"
+MAX_SAVED_LOCATIONS = 200
+
 
 @dataclass
 class RemoteBackend:
-    """The slice of the running server the gateway is allowed to touch."""
+    """The slice of the running server the gateway is allowed to touch.
+
+    The four fields added for Stage 1c default to ``None`` so an older caller
+    (or a narrower test fake) still constructs a valid backend; the routes that
+    need them answer 503 rather than 500 when they are absent.
+
+    Two of them are annotated as returning either a value or an awaitable, and
+    that is deliberate rather than sloppy. ``browse`` is wired to
+    ``server.browse_directories`` -- the SAME callable ``GET /api/browse`` uses,
+    which is a FastAPI route and therefore hands back a ``JSONResponse``; and
+    ``delete_session`` is wired to ``pty_manager.kill_terminal``, the SAME
+    synchronous call ``DELETE /api/terminals/{id}`` makes. Wrapping either one
+    in server.py to make the annotation prettier would mean the phone no longer
+    travels the identical code path, which is the property that matters.
+    """
 
     settings: Callable[[], dict]
     app_version: Callable[[], str]
@@ -69,6 +126,10 @@ class RemoteBackend:
     submit: Callable[[str, str], Awaitable[bool]]
     write_raw: Callable[[str, str], Awaitable[bool]]
     interrupt: Callable[[str], Awaitable[bool]]
+    browse: Callable[[str], Awaitable[dict] | Any] | None = None
+    delete_session: Callable[[str], Awaitable[bool] | bool] | None = None
+    recent_workdirs: Callable[[int], list[dict]] | None = None
+    anthropic_models: Callable[[], Awaitable[dict]] | None = None
 
 
 class StreamRegistry:
@@ -243,6 +304,133 @@ async def _read_json(request: Request) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+async def _maybe_await(value: Any) -> Any:
+    """Await *value* when it is awaitable, otherwise hand it straight back.
+
+    Lets one route body drive both an ``async def`` server route and a plain
+    synchronous manager call without the wiring in server.py having to lie
+    about which it is.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _as_dict(result: Any) -> dict:
+    """Normalize a backend reply to a plain dict.
+
+    ``browse_directories`` returns a ``JSONResponse`` (it is a route); test
+    fakes return a dict. Reading both here is what allows the gateway to call
+    the real route function rather than a parallel copy of it.
+    """
+    if isinstance(result, dict):
+        return result
+    body = getattr(result, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            data = json.loads(bytes(body).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            logger.warning("Backend reply was not decodable JSON", exc_info=True)
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+# A Windows absolute path, checked EXPLICITLY rather than left to
+# ``os.path.isabs``: that function answers for the platform the server runs on,
+# so "C:\\Code" is relative to a Linux CI runner. The phone's paths come from
+# the desktop, not from this process's filesystem.
+_WINDOWS_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+)")
+
+
+def _is_absolute_path(value: Any) -> bool:
+    """True for a POSIX root path, a Windows drive path, or a UNC path."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    if text.startswith("/") or _WINDOWS_ABS_RE.match(text):
+        return True
+    return os.path.isabs(text)
+
+
+def _is_browsable_path(value: str) -> bool:
+    """``_is_absolute_path`` plus a refusal of anything with a ``..`` segment.
+
+    The walk itself is the desktop's own listing code and is not sandboxed --
+    it never was, because on the desktop the whole filesystem is already the
+    user's. Refusing traversal-looking input here is not a sandbox either; it
+    keeps a phone from asking for a path the desktop UI could not have produced,
+    so a malformed request fails loudly instead of listing something surprising.
+    """
+    if not isinstance(value, str):
+        return False
+    if ".." in [part for part in re.split(r"[\\/]+", value.strip()) if part]:
+        return False
+    return _is_absolute_path(value)
+
+
+def _dedupe_key(path: str) -> str:
+    """The key two spellings of one folder must share.
+
+    Trailing separators are stripped everywhere; case is folded on Windows
+    ONLY. Folding on Linux would merge ``/srv/App`` and ``/srv/app``, which are
+    two different directories there.
+    """
+    text = str(path or "").strip().rstrip("\\/")
+    return text.casefold() if os.name == "nt" else text
+
+
+def _locations_file() -> Path:
+    """Where the desktop's published folder list lives. Patched in tests."""
+    return app_paths.data_path(LOCATIONS_FILENAME)
+
+
+def _read_locations() -> list[dict]:
+    """The saved folders, or [] for any missing/unreadable/corrupt file.
+
+    A phone that cannot see its Saved tab is an inconvenience; a 500 on the
+    workdirs route would take the Recent and Browse tabs down with it.
+    """
+    path = _locations_file()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        logger.warning("Failed to read saved locations %s -- treating as empty", path, exc_info=True)
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Saved locations %s contain invalid JSON -- treating as empty", path, exc_info=True)
+        return []
+    items = data.get("locations") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _write_locations(locations: list[dict]) -> None:
+    """Atomically replace the saved-folder file. Same shape as DeviceStore._write."""
+    path = _locations_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix="remote_locations_", suffix=".json.tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"locations": locations}, handle, indent=2)
+        os.replace(tmp_path, path)
+    except OSError:
+        logger.warning("Failed to write saved locations %s", path, exc_info=True)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to clean up temp locations file %s", tmp_path, exc_info=True)
+        raise
+
+
 def _remember_request(device_id: str, request_id: str) -> bool:
     """Record (device, request) as applied. False if it was already there.
 
@@ -325,6 +513,42 @@ async def revoke_device(device_id: str):
         return _error(404, "unknown device")
     await registry.close_device(device_id)
     return {"revoked": True}
+
+
+@admin_router.put("/locations")
+async def put_locations(request: Request):
+    """Publish the desktop's saved folders for the phone's "Saved" tab.
+
+    Validated all-or-nothing, like PUT /api/settings: one bad entry means the
+    stored list is left exactly as it was rather than half-replaced. This is a
+    REPLACE, not a merge -- the desktop's saved list is the whole truth, and a
+    merge would make deleting a location impossible.
+    """
+    body = await _read_json(request)
+    raw = body.get("locations")
+    if not isinstance(raw, list):
+        return _error(400, "locations must be a list")
+    if len(raw) > MAX_SAVED_LOCATIONS:
+        return _error(400, f"at most {MAX_SAVED_LOCATIONS} locations")
+    cleaned: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return _error(400, "each location must be an object")
+        path = item.get("path")
+        if not _is_absolute_path(path):
+            return _error(400, "each location needs an absolute path")
+        name = item.get("name")
+        cleaned.append(
+            {
+                "path": path.strip(),
+                "name": name.strip() if isinstance(name, str) and name.strip() else None,
+            }
+        )
+    try:
+        _write_locations(cleaned)
+    except OSError:
+        return _error(500, "could not save locations")
+    return {"count": len(cleaned)}
 
 
 # -- self-hosted Cloudflare deployment tools (Settings > Remote) -----------
@@ -567,6 +791,14 @@ async def list_sessions(device: Device = Depends(require_device)):
 
 @router.post("/sessions", status_code=201)
 async def create_session(request: Request, device: Device = Depends(require_device)):
+    """Spawn a session. The three optional knobs are validated HERE, not there.
+
+    `permission_mode`, `effort` and `bypass` are the phone's wire names; they
+    are renamed to the local create body's `permissionMode` / `effort` /
+    `bypassPermissions` and are OMITTED entirely when the caller did not send
+    them, so an absent field keeps `_create_terminal_from_body`'s own default
+    rather than this route inventing one.
+    """
     backend, _store_ = _require_configured()
     body = await _read_json(request)
     payload = {
@@ -575,11 +807,38 @@ async def create_session(request: Request, device: Device = Depends(require_devi
         "harness": body.get("harness"),
         "model": body.get("model"),
     }
+    mode = body.get("permission_mode")
+    if mode is not None:
+        if not isinstance(mode, str) or mode not in _PERMISSION_MODE_IDS:
+            return _error(400, "unknown permission_mode")
+        payload["permissionMode"] = mode
+    effort = body.get("effort")
+    if effort is not None:
+        if not isinstance(effort, str) or effort not in EFFORTS:
+            return _error(400, "unknown effort")
+        payload["effort"] = effort
+    bypass = body.get("bypass")
+    if bypass is not None:
+        if not isinstance(bypass, bool):
+            return _error(400, "bypass must be a boolean")
+        payload["bypassPermissions"] = bypass
     try:
         session = await backend.create_session(payload)
     except ValueError as exc:
         return _error(400, str(exc))
     return {"session": _session_view(session or {})}
+
+
+@router.delete("/sessions/{terminal_id}")
+async def close_session(terminal_id: str, device: Device = Depends(require_device)):
+    """Close a session from the phone, via the same kill DELETE /api/terminals does."""
+    backend, _store_ = _require_configured()
+    if backend.delete_session is None:
+        return _error(503, "closing sessions is not available")
+    if backend.get_session(terminal_id) is None:
+        return _error(404, "unknown session")
+    closed = await _maybe_await(backend.delete_session(terminal_id))
+    return {"closed": bool(closed)}
 
 
 @router.post("/sessions/{terminal_id}/input")
@@ -613,3 +872,191 @@ async def interrupt(terminal_id: str, device: Device = Depends(require_device)):
         return _error(404, "unknown session")
     accepted = await backend.interrupt(terminal_id)
     return {"accepted": bool(accepted)}
+
+
+# ---------------------------------------------------------------------------
+# Where a new session should run: saved folders, live sessions, history, and
+# the filesystem the desktop can already see.
+# ---------------------------------------------------------------------------
+
+
+def _sessions_newest_first(backend: RemoteBackend) -> list[dict]:
+    """Live sessions, newest first. Never raises -- an empty list is an answer."""
+    try:
+        sessions = list(backend.list_sessions() or [])
+    except Exception:  # noqa: BLE001 - one bad session list must not 500 /workdirs
+        logger.warning("Failed listing sessions for /workdirs", exc_info=True)
+        return []
+    rows = [s for s in sessions if isinstance(s, dict)]
+    # sorted() is stable and stays stable under reverse=True, so sessions that
+    # carry no created_at keep the order the manager listed them in.
+    return sorted(rows, key=lambda s: str(s.get("created_at") or ""), reverse=True)
+
+
+async def _drive_roots(backend: RemoteBackend) -> list[str]:
+    """The same roots ``browse_directories("")`` returns; ["/"] if it cannot say."""
+    if backend.browse is None:
+        return ["/"]
+    try:
+        data = _as_dict(await _maybe_await(backend.browse("")))
+    except OSError:
+        logger.warning("Failed listing drive roots for /workdirs", exc_info=True)
+        return ["/"]
+    dirs = data.get("dirs")
+    roots = [d for d in dirs if isinstance(d, str) and d] if isinstance(dirs, list) else []
+    return roots or ["/"]
+
+
+@router.get("/workdirs")
+async def list_workdirs(device: Device = Depends(require_device)):
+    """Every folder the phone could sensibly start a session in, best first.
+
+    Three sources in one list, each row saying which one it came from, because
+    they mean different things: `saved` is a folder the user deliberately kept,
+    `session` is one something is running in RIGHT NOW, and `history` is one
+    that has usage on record. De-duplication keeps the FIRST occurrence, so a
+    saved folder that also has a live session stays labelled `saved` -- the
+    stronger statement of the two.
+    """
+    backend, _store_ = _require_configured()
+    workdirs: list[dict] = []
+    seen: set[str] = set()
+
+    def add(path: Any, name: Any, source: str, last_used: Any) -> None:
+        if not isinstance(path, str):
+            return
+        path = path.strip()
+        if not path:
+            return
+        key = _dedupe_key(path)
+        if key in seen:
+            return
+        seen.add(key)
+        workdirs.append(
+            {
+                "path": path,
+                "name": name if isinstance(name, str) and name else None,
+                "source": source,
+                "last_used": last_used if isinstance(last_used, str) and last_used else None,
+            }
+        )
+
+    for entry in _read_locations():
+        add(entry.get("path"), entry.get("name"), "saved", None)
+
+    for session in _sessions_newest_first(backend):
+        # `last_used` for a LIVE session is when it started: the only timestamp
+        # this record actually carries. Claiming "now" would be an invention.
+        add(session.get("working_dir"), None, "session", session.get("created_at"))
+
+    if backend.recent_workdirs is not None:
+        try:
+            history = backend.recent_workdirs(30) or []
+        except Exception:  # noqa: BLE001 - a usage DB error must not lose the other two sources
+            logger.warning("Failed reading recent workdirs from usage history", exc_info=True)
+            history = []
+        for row in history:
+            if isinstance(row, dict):
+                add(row.get("path"), None, "history", row.get("last_used"))
+
+    return {"workdirs": workdirs, "roots": await _drive_roots(backend)}
+
+
+@router.get("/browse")
+async def browse(path: str = "", device: Device = Depends(require_device)):
+    """Subdirectories of *path*, through the desktop's own listing code.
+
+    An unreadable folder answers 200 with an empty `entries` and an `error`
+    string, NOT a 5xx: the phone is mid-navigation and needs to be told this
+    one folder cannot be walked while the breadcrumb it came from still works.
+    """
+    backend, _store_ = _require_configured()
+    if backend.browse is None:
+        return _error(503, "browsing is not available")
+    requested = (path or "").strip()
+    if requested and not _is_browsable_path(requested):
+        return _error(400, "path must be absolute")
+    try:
+        data = _as_dict(await _maybe_await(backend.browse(requested)))
+    except OSError as exc:
+        logger.debug("Remote browse failed for %r", requested, exc_info=True)
+        return {"path": requested, "parent": None, "entries": [], "error": str(exc)}
+    parent = data.get("parent")
+    raw_entries = data.get("entries")
+    entries = []
+    if isinstance(raw_entries, list):
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            row = {key: entry.get(key) for key in BROWSE_ENTRY_FIELDS}
+            row["git"] = bool(row["git"])
+            row["session_count"] = row["session_count"] if isinstance(row["session_count"], int) else 0
+            entries.append(row)
+    return {
+        "path": requested,
+        "parent": parent if isinstance(parent, str) and parent else None,
+        "entries": entries,
+    }
+
+
+def _configured_session_model() -> str:
+    """`sessions.model` from settings, or "" when unset/unreadable."""
+    if _backend is None:
+        return ""
+    try:
+        settings = _backend.settings() or {}
+    except Exception:  # noqa: BLE001 - a settings read must never 500 the gateway
+        logger.warning("Failed to read settings for the remote catalog", exc_info=True)
+        return ""
+    sessions = settings.get("sessions")
+    model = sessions.get("model") if isinstance(sessions, dict) else None
+    return model.strip() if isinstance(model, str) else ""
+
+
+@router.get("/catalog")
+async def catalog(device: Device = Depends(require_device)):
+    """What a new session can be: harnesses, their models, modes and efforts.
+
+    The Claude list is the LIVE one the desktop picker reads; there is no
+    static fallback written here, because a second hardcoded Anthropic catalog
+    is exactly what `modelCatalog.js` exists to prevent. If the catalog cannot
+    be read the list is empty and `default_model` is null -- the phone renders
+    "no models" rather than a plausible id that may not exist.
+    """
+    backend, _store_ = _require_configured()
+    claude_models: list[dict] = []
+    if backend.anthropic_models is not None:
+        try:
+            data = _as_dict(await _maybe_await(backend.anthropic_models()))
+        except OSError:
+            logger.warning("Failed reading the Anthropic model catalog for /catalog", exc_info=True)
+            data = {}
+        raw_models = data.get("models")
+        for model in raw_models if isinstance(raw_models, list) else []:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            label = model.get("display_name") or model.get("label") or model_id
+            claude_models.append({"id": model_id, "label": str(label)})
+    configured = _configured_session_model()
+    claude_default = configured or (claude_models[0]["id"] if claude_models else None)
+    return {
+        "harnesses": [
+            {
+                "id": "claude-code",
+                "label": "Claude Code",
+                "models": claude_models,
+                "default_model": claude_default,
+            },
+            {
+                "id": "codex",
+                "label": "Codex",
+                "models": [{"id": mid, "label": label} for mid, label in CODEX_MODELS],
+                "default_model": CODEX_DEFAULT_MODEL,
+            },
+        ],
+        "permission_modes": [{"id": mode_id, "label": label} for mode_id, label in PERMISSION_MODES],
+        "efforts": list(EFFORTS),
+    }

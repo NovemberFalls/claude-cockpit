@@ -1176,6 +1176,38 @@ class UsageTracker:
             logger.warning("Failed reading earliest tool event ts", exc_info=True)
             return None
 
+    def recent_workdirs(self, limit: int = 30) -> list[dict]:
+        """Distinct non-empty working directories, most recently used first.
+
+        Read-only; nothing here writes. `last_used` is the newest timestamp
+        seen for that directory across all three event tables, so a folder
+        worked in yesterday outranks one last touched months ago regardless of
+        which table happens to hold the row.
+
+        Case is NOT folded here: SQL grouping cannot know whether the paths
+        came off a case-insensitive filesystem. The caller (the remote
+        /workdirs route) folds on Windows only, where that is true.
+        """
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError):
+            limit = 30
+        sql = (
+            "SELECT workdir, MAX(ts) AS last_used FROM ("
+            "  SELECT workdir, ts FROM usage_events"
+            "  UNION ALL SELECT workdir, ts FROM local_runs"
+            "  UNION ALL SELECT workdir, ts FROM tool_events"
+            ") WHERE workdir IS NOT NULL AND workdir != '' "
+            "GROUP BY workdir ORDER BY last_used DESC LIMIT ?"
+        )
+        try:
+            with self._lock:
+                rows = self._conn.execute(sql, (limit,)).fetchall()
+        except sqlite3.Error:
+            logger.warning("Failed reading recent workdirs", exc_info=True)
+            return []
+        return [{"path": r["workdir"], "last_used": r["last_used"] or None} for r in rows]
+
     def range_report(self, range_key: str = "7d") -> dict:
         """Everything the Reports page renders, in one query pass.
 

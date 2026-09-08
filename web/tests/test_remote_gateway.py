@@ -41,6 +41,24 @@ FULL_SESSION = {
 }
 
 
+def browse_entry(path, name, *, git=False, branch=None, sessions=0):
+    """One row shaped like server._browse_entry -- extra fields included.
+
+    `entry_count`, `dirty` and `skipped` are here ON PURPOSE: the gateway must
+    drop them, and a fixture that never produced them could not prove it.
+    """
+    return {
+        "name": name,
+        "path": path,
+        "git": git,
+        "branch": branch,
+        "dirty": None,
+        "session_count": sessions,
+        "entry_count": 12,
+        "skipped": False,
+    }
+
+
 class Backend:
     """A recording fake of everything the gateway is allowed to reach."""
 
@@ -52,6 +70,27 @@ class Backend:
         self.interrupts = []
         self.created = []
         self.create_error = None
+        self.deleted = []
+        self.delete_result = True
+        self.browsed = []
+        self.browse_error = None
+        self.browse_reply = {
+            "dirs": ["C:/tmp/a"],
+            "parent": "C:/tmp",
+            "entries": [browse_entry("C:/tmp/a", "a", git=True, branch="main", sessions=2)],
+        }
+        self.roots_reply = {"dirs": ["C:\\", "D:\\"], "parent": "", "entries": []}
+        self.history = [
+            {"path": "C:/hist/one", "last_used": "2026-09-01T00:00:00+00:00"},
+            {"path": "C:/hist/two", "last_used": "2026-08-01T00:00:00+00:00"},
+        ]
+        self.models_reply = {
+            "models": [
+                {"id": "claude-opus-5", "display_name": "Claude Opus 5"},
+                {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+            ],
+            "source": "live",
+        }
 
     def as_remote_backend(self) -> RemoteBackend:
         return RemoteBackend(
@@ -63,10 +102,33 @@ class Backend:
             submit=self._submit,
             write_raw=self._write_raw,
             interrupt=self._interrupt,
+            browse=self._browse,
+            delete_session=self._delete,
+            recent_workdirs=self._recent_workdirs,
+            anthropic_models=self._models,
         )
 
     def _get_session(self, terminal_id):
         return next((s for s in self.sessions if s["id"] == terminal_id), None)
+
+    async def _browse(self, path):
+        self.browsed.append(path)
+        if self.browse_error is not None:
+            raise self.browse_error
+        return self.roots_reply if path == "" else self.browse_reply
+
+    def _delete(self, terminal_id):
+        """SYNCHRONOUS on purpose -- pty_manager.kill_terminal is."""
+        self.deleted.append(terminal_id)
+        self.sessions = [s for s in self.sessions if s["id"] != terminal_id]
+        return self.delete_result
+
+    def _recent_workdirs(self, limit):
+        self.history_limit = limit
+        return self.history
+
+    async def _models(self):
+        return self.models_reply
 
     async def _create(self, body):
         if self.create_error:
@@ -92,9 +154,14 @@ class Backend:
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, monkeypatch):
     backend = Backend()
     store = DeviceStore(tmp_path / "remote_devices.json")
+    # The saved-locations file is resolved through this one function precisely
+    # so a test never writes into the user's real ~/.plexar-studio.
+    monkeypatch.setattr(
+        remote_gateway, "_locations_file", lambda: tmp_path / "remote_locations.json"
+    )
     remote_gateway.configure(backend.as_remote_backend(), store)
     app = FastAPI()
     app.include_router(remote_gateway.admin_router)
@@ -208,6 +275,10 @@ def test_disabled_404s_every_remote_route_including_pair(rig):
         client.post("/remote/v1/sessions", json={}, headers=headers),
         client.post("/remote/v1/sessions/t1/input", json={"text": "hi"}, headers=headers),
         client.post("/remote/v1/sessions/t1/interrupt", headers=headers),
+        client.delete("/remote/v1/sessions/t1", headers=headers),
+        client.get("/remote/v1/workdirs", headers=headers),
+        client.get("/remote/v1/browse", headers=headers),
+        client.get("/remote/v1/catalog", headers=headers),
     ]
     for resp in checks:
         assert resp.status_code == 404, resp.request.url
@@ -543,6 +614,474 @@ def test_probe_classifies_unexpected(rig, monkeypatch):
     body = resp.json()
     assert body["classification"] == "unexpected"
     assert body["status"] == 500
+
+
+# -- saved locations (admin) -------------------------------------------------
+
+
+def test_locations_put_persists_and_reports_a_count(rig):
+    _backend, _store, client = rig
+    resp = client.put(
+        "/api/remote/locations",
+        json={
+            "locations": [
+                {"path": "C:\\Code\\Personal", "name": "Personal"},
+                {"path": "/srv/work", "name": None},
+                {"path": "\\\\nas\\share", "name": "  "},
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"count": 3}
+    assert remote_gateway._read_locations() == [
+        {"path": "C:\\Code\\Personal", "name": "Personal"},
+        {"path": "/srv/work", "name": None},
+        {"path": "\\\\nas\\share", "name": None},
+    ]
+
+
+def test_locations_put_replaces_wholesale(rig):
+    _backend, _store, client = rig
+    client.put("/api/remote/locations", json={"locations": [{"path": "/a", "name": "A"}]})
+    client.put("/api/remote/locations", json={"locations": [{"path": "/b", "name": "B"}]})
+    assert remote_gateway._read_locations() == [{"path": "/b", "name": "B"}]
+
+
+def test_locations_put_accepts_an_empty_list(rig):
+    _backend, _store, client = rig
+    client.put("/api/remote/locations", json={"locations": [{"path": "/a", "name": "A"}]})
+    resp = client.put("/api/remote/locations", json={"locations": []})
+    assert resp.status_code == 200 and resp.json() == {"count": 0}
+    assert remote_gateway._read_locations() == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"locations": "nope"},
+        {"locations": [{"path": ""}]},
+        {"locations": [{"path": "relative/path"}]},
+        {"locations": [{"path": "C:"}]},
+        {"locations": [{"name": "no path"}]},
+        {"locations": ["C:\\Code"]},
+        {"locations": [{"path": 7}]},
+    ],
+)
+def test_locations_put_rejects_bad_input_without_writing(rig, payload):
+    _backend, _store, client = rig
+    client.put("/api/remote/locations", json={"locations": [{"path": "/keep", "name": "K"}]})
+    resp = client.put("/api/remote/locations", json=payload)
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+    # All-or-nothing: the previous list survives a refused write.
+    assert remote_gateway._read_locations() == [{"path": "/keep", "name": "K"}]
+
+
+def test_locations_put_caps_the_list(rig):
+    _backend, _store, client = rig
+    many = [{"path": f"/p/{i}", "name": None} for i in range(remote_gateway.MAX_SAVED_LOCATIONS + 1)]
+    assert client.put("/api/remote/locations", json={"locations": many}).status_code == 400
+    ok = many[: remote_gateway.MAX_SAVED_LOCATIONS]
+    resp = client.put("/api/remote/locations", json={"locations": ok})
+    assert resp.status_code == 200
+    assert resp.json() == {"count": remote_gateway.MAX_SAVED_LOCATIONS}
+
+
+def test_missing_locations_file_reads_as_empty(rig):
+    _backend, _store, client = rig
+    assert remote_gateway._read_locations() == []
+    body = client.get(
+        "/remote/v1/workdirs", headers=auth(pair(client, _store)["token"])
+    ).json()
+    assert all(w["source"] != "saved" for w in body["workdirs"])
+
+
+# -- workdirs ----------------------------------------------------------------
+
+
+def _session(terminal_id, workdir, created_at):
+    session = dict(FULL_SESSION)
+    session.update({"id": terminal_id, "working_dir": workdir, "created_at": created_at})
+    return session
+
+
+def test_workdirs_orders_saved_then_sessions_then_history(rig):
+    backend, store, client = rig
+    remote_gateway._write_locations(
+        [{"path": "C:/saved/one", "name": "One"}, {"path": "C:/hist/one", "name": "Also saved"}]
+    )
+    backend.sessions = [
+        _session("t1", "C:/older", "2026-09-01T00:00:00+00:00"),
+        _session("t2", "C:/newer", "2026-09-05T00:00:00+00:00"),
+    ]
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert [(w["path"], w["source"]) for w in body["workdirs"]] == [
+        ("C:/saved/one", "saved"),
+        ("C:/hist/one", "saved"),
+        ("C:/newer", "session"),
+        ("C:/older", "session"),
+        ("C:/hist/two", "history"),
+    ]
+    # First occurrence wins: the folder that is BOTH saved and in history keeps
+    # the stronger label and its saved name.
+    assert body["workdirs"][1]["name"] == "Also saved"
+    assert body["workdirs"][2]["name"] is None
+    assert body["workdirs"][2]["last_used"] == "2026-09-05T00:00:00+00:00"
+    assert body["workdirs"][4]["last_used"] == "2026-08-01T00:00:00+00:00"
+    assert backend.history_limit == 30
+
+
+def test_workdirs_row_shape_and_roots(rig):
+    backend, store, client = rig
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert set(body) == {"workdirs", "roots"}
+    assert set(body["workdirs"][0]) == {"path", "name", "source", "last_used"}
+    # The roots are exactly what browse("") answered -- one source, not a second
+    # platform guess written here.
+    assert body["roots"] == ["C:\\", "D:\\"]
+    assert "" in backend.browsed
+
+
+def test_workdirs_falls_back_to_posix_root_when_browse_cannot_answer(rig):
+    backend, store, client = rig
+    backend.roots_reply = {"dirs": [], "parent": "", "entries": []}
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert body["roots"] == ["/"]
+
+
+def test_workdirs_ignores_trailing_separators_when_deduping(rig):
+    backend, store, client = rig
+    remote_gateway._write_locations([{"path": "C:/dup/one", "name": "One"}])
+    backend.sessions = [_session("t1", "C:/dup/one/", "2026-09-01T00:00:00+00:00")]
+    backend.history = [{"path": "C:/dup/one\\", "last_used": "2026-08-01T00:00:00+00:00"}]
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert [(w["path"], w["source"]) for w in body["workdirs"]] == [("C:/dup/one", "saved")]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="paths are case-insensitive on Windows only")
+def test_workdirs_dedupe_folds_case_on_windows(rig):
+    backend, store, client = rig
+    remote_gateway._write_locations([{"path": "C:/Case/One", "name": "One"}])
+    backend.sessions = []
+    backend.history = [{"path": "c:/case/one", "last_used": "2026-08-01T00:00:00+00:00"}]
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert [w["path"] for w in body["workdirs"]] == ["C:/Case/One"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="two casings ARE two directories off Windows")
+def test_workdirs_keeps_two_casings_apart_off_windows(rig):
+    backend, store, client = rig
+    remote_gateway._write_locations([{"path": "/case/One", "name": "One"}])
+    backend.sessions = []
+    backend.history = [{"path": "/case/one", "last_used": "2026-08-01T00:00:00+00:00"}]
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert [w["path"] for w in body["workdirs"]] == ["/case/One", "/case/one"]
+
+
+def test_workdirs_survives_an_unreadable_usage_history(rig):
+    backend, store, client = rig
+    backend.sessions = [_session("t1", "C:/live", "2026-09-01T00:00:00+00:00")]
+
+    def boom(_limit):
+        raise RuntimeError("usage db is locked")
+
+    backend_obj = backend.as_remote_backend()
+    remote_gateway.configure(
+        remote_gateway.RemoteBackend(
+            **{**backend_obj.__dict__, "recent_workdirs": boom}
+        ),
+        store,
+    )
+    body = client.get("/remote/v1/workdirs", headers=auth(pair(client, store)["token"])).json()
+    assert [w["path"] for w in body["workdirs"]] == ["C:/live"]
+
+
+# -- browse ------------------------------------------------------------------
+
+
+def test_browse_returns_only_the_five_entry_fields(rig):
+    backend, store, client = rig
+    body = client.get(
+        "/remote/v1/browse",
+        params={"path": "C:/tmp"},
+        headers=auth(pair(client, store)["token"]),
+    ).json()
+    assert body["path"] == "C:/tmp"
+    assert body["parent"] == "C:/tmp"
+    assert list(body["entries"][0]) == list(remote_gateway.BROWSE_ENTRY_FIELDS)
+    assert body["entries"][0] == {
+        "path": "C:/tmp/a",
+        "name": "a",
+        "git": True,
+        "branch": "main",
+        "session_count": 2,
+    }
+    assert backend.browsed == ["C:/tmp"]
+
+
+def test_browse_with_no_path_asks_for_the_roots(rig):
+    backend, store, client = rig
+    body = client.get("/remote/v1/browse", headers=auth(pair(client, store)["token"])).json()
+    assert backend.browsed == [""]
+    assert body["path"] == ""
+    assert body["parent"] is None
+    assert body["entries"] == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["relative/dir", "dir", "C:", "../etc", "C:/tmp/../secret", "C:\\tmp\\..\\secret", "..\\x"],
+)
+def test_browse_refuses_a_non_absolute_or_traversing_path(rig, path):
+    backend, store, client = rig
+    resp = client.get(
+        "/remote/v1/browse", params={"path": path}, headers=auth(pair(client, store)["token"])
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+    # Refused BEFORE the walk: the backend was never asked.
+    assert backend.browsed == []
+
+
+@pytest.mark.parametrize("path", ["C:\\Code", "C:/Code", "/srv/work", "\\\\nas\\share"])
+def test_browse_accepts_every_absolute_spelling(rig, path):
+    backend, store, client = rig
+    resp = client.get(
+        "/remote/v1/browse", params={"path": path}, headers=auth(pair(client, store)["token"])
+    )
+    assert resp.status_code == 200
+    assert backend.browsed == [path]
+
+
+def test_browse_reports_an_unwalkable_folder_as_200_with_an_error(rig):
+    backend, store, client = rig
+    backend.browse_error = PermissionError("access is denied")
+    resp = client.get(
+        "/remote/v1/browse",
+        params={"path": "C:/locked"},
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["entries"] == []
+    assert body["path"] == "C:/locked"
+    assert "access is denied" in body["error"]
+
+
+def test_browse_reads_a_jsonresponse_backend(rig):
+    """server.browse_directories is a route and hands back a JSONResponse."""
+    backend, store, client = rig
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    async def as_response(path):
+        backend.browsed.append(path)
+        return _JSONResponse(backend.browse_reply)
+
+    wired = backend.as_remote_backend()
+    remote_gateway.configure(
+        remote_gateway.RemoteBackend(**{**wired.__dict__, "browse": as_response}), store
+    )
+    body = client.get(
+        "/remote/v1/browse",
+        params={"path": "C:/tmp"},
+        headers=auth(pair(client, store)["token"]),
+    ).json()
+    assert body["entries"][0]["path"] == "C:/tmp/a"
+
+
+# -- catalog -----------------------------------------------------------------
+
+
+def test_catalog_shape(rig):
+    _backend, store, client = rig
+    body = client.get("/remote/v1/catalog", headers=auth(pair(client, store)["token"])).json()
+    assert set(body) == {"harnesses", "permission_modes", "efforts"}
+    claude, codex = body["harnesses"]
+    assert claude["id"] == "claude-code" and claude["label"] == "Claude Code"
+    assert claude["models"] == [
+        {"id": "claude-opus-5", "label": "Claude Opus 5"},
+        {"id": "claude-sonnet-5", "label": "Claude Sonnet 5"},
+    ]
+    assert claude["default_model"] == "claude-opus-5"
+    assert codex["id"] == "codex" and codex["label"] == "Codex"
+    assert codex["models"] == [{"id": i, "label": lbl} for i, lbl in remote_gateway.CODEX_MODELS]
+    assert codex["default_model"] == "gpt-6-astra"
+    assert body["permission_modes"] == [
+        {"id": "default", "label": "Ask before edits"},
+        {"id": "acceptEdits", "label": "Accept edits"},
+        {"id": "plan", "label": "Plan only"},
+        {"id": "bypassPermissions", "label": "Bypass permissions"},
+    ]
+    assert body["efforts"] == ["low", "medium", "high", "xhigh"]
+
+
+def test_catalog_prefers_the_configured_session_model(rig):
+    backend, store, client = rig
+    backend.settings_dict["sessions"] = {"model": "claude-sonnet-5"}
+    body = client.get("/remote/v1/catalog", headers=auth(pair(client, store)["token"])).json()
+    assert body["harnesses"][0]["default_model"] == "claude-sonnet-5"
+
+
+def test_catalog_falls_back_to_the_id_when_a_model_has_no_display_name(rig):
+    backend, store, client = rig
+    backend.models_reply = {"models": [{"id": "claude-fable-5"}, {"nope": 1}, "junk"]}
+    body = client.get("/remote/v1/catalog", headers=auth(pair(client, store)["token"])).json()
+    assert body["harnesses"][0]["models"] == [{"id": "claude-fable-5", "label": "claude-fable-5"}]
+
+
+def test_catalog_says_nothing_rather_than_guessing_when_the_catalog_is_empty(rig):
+    backend, store, client = rig
+    backend.models_reply = {"models": [], "source": "fallback"}
+    body = client.get("/remote/v1/catalog", headers=auth(pair(client, store)["token"])).json()
+    assert body["harnesses"][0]["models"] == []
+    assert body["harnesses"][0]["default_model"] is None
+    # Codex is a static list and is unaffected by an Anthropic outage.
+    assert body["harnesses"][1]["default_model"] == "gpt-6-astra"
+
+
+# -- create with the new options --------------------------------------------
+
+
+def test_create_maps_the_three_option_fields(rig):
+    backend, store, client = rig
+    resp = client.post(
+        "/remote/v1/sessions",
+        json={
+            "name": "phone",
+            "workdir": "C:/x",
+            "harness": "claude-code",
+            "model": "claude-opus-5",
+            "permission_mode": "acceptEdits",
+            "effort": "xhigh",
+            "bypass": True,
+        },
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert resp.status_code == 201
+    assert backend.created == [
+        {
+            "name": "phone",
+            "workdir": "C:/x",
+            "harness": "claude-code",
+            "model": "claude-opus-5",
+            "permissionMode": "acceptEdits",
+            "effort": "xhigh",
+            "bypassPermissions": True,
+        }
+    ]
+
+
+def test_create_omits_options_the_caller_did_not_send(rig):
+    backend, store, client = rig
+    client.post(
+        "/remote/v1/sessions",
+        json={"name": "plain", "permission_mode": None, "effort": None, "bypass": None},
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert set(backend.created[0]) == {"name", "workdir", "harness", "model"}
+
+
+def test_create_accepts_bypass_false_as_a_real_value(rig):
+    backend, store, client = rig
+    client.post(
+        "/remote/v1/sessions",
+        json={"bypass": False},
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert backend.created[0]["bypassPermissions"] is False
+
+
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        ({"permission_mode": "nope"}, "unknown permission_mode"),
+        ({"permission_mode": ["plan"]}, "unknown permission_mode"),
+        ({"effort": "extreme"}, "unknown effort"),
+        ({"effort": 3}, "unknown effort"),
+        ({"bypass": "yes"}, "bypass must be a boolean"),
+        ({"bypass": 1}, "bypass must be a boolean"),
+    ],
+)
+def test_create_refuses_unknown_option_values(rig, body, message):
+    backend, store, client = rig
+    resp = client.post(
+        "/remote/v1/sessions", json=body, headers=auth(pair(client, store)["token"])
+    )
+    assert resp.status_code == 400
+    assert resp.json() == {"error": message}
+    assert backend.created == []
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "plan", "bypassPermissions"])
+def test_create_accepts_every_listed_permission_mode(rig, mode):
+    backend, store, client = rig
+    resp = client.post(
+        "/remote/v1/sessions",
+        json={"permission_mode": mode},
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert resp.status_code == 201
+    assert backend.created[0]["permissionMode"] == mode
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
+def test_create_accepts_every_listed_effort(rig, effort):
+    backend, store, client = rig
+    resp = client.post(
+        "/remote/v1/sessions",
+        json={"effort": effort},
+        headers=auth(pair(client, store)["token"]),
+    )
+    assert resp.status_code == 201
+    assert backend.created[0]["effort"] == effort
+
+
+# -- close -------------------------------------------------------------------
+
+
+def test_delete_session_closes_and_reports(rig):
+    backend, store, client = rig
+    resp = client.delete("/remote/v1/sessions/t1", headers=auth(pair(client, store)["token"]))
+    assert resp.status_code == 200
+    assert resp.json() == {"closed": True}
+    assert backend.deleted == ["t1"]
+
+
+def test_delete_unknown_session_is_404_and_kills_nothing(rig):
+    backend, store, client = rig
+    resp = client.delete("/remote/v1/sessions/nope", headers=auth(pair(client, store)["token"]))
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "unknown session"}
+    assert backend.deleted == []
+
+
+def test_delete_reports_a_failed_kill_rather_than_claiming_success(rig):
+    backend, store, client = rig
+    backend.delete_result = False
+    resp = client.delete("/remote/v1/sessions/t1", headers=auth(pair(client, store)["token"]))
+    assert resp.status_code == 200
+    assert resp.json() == {"closed": False}
+
+
+# -- an unwired backend answers 503, never 500 -------------------------------
+
+
+def test_stage1c_routes_are_503_when_the_backend_does_not_supply_them(rig):
+    backend, store, client = rig
+    wired = backend.as_remote_backend()
+    remote_gateway.configure(
+        remote_gateway.RemoteBackend(
+            **{**wired.__dict__, "browse": None, "delete_session": None}
+        ),
+        store,
+    )
+    headers = auth(pair(client, store)["token"])
+    assert client.get("/remote/v1/browse", headers=headers).status_code == 503
+    assert client.delete("/remote/v1/sessions/t1", headers=headers).status_code == 503
+    # workdirs still answers -- roots degrade to POSIX root, sources still list.
+    body = client.get("/remote/v1/workdirs", headers=headers).json()
+    assert body["roots"] == ["/"]
 
 
 @pytest.mark.asyncio
