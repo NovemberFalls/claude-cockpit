@@ -23,6 +23,7 @@ import re
 import shutil
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -347,8 +348,28 @@ def _valid_hostname(hostname: str) -> bool:
     return bool(_HOSTNAME_RE.match(hostname))
 
 
+def _hostname_from(raw: str) -> str:
+    """Reduce what the Public URL field holds to a bare hostname.
+
+    The field is a URL ("https://studio.example.com") because that is what the
+    phone needs, and the desktop tools take the same value. Measured
+    2026-09-08: passing the URL straight to the validator produced "invalid
+    hostname" on a correctly configured desktop. Scheme, port and path are
+    dropped; what remains is validated exactly as before.
+    """
+    raw = (raw or "").strip()
+    if "://" in raw:
+        raw = urllib.parse.urlsplit(raw).hostname or ""
+    else:
+        raw = raw.split("/", 1)[0].rsplit("@", 1)[-1]
+        if raw.count(":") == 1:
+            raw = raw.split(":", 1)[0]
+    return raw.lower().rstrip(".")
+
+
 @admin_router.get("/cloudflared-config")
 async def cloudflared_config(hostname: str = ""):
+    hostname = _hostname_from(hostname)
     if not _valid_hostname(hostname):
         return _error(400, "invalid hostname")
     port = os.getenv("PORT", "8420")
@@ -491,7 +512,7 @@ def probe_public_url(payload: dict = Body(default={})):
     urllib call never stalls the event loop the way an unguarded call in an
     ``async def`` route would.
     """
-    hostname = str((payload or {}).get("hostname") or "")
+    hostname = _hostname_from(str((payload or {}).get("hostname") or ""))
     if not _valid_hostname(hostname):
         return _error(400, "invalid hostname")
     status, headers, body = _fetch_probe(hostname)

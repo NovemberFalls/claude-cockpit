@@ -38,3 +38,17 @@ def test_probe_sends_its_own_user_agent(monkeypatch):
     assert seen["url"] == "https://studio.example.com/remote/v1/hello"
     assert seen["ua"] == remote_gateway._PROBE_USER_AGENT
     assert not seen["ua"].lower().startswith("python-urllib")
+
+
+def test_public_url_is_reduced_to_a_hostname_for_the_tools():
+    """The Public URL field holds a URL; the tools must accept it as-is."""
+    f = remote_gateway._hostname_from
+    assert f("https://studio.boord-its.com") == "studio.boord-its.com"
+    assert f("https://Studio.Example.com/") == "studio.example.com"
+    assert f("http://studio.example.com:8443/remote/v1/") == "studio.example.com"
+    assert f("studio.example.com") == "studio.example.com"
+    assert f("studio.example.com:8420") == "studio.example.com"
+    assert f("  studio.example.com. ") == "studio.example.com"
+    assert f("") == ""
+    assert remote_gateway._valid_hostname(f("https://studio.boord-its.com"))
+    assert not remote_gateway._valid_hostname(f("https://"))
