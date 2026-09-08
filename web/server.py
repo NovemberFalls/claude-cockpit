@@ -1613,6 +1613,15 @@ async def websocket_terminal(websocket: WebSocket, terminal_id: str):
                                         "Failed to send resize_failed notice for terminal %s",
                                         terminal_id, exc_info=True,
                                     )
+                            else:
+                                # Wake any Studio Remote streams (one Event
+                                # per phone in session.remote_listeners, same
+                                # pattern _session_reader uses) so a phone
+                                # picks up the new PTY dims without polling.
+                                # The desktop owns the PTY size; this never
+                                # resizes anything, only notifies.
+                                for listener in list(session.remote_listeners):
+                                    listener.set()
                             continue
                         if ctrl.get("type") == "pong":
                             continue
@@ -6807,6 +6816,11 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
     async def stream_to_ws():
         nonlocal cursor
         initial = True
+        # The dims this socket last told the phone about. Set from
+        # session.cols/rows every time a replay_start goes out (it already
+        # carries the current dims), and again whenever a resize frame is
+        # sent -- so a wake with unchanged dims never sends anything extra.
+        last_dims = None
         while True:
             # Cleared BEFORE the snapshot: an append racing the sends below
             # re-sets the event and is picked up next iteration. Clearing after
@@ -6814,8 +6828,10 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
             listener.clear()
             snapshot = session.history.snapshot(cursor)
             if initial or snapshot["reset"]:
+                last_dims = (session.cols, session.rows)
                 await websocket.send_json({"type": "replay_start", "reset": snapshot["reset"],
-                                           "truncated": snapshot["truncated"]})
+                                           "truncated": snapshot["truncated"],
+                                           "cols": last_dims[0], "rows": last_dims[1]})
             for seq, data in coalesce_chunks(snapshot["chunks"], 64 * 1024):
                 await websocket.send_json({"type": "output", "seq": seq, "data": data})
             cursor = snapshot["sequence"]
@@ -6825,6 +6841,17 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
             if not session.alive:
                 await websocket.send_json({"type": "ended"})
                 return
+            # Every wake -- a real append or the liveness timeout below --
+            # re-checks the PTY's own dims (the desktop is the only writer of
+            # session.cols/rows; this loop never resizes anything). A resize
+            # frame therefore only ever follows a replay_end, never rides
+            # inside the replay_start/output/replay_end burst above, and goes
+            # out at most once per actual change.
+            current_dims = (session.cols, session.rows)
+            if current_dims != last_dims:
+                last_dims = current_dims
+                await websocket.send_json({"type": "resize", "cols": current_dims[0],
+                                           "rows": current_dims[1]})
             # A liveness re-check for the branch above ONLY; new output arrives
             # via the event, never by waiting this out.
             try:

@@ -152,7 +152,8 @@ def test_stream_replays_coalesced_then_delivers_a_live_append(remote, monkeypatc
             "/remote/v1/sessions/rmt-1/stream", headers=_headers(remote["token"])
         ) as socket:
             assert socket.receive_json() == {
-                "type": "replay_start", "reset": True, "truncated": False}
+                "type": "replay_start", "reset": True, "truncated": False,
+                "cols": session.cols, "rows": session.rows}
             frames = _drain_to_replay_end(socket)
             assert len(frames) < 5, f"500 retained chunks replayed as {len(frames)} frames"
             assert frames[-1]["seq"] == 500
@@ -233,6 +234,117 @@ def test_a_dead_session_gets_an_ended_frame(remote):
             _drain_to_replay_end(socket)
             assert socket.receive_json() == {"type": "ended"}
     session.alive = True
+
+
+# ── PTY geometry: replay_start dims + the resize frame ────────────────────
+#
+# The desktop always owns the PTY size; the phone never resizes it. These
+# mutate session.cols/rows and set the listener Events from INSIDE a
+# backend.submit callback invoked via a POST on the same TestClient portal —
+# the only thread-safe place to touch the events the stream task awaits (see
+# the "echo" helpers above and their own comment on this).
+
+
+def test_replay_start_carries_the_sessions_dimensions(remote):
+    session = remote["session"]
+    session.cols, session.rows = 137, 41
+    _fresh_events(session)
+    with TestClient(server.app) as client:
+        with client.websocket_connect(
+            "/remote/v1/sessions/rmt-1/stream", headers=_headers(remote["token"])
+        ) as socket:
+            assert socket.receive_json() == {
+                "type": "replay_start", "reset": True, "truncated": False,
+                "cols": 137, "rows": 41}
+
+
+def test_a_dim_change_yields_exactly_one_resize_frame_after_replay_end(remote, monkeypatch):
+    session = remote["session"]
+    _fresh_events(session)
+
+    async def resize(_terminal_id, _text):
+        # The same pattern the desktop resize branch in websocket_terminal
+        # uses: dims move first, then every remote listener is woken.
+        session.cols, session.rows = 200, 60
+        for listener in list(session.remote_listeners):
+            listener.set()
+        return True
+
+    async def echo(_terminal_id, text):
+        session.history.append(text)
+        session.history_changed.set()
+        for listener in list(session.remote_listeners):
+            listener.set()
+        return True
+
+    monkeypatch.setattr(remote_gateway._backend, "submit", resize)
+    with TestClient(server.app) as client:
+        with client.websocket_connect(
+            "/remote/v1/sessions/rmt-1/stream", headers=_headers(remote["token"])
+        ) as socket:
+            _drain_to_replay_end(socket)
+
+            client.post(
+                "/remote/v1/sessions/rmt-1/input",
+                json={"text": "resize-me"},
+                headers=_headers(remote["token"]),
+            )
+            assert socket.receive_json() == {"type": "resize", "cols": 200, "rows": 60}
+
+            # "Exactly one": a later wake with the SAME dims must not repeat
+            # the resize frame. Prove it by pushing real output through a
+            # dims-unchanged callback and checking the very next frame is the
+            # output, not a second resize.
+            monkeypatch.setattr(remote_gateway._backend, "submit", echo)
+            client.post(
+                "/remote/v1/sessions/rmt-1/input",
+                json={"text": "after"},
+                headers=_headers(remote["token"]),
+            )
+            assert socket.receive_json() == {"type": "output", "seq": 1, "data": "after"}
+
+
+def test_no_resize_frame_across_ten_wakes_with_unchanged_dims(remote, monkeypatch):
+    session = remote["session"]
+    _fresh_events(session)
+
+    async def wake_only(_terminal_id, _text):
+        # A wake with no history append and no dims change -- the shape of
+        # the 0.5 s liveness tick, triggered here without a real 5 s wait.
+        for listener in list(session.remote_listeners):
+            listener.set()
+        return True
+
+    async def echo(_terminal_id, text):
+        session.history.append(text)
+        session.history_changed.set()
+        for listener in list(session.remote_listeners):
+            listener.set()
+        return True
+
+    monkeypatch.setattr(remote_gateway._backend, "submit", wake_only)
+    with TestClient(server.app) as client:
+        with client.websocket_connect(
+            "/remote/v1/sessions/rmt-1/stream", headers=_headers(remote["token"])
+        ) as socket:
+            _drain_to_replay_end(socket)
+
+            for _ in range(10):
+                client.post(
+                    "/remote/v1/sessions/rmt-1/input",
+                    json={"text": "noop"},
+                    headers=_headers(remote["token"]),
+                )
+
+            # If any of the ten wakes had wrongly emitted a resize frame, it
+            # would be sitting in the socket ahead of this real output frame.
+            monkeypatch.setattr(remote_gateway._backend, "submit", echo)
+            client.post(
+                "/remote/v1/sessions/rmt-1/input",
+                json={"text": "real"},
+                headers=_headers(remote["token"]),
+            )
+            assert socket.receive_json() == {"type": "output", "seq": 1, "data": "real"}
 
 
 # ── Handshake refusals, all pre-accept ───────────────────────────────────
