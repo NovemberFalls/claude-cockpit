@@ -408,13 +408,27 @@ def test_cloudflared_config_shape(rig, monkeypatch):
 
 @pytest.mark.parametrize(
     "hostname",
-    ["", "a", "ab", "UPPER.example.com", "https://studio.example.com", "bad host.com", "-lead.com"],
+    ["", "a", "ab", "bad host.com", "-lead.com", "https://", "https://bad host.com/"],
 )
 def test_cloudflared_config_rejects_bad_hostnames(rig, hostname):
     _backend, _store, client = rig
     resp = client.get("/api/remote/cloudflared-config", params={"hostname": hostname})
     assert resp.status_code == 400
     assert "error" in resp.json()
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["UPPER.example.com", "https://studio.example.com", "https://Studio.Example.com/remote/v1/", "studio.example.com:8443"],
+)
+def test_cloudflared_config_accepts_the_public_url_as_entered(rig, given):
+    # The Public URL field holds a URL; the tools reduce it to the hostname
+    # rather than telling a correctly configured desktop "invalid hostname".
+    _backend, _store, client = rig
+    resp = client.get("/api/remote/cloudflared-config", params={"hostname": given})
+    assert resp.status_code == 200
+    assert resp.json()["hostname"] in {"upper.example.com", "studio.example.com"}
+    assert "hostname: studio.example.com" in resp.json()["config_yml"] or "hostname: upper.example.com" in resp.json()["config_yml"]
 
 
 def test_cloudflared_config_accepts_long_and_short_valid_hostnames(rig):
