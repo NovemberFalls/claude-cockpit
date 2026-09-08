@@ -16,6 +16,7 @@ callables, so the gateway can be exercised on its own against fakes.
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import json
 import logging
@@ -36,6 +37,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse
 
 import app_paths
+import jsonl_watcher
 from remote_devices import Device, DeviceStore, PairingError
 
 logger = logging.getLogger("cockpit.remote")
@@ -45,6 +47,8 @@ PROTOCOL_VERSION = 1
 # The only session fields a phone is given. Nothing else -- no jsonl_path, no
 # cost, no tokens, no claude_session_id. A remote surface should not carry the
 # desktop's whole record just because the desktop's own list route does.
+# `updated_at` and `preview` are DERIVED (see `_session_view`) rather than
+# copied straight off the desktop's record -- there is no such field there.
 SESSION_FIELDS = (
     "id",
     "name",
@@ -54,6 +58,8 @@ SESSION_FIELDS = (
     "alive",
     "activity_state",
     "created_at",
+    "updated_at",
+    "preview",
 )
 
 # The ONLY per-row fields a phone gets from a folder listing. `entry_count`,
@@ -294,8 +300,49 @@ def _pairing_url() -> str:
     return f"http://{_lan_ipv4()}:{port}"
 
 
+def _session_updated_at(entry: dict) -> str | None:
+    """The transcript file's mtime for a claude-code session, else created_at.
+
+    `entry["jsonl_path"]` is the SAME discovery `pty_manager._get_jsonl_path`
+    already did for `list_terminals()` -- it is only stripped from the phone's
+    view by `SESSION_FIELDS`, not absent from the record. Codex sessions (and
+    any claude-code session with no transcript yet) carry no jsonl_path, so
+    `created_at` is the honest answer there.
+    """
+    path = entry.get("jsonl_path")
+    if path:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            logger.debug("Could not stat jsonl for updated_at: %s", path, exc_info=True)
+        else:
+            return datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
+    return entry.get("created_at")
+
+
+def _session_preview(entry: dict) -> dict | None:
+    """The session's preview bubble, or None (no transcript / nothing to show).
+
+    Codex sessions have no `jsonl_path` in the record (Claude JSONL discovery
+    is refused for them, see `pty_manager._get_jsonl_path`) and there is no
+    tail reader for the Codex rollout format yet -- null, per spec, rather
+    than guessing at a different file's shape.
+    """
+    path = entry.get("jsonl_path")
+    if not path:
+        return None
+    try:
+        return jsonl_watcher.latest_preview(path)
+    except Exception:  # noqa: BLE001 - a bad transcript must not break the list
+        logger.debug("latest_preview failed for %s", path, exc_info=True)
+        return None
+
+
 def _session_view(entry: dict) -> dict:
-    return {key: entry.get(key) for key in SESSION_FIELDS}
+    enriched = dict(entry)
+    enriched["updated_at"] = _session_updated_at(entry)
+    enriched["preview"] = _session_preview(entry)
+    return {key: enriched.get(key) for key in SESSION_FIELDS}
 
 
 def _error(status: int, message: str) -> JSONResponse:

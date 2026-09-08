@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -330,3 +332,191 @@ def latest_custom_title(path: str, tail_bytes: int = 65536) -> str | None:
         if value:
             title = value[:MAX_CUSTOM_TITLE_LEN]
     return title
+
+
+# Max length of the collapsed preview text handed to the phone's sessions list.
+MAX_PREVIEW_TEXT_LEN = 160
+
+# Per-path cache of the last computed preview, keyed internally on
+# (mtime_ns, size) so the phone's periodic sessions-list poll costs no I/O
+# when nothing changed. Small and unbounded-but-capped: one entry per live
+# session, evicted oldest-first past _PREVIEW_CACHE_MAX.
+_PREVIEW_CACHE: dict[str, tuple[tuple, dict | None]] = {}
+_PREVIEW_CACHE_MAX = 128
+
+# Default ceiling on how far back from EOF _compute_latest_preview will scan
+# looking for a qualifying text turn. A busy session's tail can be entirely
+# thinking/tool_use/tool_result/attachment records for many megabytes; this
+# caps the cost of walking backward through them without ever reading a
+# multi-hundred-MB transcript in full.
+DEFAULT_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+
+# Wrapper tags used for system-injected text that is not the user's own
+# words -- hook stdout/stderr, slash-command scaffolding, task
+# notifications. A user record whose visible text is entirely one of these
+# blocks (possibly nested with a trailing <system-reminder> appended) does
+# not qualify as a preview.
+_SYSTEM_INJECTED_TAGS = (
+    "task-notification",
+    "system-reminder",
+    "local-command-stdout",
+    "local-command-stderr",
+    "command-name",
+    "command-message",
+    "bash-input",
+)
+_LEADING_TAG_RE = re.compile(
+    r"^\s*<(" + "|".join(_SYSTEM_INJECTED_TAGS) + r")(?:\s[^>]*)?>.*?</\1>",
+    re.DOTALL,
+)
+_TRAILING_SYSTEM_REMINDER_RE = re.compile(
+    r"<system-reminder(?:\s[^>]*)?>.*?</system-reminder>\s*$", re.DOTALL
+)
+
+
+def _strip_system_injected(text: str) -> str | None:
+    """Strip leading/trailing system-injected wrapper blocks from user text.
+
+    Repeatedly removes a leading ``<tag ...>...</tag>`` block for any tag in
+    ``_SYSTEM_INJECTED_TAGS``, then strips a trailing ``<system-reminder>``
+    block. Returns the stripped text, or ``None`` if nothing non-whitespace
+    remains (the record does not qualify as a preview).
+    """
+    while True:
+        match = _LEADING_TAG_RE.match(text)
+        if not match:
+            break
+        text = text[match.end() :]
+    text = _TRAILING_SYSTEM_REMINDER_RE.sub("", text)
+    stripped = text.strip()
+    return stripped if stripped else None
+
+
+def latest_preview(
+    path: str,
+    tail_bytes: int = 65536,
+    max_bytes: int = DEFAULT_PREVIEW_MAX_BYTES,
+) -> dict | None:
+    """Return the last user/assistant TEXT message in a Claude Code JSONL.
+
+    Walks BACKWARD from EOF in ``tail_bytes``-sized windows -- a busy
+    session's tail can be entirely thinking/tool_use/tool_result/attachment
+    records for many megabytes, so a single tail read can legitimately find
+    nothing even though a real text turn exists just before that window.
+    Each window drops its first (probably partial) line. The scan stops at
+    the first qualifying record found (scanning newest-to-oldest within a
+    window, oldest-to-newest overall) or once ``max_bytes`` total has been
+    scanned from EOF, whichever comes first -- the whole file is still never
+    read when it exceeds that ceiling.
+
+    Records with no plain text block -- tool_result-only user turns,
+    tool_use-only assistant turns, meta/system lines -- are skipped. A user
+    record whose text is entirely a system-injected wrapper (see
+    ``_strip_system_injected``) is also skipped; the wrapper is stripped
+    from a partially-injected user record before it is returned.
+
+    Returns ``{"role": "user"|"assistant", "text": str, "timestamp": str|None}``
+    (text whitespace-collapsed, truncated to ``MAX_PREVIEW_TEXT_LEN`` with an
+    ellipsis) or ``None`` when there is nothing to show / the file cannot be
+    read. Cached per (path, mtime, size).
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        logger.debug("latest_preview: could not stat %s", path, exc_info=True)
+        return None
+
+    cache_key = (st.st_mtime_ns, st.st_size)
+    cached = _PREVIEW_CACHE.get(path)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    result = _compute_latest_preview(path, tail_bytes, max_bytes)
+    if path not in _PREVIEW_CACHE and len(_PREVIEW_CACHE) >= _PREVIEW_CACHE_MAX:
+        _PREVIEW_CACHE.pop(next(iter(_PREVIEW_CACHE)))
+    _PREVIEW_CACHE[path] = (cache_key, result)
+    return result
+
+
+def _extract_preview_text(entry_type: str, content) -> str | None:
+    """Pull the first plain-text block out of a raw JSONL `message.content`."""
+    if entry_type == "user" and isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    return text
+    return None
+
+
+def _preview_from_window(lines: list[str]) -> dict | None:
+    """Scan lines (oldest-first) for the LAST qualifying preview record."""
+    preview: dict | None = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entry_type = obj.get("type")
+        if entry_type not in ("user", "assistant"):
+            continue
+        if obj.get("isMeta"):
+            continue
+        msg = obj.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+        found_text = _extract_preview_text(entry_type, msg.get("content", ""))
+        if not found_text:
+            continue
+        if entry_type == "user":
+            found_text = _strip_system_injected(found_text)
+            if not found_text:
+                continue
+        collapsed = " ".join(found_text.split())
+        if not collapsed:
+            continue
+        if len(collapsed) > MAX_PREVIEW_TEXT_LEN:
+            collapsed = collapsed[:MAX_PREVIEW_TEXT_LEN].rstrip() + "…"
+        preview = {
+            "role": entry_type,
+            "text": collapsed,
+            "timestamp": obj.get("timestamp"),
+        }
+    return preview
+
+
+def _compute_latest_preview(
+    path: str, tail_bytes: int, max_bytes: int = DEFAULT_PREVIEW_MAX_BYTES
+) -> dict | None:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            end = size
+            scanned = 0
+            while end > 0 and scanned < max_bytes:
+                start = max(0, end - tail_bytes)
+                f.seek(start)
+                chunk = f.read(end - start)
+                scanned += end - start
+
+                text = chunk.decode("utf-8", errors="replace")
+                lines = text.split("\n")
+                if start > 0 and lines:
+                    lines = lines[1:]  # first line is probably truncated
+
+                preview = _preview_from_window(lines)
+                if preview is not None:
+                    return preview
+
+                end = start
+    except OSError:
+        logger.debug("latest_preview: could not read %s", path, exc_info=True)
+        return None
+
+    return None
