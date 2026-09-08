@@ -69,6 +69,7 @@ export const SETTINGS_GROUPS = [
       { id: "keybindings", label: "Keybindings" },
       { id: "updates", label: "Updates" },
       { id: "diagnostics", label: "Diagnostics & logs" },
+      { id: "remote", label: "Remote" },
     ],
   },
 ];

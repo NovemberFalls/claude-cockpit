@@ -120,6 +120,9 @@ describe("SettingsNav — deep-linkable ids", () => {
       "keybindings",
       "updates",
       "diagnostics",
+      // "remote" ADDED 2026-09-08: Settings ▸ Remote (Studio Remote pairing for
+      // Plexar Mobile; see docs/studio-remote-v1.md).
+      "remote",
     ]);
   });
 

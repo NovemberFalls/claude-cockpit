@@ -38,6 +38,7 @@ import ThemeSettings from "./ThemeSettings.jsx";
 import KeybindingsSettings from "./KeybindingsSettings.jsx";
 import UpdatesSettings from "./UpdatesSettings.jsx";
 import DiagnosticsSettings from "./DiagnosticsSettings.jsx";
+import RemoteSettings from "./RemoteSettings.jsx";
 
 /**
  * section id -> page component. `providers` is handled separately because it
@@ -63,6 +64,7 @@ const PAGES = {
   keybindings: KeybindingsSettings,
   updates: UpdatesSettings,
   diagnostics: DiagnosticsSettings,
+  remote: RemoteSettings,
 };
 
 /** Page title + one-line description per section id (11px description line). */
@@ -118,6 +120,10 @@ const PAGE_META = {
   diagnostics: {
     title: "Diagnostics & logs",
     description: "Log level, log location, and the bundles you attach to a bug report.",
+  },
+  remote: {
+    title: "Remote",
+    description: "Pair Plexar Mobile to this machine and manage devices that can reach it.",
   },
 };
 
