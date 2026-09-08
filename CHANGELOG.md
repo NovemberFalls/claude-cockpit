@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.9] - 2026-09-08
+
+### Added
+- Studio Remote: a paired phone can pick a folder (the desktop's saved folders, live sessions, recent history, or the drive tree), choose the harness, model, permission mode and effort from the desktop's own catalog, start a session, and close one. The desktop publishes its saved folders to the remote gateway in the background.
+
+### Fixed
+- Settings > Remote: the Cloudflare tools accept the Public URL as entered instead of answering "invalid hostname", and the public-URL probe identifies itself so Cloudflare's bot rules no longer answer it with 403.
+
 ## [2.1.8] - 2026-09-08
 
 ### Added
