@@ -35,7 +35,25 @@ function jsonResponse(body, ok = true) {
   return Promise.resolve({ ok, json: () => Promise.resolve(body) });
 }
 
-function makeFetchMock({ status = STATUS_ON, pairing, pairingOk = true, deleteOk = true, deleteBody = { revoked: true } } = {}) {
+const CF_STATUS_ON = { installed: true, path: "C:\\tools\\cloudflared.exe", version: "2026.5.0", running: true };
+const CF_CONFIG = {
+  hostname: "studio.example.com",
+  config_yml: "tunnel: <tunnel-id>\ningress:\n  - hostname: studio.example.com\n",
+  commands: ["cloudflared tunnel login", "cloudflared service install"],
+};
+
+function makeFetchMock({
+  status = STATUS_ON,
+  pairing,
+  pairingOk = true,
+  deleteOk = true,
+  deleteBody = { revoked: true },
+  cfStatus = CF_STATUS_ON,
+  cfConfig = CF_CONFIG,
+  cfConfigOk = true,
+  probeResult = { hostname: "studio.example.com", classification: "guarded", status: 401 },
+  probeOk = true,
+} = {}) {
   return vi.fn((url, opts = {}) => {
     const method = opts.method || "GET";
     if (url === "/api/remote/status" && method === "GET") {
@@ -54,6 +72,15 @@ function makeFetchMock({ status = STATUS_ON, pairing, pairingOk = true, deleteOk
     }
     if (url.startsWith("/api/remote/devices/") && method === "DELETE") {
       return jsonResponse(deleteOk ? deleteBody : { error: "revoke failed" }, deleteOk);
+    }
+    if (url === "/api/remote/cloudflared" && method === "GET") {
+      return jsonResponse(cfStatus);
+    }
+    if (url.startsWith("/api/remote/cloudflared-config") && method === "GET") {
+      return jsonResponse(cfConfigOk ? cfConfig : { error: "invalid hostname" }, cfConfigOk);
+    }
+    if (url === "/api/remote/probe" && method === "POST") {
+      return jsonResponse(probeOk ? probeResult : { error: "invalid hostname" }, probeOk);
     }
     return jsonResponse({});
   });
@@ -77,6 +104,10 @@ function makeSettingsProps(overrides = {}) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: vi.fn(() => Promise.resolve()) },
+    configurable: true,
+  });
 });
 
 afterEach(() => {
@@ -150,5 +181,85 @@ describe("RemoteSettings — revoke", () => {
 
     await waitFor(() => expect(screen.getByTestId("revoke-error")).toHaveTextContent("revoke failed"));
     expect(screen.getByTestId("device-row-dv_abc123")).toBeInTheDocument();
+  });
+});
+
+describe("RemoteSettings — Cloudflare deployment section", () => {
+  it("renders the section and cloudflared status line", async () => {
+    globalThis.fetch = makeFetchMock();
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await waitFor(() => expect(screen.getByTestId("card-cloudflare-deployment")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("cloudflared-status-line")).toHaveTextContent("installed (2026.5.0)")
+    );
+    expect(screen.getByTestId("cloudflared-status-line")).toHaveTextContent("running");
+  });
+
+  it("Generate config shows the yml and the command list with copy buttons", async () => {
+    globalThis.fetch = makeFetchMock();
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await waitFor(() => expect(screen.getByTestId("generate-config")).not.toBeDisabled());
+
+    fireEvent.click(screen.getByTestId("generate-config"));
+
+    await waitFor(() => expect(screen.getByTestId("cloudflared-config-result")).toBeInTheDocument());
+    expect(screen.getByTestId("cloudflared-config-yml")).toHaveTextContent("tunnel: <tunnel-id>");
+    expect(screen.getByTestId("cloudflared-commands").children.length).toBe(2);
+
+    fireEvent.click(screen.getByTestId("copy-config-yml"));
+    await waitFor(() => expect(screen.getByTestId("copy-config-yml-copied")).toBeInTheDocument());
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(CF_CONFIG.config_yml);
+  });
+
+  it("shows an inline copy error when the clipboard write fails", async () => {
+    navigator.clipboard.writeText = vi.fn(() => Promise.reject(new Error("nope")));
+    globalThis.fetch = makeFetchMock();
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await waitFor(() => expect(screen.getByTestId("generate-config")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("generate-config"));
+    await waitFor(() => expect(screen.getByTestId("cloudflared-config-result")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("copy-config-yml"));
+    await waitFor(() => expect(screen.getByTestId("copy-config-yml-error")).toBeInTheDocument());
+  });
+
+  it("Test public URL shows the classification and its repair hint", async () => {
+    globalThis.fetch = makeFetchMock({
+      probeResult: { hostname: "studio.example.com", classification: "unreachable", status: null },
+    });
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await waitFor(() => expect(screen.getByTestId("probe-public-url")).not.toBeDisabled());
+
+    fireEvent.click(screen.getByTestId("probe-public-url"));
+
+    await waitFor(() => expect(screen.getByTestId("probe-result")).toHaveTextContent("unreachable"));
+    expect(screen.getByTestId("probe-result")).toHaveTextContent(/cloudflared service is running/);
+  });
+
+  it("renders an inline error when the probe request itself fails", async () => {
+    globalThis.fetch = makeFetchMock({ probeOk: false });
+    render(<RemoteSettings {...makeSettingsProps()} />);
+    await waitFor(() => expect(screen.getByTestId("probe-public-url")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("probe-public-url"));
+    await waitFor(() => expect(screen.getByTestId("probe-error")).toHaveTextContent("invalid hostname"));
+  });
+
+  it("disables the Cloudflare tools with a reason when there is no public URL set", async () => {
+    globalThis.fetch = makeFetchMock();
+    render(
+      <RemoteSettings {...makeSettingsProps({ remote: { enabled: true, hostname: "" } })} />
+    );
+    await waitFor(() => expect(screen.getByTestId("generate-config")).toBeDisabled());
+    expect(screen.getByTestId("probe-public-url")).toBeDisabled();
+    expect(screen.getByTestId("cloudflare-tools-disabled-reason")).toBeInTheDocument();
+  });
+
+  it("toggling Cloudflare Access required writes remote.access_required via setField", async () => {
+    globalThis.fetch = makeFetchMock();
+    const props = makeSettingsProps();
+    render(<RemoteSettings {...props} />);
+    await waitFor(() => expect(screen.getByTestId("access-required-toggle")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("access-required-toggle"));
+    expect(props.setField).toHaveBeenCalledWith("remote.access_required", true);
   });
 });

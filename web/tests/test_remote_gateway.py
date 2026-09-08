@@ -363,6 +363,173 @@ def test_interrupt(rig):
 # -- registry --------------------------------------------------------------
 
 
+# -- access_required in qr_payload ------------------------------------------
+
+
+def test_qr_payload_carries_access_only_when_required(rig):
+    backend, _store, client = rig
+    resp = client.post("/api/remote/pairings")
+    assert "access" not in json.loads(resp.json()["qr_payload"])
+
+    backend.settings_dict["remote"]["access_required"] = True
+    resp = client.post("/api/remote/pairings")
+    assert json.loads(resp.json()["qr_payload"])["access"] is True
+
+
+# -- cloudflared config -------------------------------------------------------
+
+
+def test_cloudflared_config_shape(rig, monkeypatch):
+    monkeypatch.setenv("PORT", "8420")
+    _backend, _store, client = rig
+    resp = client.get("/api/remote/cloudflared-config", params={"hostname": "studio.example.com"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["hostname"] == "studio.example.com"
+    assert body["config_yml"] == (
+        "tunnel: <tunnel-id>\n"
+        "credentials-file: %USERPROFILE%\\.cloudflared\\<tunnel-id>.json\n"
+        "\n"
+        "ingress:\n"
+        "  - hostname: studio.example.com\n"
+        "    path: ^/remote/v1/\n"
+        "    service: http://127.0.0.1:8420\n"
+        "\n"
+        "  - service: http_status:404\n"
+    )
+    assert body["commands"] == [
+        "cloudflared tunnel login",
+        "cloudflared tunnel create plexar-studio",
+        "cloudflared tunnel route dns plexar-studio studio.example.com",
+        "Write the config above to %USERPROFILE%\\.cloudflared\\config.yml",
+        "cloudflared service install",
+    ]
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    ["", "a", "ab", "UPPER.example.com", "https://studio.example.com", "bad host.com", "-lead.com"],
+)
+def test_cloudflared_config_rejects_bad_hostnames(rig, hostname):
+    _backend, _store, client = rig
+    resp = client.get("/api/remote/cloudflared-config", params={"hostname": hostname})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_cloudflared_config_accepts_long_and_short_valid_hostnames(rig):
+    _backend, _store, client = rig
+    assert client.get("/api/remote/cloudflared-config", params={"hostname": "a.co"}).status_code == 200
+
+
+# -- cloudflared status --------------------------------------------------------
+
+
+def test_cloudflared_status_installed_and_running(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(remote_gateway.shutil, "which", lambda name: r"C:\tools\cloudflared.exe")
+
+    class FakeProc:
+        info = {"name": "cloudflared.exe"}
+
+    monkeypatch.setitem(
+        sys.modules, "psutil", type("M", (), {"process_iter": staticmethod(lambda attrs: [FakeProc()])})
+    )
+    resp = client.get("/api/remote/cloudflared")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "installed": True,
+        "path": r"C:\tools\cloudflared.exe",
+        "version": None,
+        "running": True,
+    }
+
+
+def test_cloudflared_status_not_installed_not_running(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(remote_gateway.shutil, "which", lambda name: None)
+    monkeypatch.setattr(remote_gateway.os.path, "isfile", lambda p: False)
+    monkeypatch.setitem(
+        sys.modules, "psutil", type("M", (), {"process_iter": staticmethod(lambda attrs: [])})
+    )
+    resp = client.get("/api/remote/cloudflared")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["installed"] is False
+    assert body["path"] is None
+    assert body["running"] is False
+
+
+# -- probe classification ------------------------------------------------------
+
+
+def test_probe_rejects_bad_hostname(rig):
+    _backend, _store, client = rig
+    resp = client.post("/api/remote/probe", json={"hostname": "not a host"})
+    assert resp.status_code == 400
+
+
+def test_probe_classifies_access_via_redirect(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(
+        remote_gateway,
+        "_fetch_probe",
+        lambda hostname: (302, {"Location": "https://plexar.cloudflareaccess.com/login"}, ""),
+    )
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    assert resp.json()["classification"] == "access"
+
+
+def test_probe_classifies_access_via_html_body(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(
+        remote_gateway,
+        "_fetch_probe",
+        lambda hostname: (200, {"Content-Type": "text/html"}, "<!doctype html><html></html>"),
+    )
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    assert resp.json()["classification"] == "access"
+
+
+def test_probe_classifies_guarded(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(
+        remote_gateway,
+        "_fetch_probe",
+        lambda hostname: (401, {"Content-Type": "application/json"}, json.dumps({"detail": "unauthorized"})),
+    )
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    assert resp.json()["classification"] == "guarded"
+
+
+def test_probe_classifies_disabled(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(
+        remote_gateway,
+        "_fetch_probe",
+        lambda hostname: (404, {"Content-Type": "application/json"}, json.dumps({"error": "remote disabled"})),
+    )
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    assert resp.json()["classification"] == "disabled"
+
+
+def test_probe_classifies_unreachable(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(remote_gateway, "_fetch_probe", lambda hostname: (None, {}, ""))
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    assert resp.json()["classification"] == "unreachable"
+
+
+def test_probe_classifies_unexpected(rig, monkeypatch):
+    _backend, _store, client = rig
+    monkeypatch.setattr(remote_gateway, "_fetch_probe", lambda hostname: (500, {}, "server error"))
+    resp = client.post("/api/remote/probe", json={"hostname": "studio.example.com"})
+    body = resp.json()
+    assert body["classification"] == "unexpected"
+    assert body["status"] == 500
+
+
 @pytest.mark.asyncio
 async def test_registry_closes_a_devices_sockets():
     class FakeSocket:

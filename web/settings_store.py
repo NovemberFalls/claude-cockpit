@@ -305,7 +305,11 @@ DEFAULT_SETTINGS = {
     # is the PUBLIC base URL a phone should dial, e.g.
     # "https://studio.example.com" with no trailing slash; empty means "not
     # configured" and the pairing payload falls back to http://<lan-ipv4>:<port>.
-    "remote": {"enabled": False, "hostname": ""},
+    # `access_required` is purely informational to the pairing payload -- it
+    # tells a phone the operator has also put Cloudflare Access in front of
+    # the tunnel, so `qr_payload` carries `"access": true` when set. Studio
+    # itself does not enforce Access; that is Cloudflare's job upstream of us.
+    "remote": {"enabled": False, "hostname": "", "access_required": False},
     # Voice mode. OFF by default and deliberately so: the ML dependencies are
     # NOT bundled (the sidecar is 48 MB; torch would add ~2 GB), so on a fresh
     # install voice is simply not present. A default of True would advertise a

@@ -16,8 +16,16 @@
  *     DELETE /api/remote/devices/{id} and only removes the row on success.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
+import { Cloud, Copy, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
 import QRCode from "qrcode";
+
+const PROBE_HINTS = {
+  access: "Cloudflare Access answered — the tunnel is up and gated by Access.",
+  guarded: "Studio answered through the tunnel and refused the request — the tunnel is up.",
+  disabled: "The tunnel reached this machine, but remote access is off. Enable it above and save.",
+  unreachable: "No response — check the cloudflared service is running and DNS has propagated.",
+  unexpected: "Got a response that didn't match any known shape. Check the hostname and try again.",
+};
 
 const ACCENT_FG = "#0f1216";
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
@@ -129,6 +137,47 @@ function ActionButton({ label, onClick, disabled, title, accent, testId, icon: I
       {Icon && <Icon size={12} aria-hidden="true" />}
       {label}
     </button>
+  );
+}
+
+/** Copy-to-clipboard button with an inline "Copied" confirmation / error — no native dialogs. */
+function CopyButton({ text, testId, label = "Copy" }) {
+  const [state, setState] = useState("idle"); // idle | copied | error
+  const timer = useRef(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    []
+  );
+
+  const onClick = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text ?? "");
+      setState("copied");
+    } catch {
+      setState("error");
+    } finally {
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setState("idle"), 2000);
+    }
+  }, [text]);
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <ActionButton label={label} icon={Copy} testId={testId} onClick={onClick} />
+      {state === "copied" && (
+        <span data-testid={`${testId}-copied`} style={{ fontSize: 10, color: "var(--cc-idle)" }}>
+          Copied
+        </span>
+      )}
+      {state === "error" && (
+        <span data-testid={`${testId}-error`} role="alert" style={{ fontSize: 10, color: "var(--cc-error)" }}>
+          Could not copy
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -256,6 +305,18 @@ function DevicesTable({ devices, onRevokeRequest }) {
 export default function RemoteSettings({ get, setField }) {
   const enabledDraft = Boolean(get("remote.enabled", false));
   const hostnameDraft = get("remote.hostname", "") || "";
+  const accessRequiredDraft = Boolean(get("remote.access_required", false));
+
+  const [cfStatus, setCfStatus] = useState(null); // {installed, path, version, running}
+  const [cfStatusError, setCfStatusError] = useState(null);
+
+  const [cfConfig, setCfConfig] = useState(null); // {hostname, config_yml, commands}
+  const [cfConfigError, setCfConfigError] = useState(null);
+  const [cfConfigBusy, setCfConfigBusy] = useState(false);
+
+  const [probeResult, setProbeResult] = useState(null); // {hostname, classification, status}
+  const [probeError, setProbeError] = useState(null);
+  const [probeBusy, setProbeBusy] = useState(false);
 
   const [status, setStatus] = useState(null); // {enabled, hostname, protocol, devices}
   const [statusError, setStatusError] = useState(null);
@@ -297,6 +358,72 @@ export default function RemoteSettings({ get, setField }) {
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
+
+  const loadCloudflaredStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/remote/cloudflared");
+      const data = await res.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!res.ok) {
+        setCfStatusError(data?.error || "Could not read cloudflared status");
+        return;
+      }
+      setCfStatus(data);
+      setCfStatusError(null);
+    } catch {
+      if (mounted.current) setCfStatusError("Could not read cloudflared status");
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCloudflaredStatus();
+  }, [loadCloudflaredStatus]);
+
+  const generateConfig = useCallback(async () => {
+    setCfConfigBusy(true);
+    setCfConfigError(null);
+    try {
+      const res = await fetch(
+        `/api/remote/cloudflared-config?hostname=${encodeURIComponent(hostnameDraft)}`
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCfConfigError(data?.error || "Could not generate config");
+        setCfConfig(null);
+        return;
+      }
+      setCfConfig(data);
+    } catch {
+      setCfConfigError("Could not generate config");
+      setCfConfig(null);
+    } finally {
+      if (mounted.current) setCfConfigBusy(false);
+    }
+  }, [hostnameDraft]);
+
+  const runProbe = useCallback(async () => {
+    setProbeBusy(true);
+    setProbeError(null);
+    try {
+      const res = await fetch("/api/remote/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname: hostnameDraft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProbeError(data?.error || "Could not test public URL");
+        setProbeResult(null);
+        return;
+      }
+      setProbeResult(data);
+    } catch {
+      setProbeError("Could not test public URL");
+      setProbeResult(null);
+    } finally {
+      if (mounted.current) setProbeBusy(false);
+    }
+  }, [hostnameDraft]);
 
   // Live countdown for an active pairing.
   useEffect(() => {
@@ -529,6 +656,126 @@ export default function RemoteSettings({ get, setField }) {
                 </div>
               )}
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Your own Cloudflare deployment ───────────────────── */}
+      <div style={CARD} data-testid="card-cloudflare-deployment">
+        <CardHeader icon={Cloud} token="var(--cc-macro)" name="Your own Cloudflare deployment" />
+        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
+          The Cloudflare Tunnel is transport only — it carries traffic to this machine. Pairing is
+          the lock: a phone still needs a device token minted above to do anything once it arrives.
+        </p>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 8px", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            data-testid="access-required-toggle"
+            checked={accessRequiredDraft}
+            onChange={(e) => setField("remote.access_required", e.target.checked)}
+          />
+          <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>
+            Cloudflare Access is required in front of this tunnel
+          </span>
+        </label>
+
+        <div style={{ fontSize: 11, color: "var(--cc-dim)", margin: "4px 0 10px" }}>
+          {cfStatusError ? (
+            <span data-testid="cloudflared-status-error" style={{ color: "var(--cc-error)" }}>
+              {cfStatusError}
+            </span>
+          ) : cfStatus ? (
+            <span data-testid="cloudflared-status-line">
+              cloudflared: {cfStatus.installed ? `installed${cfStatus.version ? ` (${cfStatus.version})` : ""}` : "not found"}
+              {" · "}
+              {cfStatus.running ? "running" : "not running"}
+            </span>
+          ) : (
+            "Checking cloudflared…"
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <ActionButton
+            label={cfConfigBusy ? "Generating…" : "Generate config"}
+            testId="generate-config"
+            onClick={hostnameDraft ? generateConfig : undefined}
+            disabled={!hostnameDraft || cfConfigBusy}
+            title={hostnameDraft ? "Generate the cloudflared config and commands" : "Enter a public URL above first."}
+          />
+          <ActionButton
+            label={probeBusy ? "Testing…" : "Test public URL"}
+            testId="probe-public-url"
+            onClick={hostnameDraft ? runProbe : undefined}
+            disabled={!hostnameDraft || probeBusy}
+            title={hostnameDraft ? "Probe your public hostname from this server" : "Enter a public URL above first."}
+          />
+        </div>
+        {!hostnameDraft && (
+          <span data-testid="cloudflare-tools-disabled-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+            {" "}Enter a public URL above to generate a config or test it.
+          </span>
+        )}
+
+        {cfConfigError && (
+          <Callout token="var(--cc-error)" testId="config-error" alert>
+            {cfConfigError}
+          </Callout>
+        )}
+
+        {cfConfig && (
+          <div data-testid="cloudflared-config-result" style={{ marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={LABEL}>config.yml</div>
+              <CopyButton text={cfConfig.config_yml} testId="copy-config-yml" />
+            </div>
+            <pre
+              data-testid="cloudflared-config-yml"
+              style={{
+                fontSize: 10,
+                lineHeight: 1.5,
+                background: "var(--cc-elev)",
+                border: "1px solid var(--cc-border)",
+                borderRadius: 8,
+                padding: 10,
+                margin: "4px 0 10px",
+                overflowX: "auto",
+                whiteSpace: "pre",
+              }}
+            >
+              {cfConfig.config_yml}
+            </pre>
+
+            <div style={LABEL}>Commands</div>
+            <ol data-testid="cloudflared-commands" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+              {(cfConfig.commands || []).map((cmd, idx) => (
+                <li
+                  key={idx}
+                  style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}
+                >
+                  <code style={{ fontSize: 10, color: "var(--cc-fg)", overflowWrap: "anywhere" }}>{cmd}</code>
+                  <CopyButton text={cmd} testId={`copy-command-${idx}`} label="" />
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {probeError && (
+          <Callout token="var(--cc-error)" testId="probe-error" alert>
+            {probeError}
+          </Callout>
+        )}
+
+        {probeResult && (
+          <div data-testid="probe-result" style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--cc-fg)" }}>
+              {probeResult.classification}
+            </div>
+            <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-dim)", margin: "4px 0 0" }}>
+              {PROBE_HINTS[probeResult.classification] || "Unrecognized classification."}
+            </p>
           </div>
         )}
       </div>
