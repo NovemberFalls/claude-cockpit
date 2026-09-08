@@ -428,7 +428,8 @@ def test_cloudflared_config_accepts_the_public_url_as_entered(rig, given):
     resp = client.get("/api/remote/cloudflared-config", params={"hostname": given})
     assert resp.status_code == 200
     assert resp.json()["hostname"] in {"upper.example.com", "studio.example.com"}
-    assert "hostname: studio.example.com" in resp.json()["config_yml"] or "hostname: upper.example.com" in resp.json()["config_yml"]
+    yml = resp.json()["config_yml"]
+    assert "hostname: studio.example.com" in yml or "hostname: upper.example.com" in yml
 
 
 def test_cloudflared_config_accepts_long_and_short_valid_hostnames(rig):
