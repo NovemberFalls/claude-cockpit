@@ -114,6 +114,64 @@ def test_unwritable_log_dir_degrades_to_stderr_only(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# uvicorn's own loggers feed the same sinks
+# ---------------------------------------------------------------------------
+
+
+def test_uvicorn_error_lines_reach_the_log_file(log_dir):
+    """THE LINE THAT WENT MISSING (2026-09-08).
+
+    A sidecar relaunched while the previous one still held the port failed to
+    bind and logged "[Errno 10048]" on the "uvicorn.error" logger — which was
+    outside the "cockpit" tree and therefore outside the file sink. cockpit.log
+    showed "Startup complete" then "Shutdown complete" in the same second,
+    twelve times in one morning, with no reason recorded anywhere on disk.
+    """
+    from pathlib import Path
+
+    try:
+        logging_config.setup("WARNING")
+        logging.getLogger("uvicorn.error").error("[Errno 10048] bind probe")
+
+        file_handlers = [
+            h for h in logging.getLogger("uvicorn.error").handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+        ]
+        assert len(file_handlers) == 1
+        # The SAME handler object as the cockpit tree's — one open file, one
+        # rotation, not two processes-worth of handles on one path.
+        assert file_handlers[0] is logging_config._file_handler
+        file_handlers[0].flush()
+
+        text = Path(logging_config.log_file_path()).read_text(encoding="utf-8")
+        assert "[Errno 10048] bind probe" in text
+        # Exactly once: propagate=False stops the root logger re-emitting it.
+        assert text.count("[Errno 10048] bind probe") == 1
+    finally:
+        logging_config.setup("WARNING")
+
+
+def test_repeated_setup_does_not_stack_uvicorn_handlers(log_dir):
+    try:
+        logging_config.setup("WARNING")
+        logging_config.setup("WARNING")
+
+        uvicorn_error = logging.getLogger("uvicorn.error")
+        tagged = [h for h in uvicorn_error.handlers
+                  if getattr(h, logging_config._HANDLER_TAG, False)]
+        tagged_files = [h for h in tagged
+                        if isinstance(h, logging.handlers.RotatingFileHandler)]
+        assert len(tagged_files) == 1
+        assert len([h for h in tagged if type(h) is logging.StreamHandler]) == 1
+        for name in logging_config._UVICORN_LOGGERS:
+            assert logging.getLogger(name).propagate is False
+        # Per-request access lines would push the startup story out of a 2 MiB file.
+        assert logging.getLogger("uvicorn.access").level == logging.WARNING
+    finally:
+        logging_config.setup("WARNING")
+
+
+# ---------------------------------------------------------------------------
 # _tail_file
 # ---------------------------------------------------------------------------
 

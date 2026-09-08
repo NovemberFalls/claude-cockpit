@@ -1,6 +1,8 @@
 """Logging configuration for Plexar Studio.
 
-Two sinks, both fed by the same formatter:
+Two sinks, both fed by the same formatter, and both carrying the ``cockpit.*``
+loggers AND uvicorn's own three loggers (``uvicorn``, ``uvicorn.error``,
+``uvicorn.access``):
 
   * stderr  -- the original behaviour, kept unchanged (dev console, sidecar
     stdout capture by Tauri).
@@ -44,8 +46,18 @@ _LOG_FILENAME = "cockpit.log"
 # handles (the test suite imports several modules that each call setup()).
 _HANDLER_TAG = "_cockpit_managed"
 
+# uvicorn's own loggers. They are NOT under the "cockpit" tree, so before this
+# they wrote to whatever uvicorn had configured -- i.e. stderr only. That is how
+# a bind failure ("[Errno 10048]") could be entirely absent from cockpit.log
+# while the same file showed "Startup complete" then "Shutdown complete" in the
+# same second: the ONE line explaining why was on a sink nobody keeps.
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
 # Set by setup(); None when the file sink could not be created.
 _file_handler: logging.handlers.RotatingFileHandler | None = None
+
+# Set by setup(); the stderr sink shared by the cockpit tree and uvicorn.
+_stream_handler: logging.StreamHandler | None = None
 
 
 def log_dir() -> Path:
@@ -110,9 +122,41 @@ def _make_file_handler(formatter: logging.Formatter):
     return handler
 
 
+def attach_uvicorn_sinks(level: int = logging.INFO) -> None:
+    """Point uvicorn's three loggers at the same stderr + file handlers.
+
+    Separate from ``setup()`` and idempotent so it can be re-applied AFTER
+    ``uvicorn.run()`` configures logging: uvicorn applies its own ``dictConfig``,
+    and ``dictConfig`` REMOVES every existing handler from the loggers it names.
+    Attaching once at startup is therefore not, on its own, enough to keep a
+    bind failure in cockpit.log -- the caller must either pass
+    ``log_config=None`` to uvicorn or call this again afterwards.
+
+    Does nothing useful before ``setup()`` has built the handlers.
+    """
+    handlers = [h for h in (_stream_handler, _file_handler) if h is not None]
+    for name in _UVICORN_LOGGERS:
+        target = logging.getLogger(name)
+        # Drop handlers a previous setup() installed here WITHOUT closing them:
+        # they are shared objects owned by the cockpit-root pass, which has
+        # already closed them by the time this runs.
+        for existing in list(target.handlers):
+            if getattr(existing, _HANDLER_TAG, False):
+                target.removeHandler(existing)
+        for handler in handlers:
+            target.addHandler(handler)
+        # Without this the same line lands twice: once here, once via the root
+        # logger those three propagate to by default.
+        target.propagate = False
+        target.setLevel(level)
+    # Per-request access lines would swamp a 2 MiB rotating file and push the
+    # startup/shutdown story out of it, which is the story people actually read.
+    logging.getLogger("uvicorn.access").setLevel(max(level, logging.WARNING))
+
+
 def setup(level: str = "INFO"):
-    """Configure structured logging for all cockpit modules."""
-    global _file_handler
+    """Configure structured logging for all cockpit modules (and uvicorn)."""
+    global _file_handler, _stream_handler
 
     log_level = getattr(logging, level.upper(), logging.INFO)
     formatter = _formatter()
@@ -131,11 +175,13 @@ def setup(level: str = "INFO"):
                     "Failed to close previous log handler", exc_info=True,
                 )
     _file_handler = None
+    _stream_handler = None
 
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
     setattr(stream_handler, _HANDLER_TAG, True)
     root.addHandler(stream_handler)
+    _stream_handler = stream_handler
 
     file_handler = _make_file_handler(formatter)
     if file_handler is not None:
@@ -145,6 +191,8 @@ def setup(level: str = "INFO"):
 
     root.setLevel(log_level)
     root.propagate = False
+
+    attach_uvicorn_sinks(log_level)
 
     return root
 

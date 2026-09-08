@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
+mod clipboard;
 
 /// Note: orphan cleanup is handled by the Python sidecar on startup.
 /// It only kills processes whose PIDs were tracked in .cockpit-child-pids,
@@ -71,6 +73,11 @@ fn spawn_sidecar(
                 CommandEvent::Terminated(status) => {
                     eprintln!("[server] terminated with {:?}", status);
 
+                    if status.code == Some(3) {
+                        eprintln!("[tauri] Sidecar exited 3: a running Plexar Studio already serves 127.0.0.1:8420 — attaching to it, not restarting");
+                        break;
+                    }
+
                     let attempts = rc.fetch_add(1, Ordering::SeqCst);
                     if attempts < 3 {
                         eprintln!(
@@ -104,6 +111,13 @@ fn spawn_sidecar(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
+        .invoke_handler(tauri::generate_handler![clipboard::read_clipboard_image])
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

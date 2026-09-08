@@ -403,13 +403,24 @@ def _patch_uvicorn_run(monkeypatch):
     binding a real port. Returns the dict the stub will populate.
     """
     import uvicorn
+    import instance_guard
     captured = {}
 
-    def fake_run(app, host, port):
+    def fake_run(app, host, port, **kwargs):
         captured["host"] = host
         captured["port"] = port
+        # main() passes log_config=None so uvicorn's own dictConfig cannot strip
+        # the handlers logging_config attached to uvicorn.* -- a bind error must
+        # reach cockpit.log. Recorded so a test can pin that.
+        captured["log_config"] = kwargs.get("log_config", "unset")
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
+    # main() consults instance_guard.resolve_port BEFORE binding. Stub it to
+    # "free" so these tests never depend on the machine's real port table.
+    monkeypatch.setattr(
+        instance_guard, "resolve_port",
+        lambda host, port, **kw: instance_guard.PortVerdict("free", None, None, "stubbed"),
+    )
     return captured
 
 
@@ -441,6 +452,7 @@ def test_main_defaults_to_loopback_host(monkeypatch):
 
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 18420
+    assert captured["log_config"] is None  # see _patch_uvicorn_run
     assert not any("no authentication" in w.lower() for w in warnings)
 
 
@@ -478,3 +490,25 @@ def test_main_host_env_override_to_loopback_alias_does_not_warn(monkeypatch):
 
     assert captured["host"] == "localhost"
     assert not any("no authentication" in w.lower() for w in warnings)
+
+
+def test_main_attaches_to_a_healthy_running_studio_instead_of_binding(monkeypatch):
+    """A healthy Studio already on the port means: exit ATTACH_EXIT_CODE and
+    never call uvicorn.run. lib.rs treats that exit status as "attached, do not
+    restart" -- the relaunch path that used to fail to bind twelve times.
+    """
+    import instance_guard
+    monkeypatch.setenv("PORT", "18423")
+    monkeypatch.setenv("NO_BROWSER", "1")
+    captured = _patch_uvicorn_run(monkeypatch)
+    monkeypatch.setattr(
+        instance_guard, "resolve_port",
+        lambda host, port, **kw: instance_guard.PortVerdict(
+            "healthy", 4242, "plexar-studio-server.exe", "stubbed"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        server_module.main()
+
+    assert exit_info.value.code == instance_guard.ATTACH_EXIT_CODE
+    assert "host" not in captured, "uvicorn.run must not be called when attaching"
