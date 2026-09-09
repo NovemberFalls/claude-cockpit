@@ -33,6 +33,7 @@ FULL_SESSION = {
     "alive": True,
     "activity_state": "idle",
     "created_at": "2026-09-08T00:00:00+00:00",
+    "effort": "high",
     # Fields that must NEVER reach a phone:
     "jsonl_path": "C:/secret.jsonl",
     "cost": 1.23,
@@ -86,6 +87,7 @@ class Backend:
         ]
         # Set by the rig fixture to a real tmp directory.
         self.upload_root = None
+        self.branches = {"C:/tmp": "main"}
         self.claude_messages = []
         self.codex_page = {"messages": [], "before": None, "has_more": False, "available": True}
         self.saved = []
@@ -116,6 +118,7 @@ class Backend:
             transcript_codex=self._codex_transcript,
             upload_dir=lambda: str(self.upload_root),
             save_upload=self._save_upload,
+            git_branch=lambda workdir: self.branches.get(workdir),
         )
 
     def _claude_messages(self, session):
@@ -346,12 +349,12 @@ def test_authenticate_websocket_mirrors_the_rules(rig):
 # -- sessions --------------------------------------------------------------
 
 
-def test_sessions_list_carries_only_the_ten_fields(rig):
+def test_sessions_list_carries_only_the_twelve_fields(rig):
     _backend, store, client = rig
     paired = pair(client, store)
     body = client.get("/remote/v1/sessions", headers=auth(paired["token"])).json()
     assert list(body["sessions"][0]) == list(remote_gateway.SESSION_FIELDS)
-    assert len(remote_gateway.SESSION_FIELDS) == 10
+    assert len(remote_gateway.SESSION_FIELDS) == 12
 
 
 def test_hello(rig):

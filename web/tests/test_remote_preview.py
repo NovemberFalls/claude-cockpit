@@ -287,3 +287,35 @@ def test_session_view_codex_gets_null_preview_and_created_at_fallback():
     view = remote_gateway._session_view(entry)
     assert view["preview"] is None
     assert view["updated_at"] == "2020-01-01T00:00:00+00:00"
+
+
+# -- preview markdown stripping ---------------------------------------------
+
+
+def test_latest_preview_strips_bold_and_italic_markers(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [assistant_text_line("**Install these two** then _restart_.")])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert result["text"] == "Install these two then restart."
+
+
+def test_latest_preview_strips_inline_backticks(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [assistant_text_line("run `npm install` first")])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert result["text"] == "run npm install first"
+
+
+def test_latest_preview_strips_leading_heading_and_list_markers(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [assistant_text_line("# Heading\n- item one\n> quoted")])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert "#" not in result["text"]
+    assert result["text"] == "Heading item one quoted"
+
+
+def test_latest_preview_underscore_in_identifier_not_treated_as_emphasis(tmp_path):
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [assistant_text_line("edit my_file_name.py please")])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert result["text"] == "edit my_file_name.py please"

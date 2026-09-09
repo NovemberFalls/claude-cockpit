@@ -49,6 +49,10 @@ PROTOCOL_VERSION = 1
 # desktop's whole record just because the desktop's own list route does.
 # `updated_at` and `preview` are DERIVED (see `_session_view`) rather than
 # copied straight off the desktop's record -- there is no such field there.
+# `branch` is likewise derived, via `RemoteBackend.git_branch`. `effort` IS a
+# field on the desktop's own record (`TerminalSession.effort`, already merged
+# live-vs-launch by `pty_manager.list_terminals()`), so it is copied straight
+# through like every other passthrough field.
 SESSION_FIELDS = (
     "id",
     "name",
@@ -60,6 +64,8 @@ SESSION_FIELDS = (
     "created_at",
     "updated_at",
     "preview",
+    "branch",
+    "effort",
 )
 
 # The ONLY per-row fields a phone gets from a folder listing. `entry_count`,
@@ -142,6 +148,11 @@ class RemoteBackend:
     transcript_codex: Callable[[Any, int | None, int], Awaitable[dict] | Any] | None = None
     upload_dir: Callable[[], str] | None = None
     save_upload: Callable[[str, bytes], Awaitable[str] | str] | None = None
+    # Stage 4 (colour tokens / branch display). Wired to
+    # `server._git_branch_from_head(dir)[1]`. Absent (older caller / narrower
+    # test fake) means `branch` is always null, never a 500 -- same defaulting
+    # rule as every other Stage 1c+ field above.
+    git_branch: Callable[[str], str | None] | None = None
 
 
 class StreamRegistry:
@@ -338,10 +349,55 @@ def _session_preview(entry: dict) -> dict | None:
         return None
 
 
-def _session_view(entry: dict) -> dict:
+def _session_branch(backend: "RemoteBackend", entry: dict) -> str | None:
+    """The git branch for *entry*'s working_dir, or None.
+
+    None when there is no working_dir, when `git_branch` was never wired (an
+    older caller / a narrower test fake), or when the directory is not a git
+    repo -- all three are the same "nothing to show" answer to a phone.
+    """
+    working_dir = entry.get("working_dir")
+    if not working_dir or backend.git_branch is None:
+        return None
+    try:
+        return backend.git_branch(working_dir)
+    except Exception:  # noqa: BLE001 - a bad repo must not break the sessions list
+        logger.debug("git_branch failed for %s", working_dir, exc_info=True)
+        return None
+
+
+def _session_effort(backend: "RemoteBackend | None", entry: dict) -> str | None:
+    """The effort a phone should show: the LIVE value, falling back to launch.
+
+    `pty_manager._session_to_dict` emits no `effort` key at all -- the live
+    value set by "Set effort level to X" lives on `session.tracker.effort`,
+    the launch-time value on `TerminalSession.effort` (a str, "" = unset).
+    Mirrors how `activity_state` falls back to `session.tracker.state` for a
+    real `TerminalSession` above: resolve off the REAL session object via
+    `backend.get_session`, not off the already-stripped list entry, and treat
+    an empty string as unset at every step -- including one already present
+    on a dict-shaped test double's `entry["effort"]`.
+    """
+    terminal_id = entry.get("id")
+    session = backend.get_session(terminal_id) if backend is not None and terminal_id else None
+    if session is not None:
+        tracker_effort = getattr(getattr(session, "tracker", None), "effort", None)
+        if isinstance(tracker_effort, str) and tracker_effort:
+            return tracker_effort
+        launch_effort = _session_field(session, "effort")
+        if isinstance(launch_effort, str) and launch_effort:
+            return launch_effort
+        return None
+    entry_effort = entry.get("effort")
+    return entry_effort if isinstance(entry_effort, str) and entry_effort else None
+
+
+def _session_view(entry: dict, backend: "RemoteBackend | None" = None) -> dict:
     enriched = dict(entry)
     enriched["updated_at"] = _session_updated_at(entry)
     enriched["preview"] = _session_preview(entry)
+    enriched["branch"] = _session_branch(backend, entry) if backend is not None else None
+    enriched["effort"] = _session_effort(backend, entry)
     return {key: enriched.get(key) for key in SESSION_FIELDS}
 
 
@@ -839,7 +895,7 @@ async def hello(device: Device = Depends(require_device)):
 @router.get("/sessions")
 async def list_sessions(device: Device = Depends(require_device)):
     backend, _store_ = _require_configured()
-    return {"sessions": [_session_view(s) for s in backend.list_sessions()]}
+    return {"sessions": [_session_view(s, backend) for s in backend.list_sessions()]}
 
 
 @router.post("/sessions", status_code=201)
@@ -879,7 +935,7 @@ async def create_session(request: Request, device: Device = Depends(require_devi
         session = await backend.create_session(payload)
     except ValueError as exc:
         return _error(400, str(exc))
-    return {"session": _session_view(session or {})}
+    return {"session": _session_view(session or {}, backend)}
 
 
 @router.delete("/sessions/{terminal_id}")
@@ -1224,6 +1280,40 @@ def _serve_roots(backend: RemoteBackend, session: Any = None) -> list[str]:
     return [r for r in roots if r]
 
 
+#: `<image name=[Image #1] path="C:\...">  </image>` -- the desktop's own
+#: image-attachment tag, written into the text block Claude Code sees. Matches
+#: the self-closing form and the open/close form with whitespace (including
+#: newlines) between the tags; the terminator is `</image>` with optional
+#: interior whitespace before the closing bracket.
+_IMAGE_TAG_RE = re.compile(
+    r'<image\b[^>]*?\bpath="([^"]*)"[^>]*?(?:/>|>\s*</image\s*>)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_image_tags(text: str) -> tuple[str, list[str]]:
+    """Strip every `<image ... path="...">...</image>` tag out of *text*.
+
+    Returns the text with the tags removed and whitespace collapsed at the
+    join (an empty remaining text is legitimate -- the caller drops it), plus
+    the ordered list of paths the tags carried. Unlike `_image_paths_in`, this
+    is NOT root-gated: the tag is the harness's own attachment record, not a
+    path merely mentioned in prose.
+    """
+    if not isinstance(text, str) or not text:
+        return text, []
+    paths: list[str] = []
+
+    def _sub(match: "re.Match[str]") -> str:
+        paths.append(match.group(1))
+        return " "
+
+    remaining = _IMAGE_TAG_RE.sub(_sub, text)
+    if paths:
+        remaining = " ".join(remaining.split())
+    return remaining, paths
+
+
 def _image_paths_in(text: str, roots: list[str]) -> list[str]:
     """Absolute image paths in *text* that resolve inside one of *roots*.
 
@@ -1281,6 +1371,17 @@ def _claude_message(entry: dict, roots: list[str]) -> dict | None:
                 {"type": "tool_result", "text": str(block.get("content") or "")[:_TOOL_RESULT_MAX]}
             )
     if role == "user":
+        for block in list(blocks):
+            if block["type"] != "text":
+                continue
+            remaining, tag_paths = _extract_image_tags(block["text"])
+            if tag_paths:
+                block["text"] = remaining
+                for path in tag_paths:
+                    blocks.append({"type": "image", "path": path})
+        # A text block that was ONLY image tags is now empty -- drop it rather
+        # than showing an empty bubble beside the image(s) it described.
+        blocks = [b for b in blocks if b["type"] != "text" or b["text"]]
         for block in list(blocks):
             if block["type"] != "text":
                 continue

@@ -392,6 +392,39 @@ def _strip_system_injected(text: str) -> str | None:
     return stripped if stripped else None
 
 
+# Markdown emphasis: **bold**, *italic* -- these are matched intra-word too
+# (that is what CommonMark itself does for `*`), non-greedily so "**a** and
+# **b**" yields two hits, not one spanning the middle text.
+_MD_STAR_BOLD_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
+_MD_STAR_ITALIC_RE = re.compile(r"\*(?!\s)(.+?)(?<!\s)\*")
+# __bold__ / _italic_ -- unlike `*`, underscore emphasis requires a boundary
+# that is NOT a word character on either outer side, so "my_file_name.py"
+# is left alone (CommonMark disables intra-word `_` emphasis for exactly
+# this reason: it is common inside identifiers and paths).
+_MD_UNDERSCORE_BOLD_RE = re.compile(r"(?<!\w)__(?!\s)(.+?)(?<!\s)__(?!\w)")
+_MD_UNDERSCORE_ITALIC_RE = re.compile(r"(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)")
+# Inline code span: `like this`.
+_MD_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+# A leading heading/blockquote/list marker on a line: "# ", "> ", "- ", "* ".
+_MD_LEADING_MARKER_RE = re.compile(r"^\s*(?:#{1,6}|>|[-*])\s+", re.MULTILINE)
+
+
+def _strip_markdown(text: str) -> str:
+    """Strip the markdown decoration a preview bubble should not show raw.
+
+    Removes emphasis markers, inline-code backticks and leading heading /
+    blockquote / list markers -- keeping the wrapped TEXT, not the markup.
+    Whitespace collapsing happens separately, after this, at the call site.
+    """
+    text = _MD_LEADING_MARKER_RE.sub("", text)
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+    text = _MD_STAR_BOLD_RE.sub(r"\1", text)
+    text = _MD_STAR_ITALIC_RE.sub(r"\1", text)
+    text = _MD_UNDERSCORE_BOLD_RE.sub(r"\1", text)
+    text = _MD_UNDERSCORE_ITALIC_RE.sub(r"\1", text)
+    return text
+
+
 def latest_preview(
     path: str,
     tail_bytes: int = 65536,
@@ -477,6 +510,7 @@ def _preview_from_window(lines: list[str]) -> dict | None:
             found_text = _strip_system_injected(found_text)
             if not found_text:
                 continue
+        found_text = _strip_markdown(found_text)
         collapsed = " ".join(found_text.split())
         if not collapsed:
             continue

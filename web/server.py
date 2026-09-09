@@ -6968,6 +6968,7 @@ remote_gateway.configure(
         transcript_codex=_remote_codex_transcript,
         upload_dir=lambda: str(UPLOAD_DIR),
         save_upload=_remote_save_upload,
+        git_branch=lambda workdir: _git_branch_from_head(workdir)[1] if workdir else None,
     ),
     DeviceStore(app_paths.data_path("remote_devices.json")),
 )
