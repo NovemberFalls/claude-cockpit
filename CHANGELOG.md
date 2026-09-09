@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.20] - 2026-09-09
+
+### Fixed
+- Stale scratch directories are now swept at STARTUP, not only on graceful shutdown. The three `mkdtemp` families (`cockpit_uploads_*`, `cockpit_relays_*`, `cockpit_mailbox_*`) were removed only on the clean exit path, and the sidecar is designed to outlive its window — so that path is the exception, not the rule (one machine held 280 upload directories, 226 MB, against a log with seven "Startup complete" lines and zero "Shutdown complete"). Startup is the only moment reached however the last process died. **"Not mine" never means "dead":** each directory now carries a `.plexar-owner` marker (PID + executable basename) and is kept unless that PID is gone or the process now running under it is not a Studio sidecar — the same two-part check `instance_guard` makes before it terminates anything. Directories written by older builds carry no marker and are swept only when nothing inside them has changed for 24 h. Our own three directories are excluded by resolved path, symlinks and junctions are never followed, nothing outside the temp folder is touched, the scan is bounded to 2 s so it cannot delay launch, and it logs one line only when something was actually removed. The existing shutdown cleanup is unchanged.
+
 ## [2.1.19] - 2026-09-09
 
 ### Fixed
