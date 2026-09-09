@@ -16,7 +16,7 @@
  *     DELETE /api/remote/devices/{id} and only removes the row on success.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cloud, Copy, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
+import { Cloud, Copy, Plug, RadioTower, QrCode, ShieldOff, Smartphone, TriangleAlert } from "lucide-react";
 import QRCode from "qrcode";
 
 const PROBE_HINTS = {
@@ -26,6 +26,19 @@ const PROBE_HINTS = {
   unreachable: "No response — check the cloudflared service is running and DNS has propagated.",
   unexpected: "Got a response that didn't match any known shape. Check the hostname and try again.",
 };
+
+/** Connector state → the token its dot and word are painted in. */
+const TUNNEL_STATE_TOKEN = {
+  running: "var(--cc-idle)",
+  starting: "var(--cc-working)",
+  stopping: "var(--cc-working)",
+  crashed: "var(--cc-error)",
+  stopped: "var(--cc-muted)",
+};
+
+const TUNNEL_POLL_MS = 3000;
+
+const WINGET_LINE = "winget install --id Cloudflare.cloudflared";
 
 const ACCENT_FG = "#0f1216";
 const tint = (token, pct) => `color-mix(in srgb, ${token} ${pct}%, transparent)`;
@@ -326,6 +339,18 @@ export default function RemoteSettings({ get, setField }) {
   const [pairingBusy, setPairingBusy] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState(null);
 
+  // ── Studio-managed connector ───────────────────────────
+  // `tokenDraft` is the ONLY place the token ever lives in this component, and
+  // it is cleared the moment the PUT lands. Nothing reads it back from the
+  // server — the server never returns it.
+  const [tunnel, setTunnel] = useState(null);
+  const [tunnelError, setTunnelError] = useState(null);
+  const [tunnelBusy, setTunnelBusy] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [tokenEditing, setTokenEditing] = useState(false);
+  const [tokenError, setTokenError] = useState(null);
+  const [logOpen, setLogOpen] = useState(false);
+
   const [now, setNow] = useState(Date.now());
   const [revokeTarget, setRevokeTarget] = useState(null);
   const [revokeBusy, setRevokeBusy] = useState(false);
@@ -425,6 +450,103 @@ export default function RemoteSettings({ get, setField }) {
     }
   }, [hostnameDraft]);
 
+  const loadTunnel = useCallback(async () => {
+    try {
+      const res = await fetch("/api/remote/tunnel");
+      const data = await res.json().catch(() => ({}));
+      if (!mounted.current) return;
+      if (!res.ok) {
+        setTunnelError(data?.error || "Could not read the connector status");
+        return;
+      }
+      setTunnel(data);
+      setTunnelError(null);
+    } catch {
+      if (mounted.current) setTunnelError("Could not read the connector status");
+    }
+  }, []);
+
+  // Polled while this page is mounted — the connector's state changes without
+  // anyone clicking (it crashes, it reconnects), so a one-shot read would go
+  // stale on screen.
+  useEffect(() => {
+    loadTunnel();
+    const id = setInterval(loadTunnel, TUNNEL_POLL_MS);
+    return () => clearInterval(id);
+  }, [loadTunnel]);
+
+  const tunnelAction = useCallback(
+    async (path, failure) => {
+      setTunnelBusy(true);
+      setTunnelError(null);
+      try {
+        const res = await fetch(path, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setTunnelError(data?.error || failure);
+          return;
+        }
+        setTunnel(data);
+      } catch {
+        setTunnelError(failure);
+      } finally {
+        if (mounted.current) setTunnelBusy(false);
+      }
+    },
+    []
+  );
+
+  const saveToken = useCallback(async () => {
+    const value = tokenDraft.trim();
+    if (!value) {
+      setTokenError("Paste the connector token first.");
+      return;
+    }
+    setTunnelBusy(true);
+    setTokenError(null);
+    try {
+      const res = await fetch("/api/remote/tunnel/token", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: value }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setTokenError(data?.error || "Could not save the token");
+        return;
+      }
+      // Out of state immediately: a submitted secret has no reason to stay in
+      // a React tree that a devtools inspection can read.
+      setTokenDraft("");
+      setTokenEditing(false);
+      await loadTunnel();
+    } catch {
+      setTokenError("Could not save the token");
+    } finally {
+      if (mounted.current) setTunnelBusy(false);
+    }
+  }, [tokenDraft, loadTunnel]);
+
+  const removeToken = useCallback(async () => {
+    setTunnelBusy(true);
+    setTokenError(null);
+    try {
+      const res = await fetch("/api/remote/tunnel/token", { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setTokenError(data?.error || "Could not remove the token");
+        return;
+      }
+      setTokenDraft("");
+      setTokenEditing(false);
+      await loadTunnel();
+    } catch {
+      setTokenError("Could not remove the token");
+    } finally {
+      if (mounted.current) setTunnelBusy(false);
+    }
+  }, [loadTunnel]);
+
   // Live countdown for an active pairing.
   useEffect(() => {
     if (!pairing) return undefined;
@@ -513,6 +635,20 @@ export default function RemoteSettings({ get, setField }) {
 
   const left = pairing ? secondsLeft(pairing.expires_at, now) : 0;
   const expired = pairing ? left <= 0 : false;
+
+  const tunnelState = tunnel?.state || "stopped";
+  const tunnelToken = TUNNEL_STATE_TOKEN[tunnelState] || "var(--cc-muted)";
+  const tunnelInstalled = Boolean(tunnel?.installed);
+  const tokenSet = Boolean(tunnel?.token_set);
+  const tunnelActive = tunnelState === "running" || tunnelState === "starting";
+  // One reason, in the order the user has to fix them.
+  const startBlockedReason = !tokenSet
+    ? "Paste a connector token first."
+    : !tunnelInstalled
+      ? "cloudflared is not installed on this machine."
+      : null;
+  const autostartDraft = Boolean(get("remote.tunnel.autostart", true)) && Boolean(get("remote.tunnel.enabled", false));
+  const logTail = (tunnel?.log_tail || []).slice(-20);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: 16, minWidth: 0 }}>
@@ -778,6 +914,210 @@ export default function RemoteSettings({ get, setField }) {
             </p>
           </div>
         )}
+      </div>
+
+      {/* ── Tunnel connector (Studio-managed) ─────────────── */}
+      <div style={CARD} data-testid="card-tunnel-connector">
+        <CardHeader icon={Plug} token="var(--cc-accent)" name="Tunnel connector" />
+        <p style={{ fontSize: 11, lineHeight: 1.5, color: "var(--cc-muted)", margin: "4px 0 8px" }}>
+          Studio runs <code>cloudflared</code> for you — hidden, and restarted automatically if it
+          dies. Paste the connector token from your Cloudflare dashboard and press Start. The token
+          is stored with your API keys, never in the exportable settings file, and is never shown
+          again.
+        </p>
+
+        <div
+          data-testid="tunnel-state"
+          style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0 8px" }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: tunnelToken,
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 12, fontWeight: 700, color: tunnelToken }}>{tunnelState}</span>
+          <span style={{ fontSize: 11, color: "var(--cc-dim)" }} data-testid="tunnel-counters">
+            {tunnel?.connections ?? 0} connection{(tunnel?.connections ?? 0) === 1 ? "" : "s"}
+            {" · "}
+            {tunnel?.restarts ?? 0} restart{(tunnel?.restarts ?? 0) === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        <div style={{ fontSize: 11, color: "var(--cc-dim)", marginBottom: 8 }}>
+          {tunnelInstalled ? (
+            <span data-testid="tunnel-binary">{tunnel?.binary}</span>
+          ) : (
+            <span data-testid="tunnel-not-installed">
+              cloudflared not found — install it: <code>{WINGET_LINE}</code>
+            </span>
+          )}
+        </div>
+
+        {/* Token */}
+        <div style={{ marginBottom: 10 }}>
+          <div style={LABEL}>Connector token</div>
+          {tokenSet && !tokenEditing ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+              <span data-testid="tunnel-token-set" style={{ fontSize: 11, color: "var(--cc-idle)" }}>
+                Token set
+              </span>
+              <ActionButton
+                label="Replace"
+                testId="tunnel-token-replace"
+                onClick={() => setTokenEditing(true)}
+                disabled={tunnelBusy}
+              />
+              <ActionButton
+                label="Remove"
+                danger
+                testId="tunnel-token-remove"
+                onClick={removeToken}
+                disabled={tunnelBusy}
+              />
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+              <input
+                type="password"
+                data-testid="tunnel-token-input"
+                aria-label="Connector token"
+                value={tokenDraft}
+                onChange={(e) => setTokenDraft(e.target.value)}
+                placeholder="eyJhIjoi…"
+                autoComplete="off"
+                style={{
+                  flex: "1 1 260px",
+                  maxWidth: 420,
+                  height: 28,
+                  borderRadius: 8,
+                  padding: "0 8px",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  background: "var(--cc-elev)",
+                  border: "1px solid var(--cc-border)",
+                  color: "var(--cc-fg)",
+                }}
+              />
+              <ActionButton
+                label={tunnelBusy ? "Saving…" : "Save token"}
+                testId="tunnel-token-save"
+                onClick={saveToken}
+                disabled={tunnelBusy || !tokenDraft.trim()}
+                title={tokenDraft.trim() ? "Store the connector token" : "Paste the connector token first."}
+              />
+              {tokenSet && (
+                <ActionButton
+                  label="Cancel"
+                  testId="tunnel-token-cancel"
+                  onClick={() => {
+                    setTokenDraft("");
+                    setTokenEditing(false);
+                  }}
+                  disabled={tunnelBusy}
+                />
+              )}
+            </div>
+          )}
+          {tokenError && (
+            <Callout token="var(--cc-error)" testId="tunnel-token-error" alert>
+              {tokenError}
+            </Callout>
+          )}
+        </div>
+
+        {/* Start / stop */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          {tunnelActive ? (
+            <ActionButton
+              label={tunnelBusy ? "Stopping…" : "Stop"}
+              testId="tunnel-stop"
+              onClick={() => tunnelAction("/api/remote/tunnel/stop", "Could not stop the connector")}
+              disabled={tunnelBusy}
+            />
+          ) : (
+            <ActionButton
+              label={tunnelBusy ? "Starting…" : "Start"}
+              accent
+              testId="tunnel-start"
+              onClick={
+                startBlockedReason
+                  ? undefined
+                  : () => tunnelAction("/api/remote/tunnel/start", "Could not start the connector")
+              }
+              disabled={Boolean(startBlockedReason) || tunnelBusy}
+              title={startBlockedReason || "Start the Cloudflare connector"}
+            />
+          )}
+          {startBlockedReason && !tunnelActive && (
+            <span data-testid="tunnel-disabled-reason" style={{ fontSize: 11, color: "var(--cc-muted)" }}>
+              {startBlockedReason}
+            </span>
+          )}
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0 2px", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            data-testid="tunnel-autostart-toggle"
+            checked={autostartDraft}
+            onChange={(e) => {
+              setField("remote.tunnel.autostart", e.target.checked);
+              setField("remote.tunnel.enabled", e.target.checked);
+            }}
+          />
+          <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>Run when Studio starts</span>
+        </label>
+
+        {tunnel?.foreign_running && (
+          <Callout token="var(--cc-waiting)" testId="tunnel-foreign-note">
+            Another cloudflared is already running outside Studio. Stop it first, or leave this off
+            — two connectors for the same tunnel will fight over the same hostname.
+          </Callout>
+        )}
+
+        {tunnel?.last_error && (
+          <Callout token="var(--cc-error)" testId="tunnel-last-error" alert>
+            {tunnel.last_error}
+          </Callout>
+        )}
+
+        {tunnelError && (
+          <Callout token="var(--cc-error)" testId="tunnel-error" alert>
+            {tunnelError}
+          </Callout>
+        )}
+
+        <div style={{ marginTop: 10 }}>
+          <ActionButton
+            label={logOpen ? "Hide log" : "Show log"}
+            testId="tunnel-log-toggle"
+            onClick={() => setLogOpen((v) => !v)}
+          />
+          {logOpen && (
+            <pre
+              data-testid="tunnel-log"
+              style={{
+                fontSize: 10,
+                lineHeight: 1.5,
+                background: "var(--cc-elev)",
+                border: "1px solid var(--cc-border)",
+                borderRadius: 8,
+                padding: 10,
+                margin: "8px 0 0",
+                maxHeight: 220,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {logTail.length ? logTail.join("\n") : "No output yet."}
+            </pre>
+          )}
+        </div>
       </div>
 
       {/* ── Devices ───────────────────────────────────────── */}

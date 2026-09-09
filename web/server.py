@@ -157,6 +157,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.error("Managed vLLM startup failed", exc_info=True)
 
+    # Studio-managed Cloudflare connector: same best-effort posture as managed
+    # vLLM. `remote_tunnel` is imported near the bottom of this module (with the
+    # rest of the remote wiring); this body runs long after import.
+    try:
+        await asyncio.to_thread(remote_tunnel.autostart_if_configured)
+    except Exception:
+        logger.error("Cloudflare connector autostart failed", exc_info=True)
+
     # vLLM metrics sampler: persists vLLM's reset-prone counters to a crude
     # on-disk dataset so lifetime usage survives container restarts. Best-effort.
     app.state.vllm_sampler_task = asyncio.create_task(_vllm_sampler_loop())
@@ -224,6 +232,11 @@ async def lifespan(app: FastAPI):
     await pty_manager.stop_state_ticker()
 
     await stop_managed_vllm()
+
+    try:
+        await asyncio.to_thread(remote_tunnel.shutdown)
+    except Exception:
+        logger.error("Stopping the Cloudflare connector failed", exc_info=True)
 
     logger.info("Shutdown: terminating %d session(s)...", len(pty_manager.sessions))
     pty_manager.shutdown()
@@ -6916,6 +6929,13 @@ async def websocket_remote_stream(websocket: WebSocket, terminal_id: str):
 
 app.include_router(remote_gateway.router)
 app.include_router(remote_gateway.admin_router)
+
+# The Studio-managed Cloudflare connector. Its routes live under /api/remote/
+# and are therefore ordinary origin-guarded /api routes — no exemption is added
+# or wanted; only /remote/v1/* (the phone's surface) is exempt.
+import remote_tunnel  # noqa: E402 -- grouped with the remote router wiring above
+
+app.include_router(remote_tunnel.router)
 
 def _remote_claude_messages(session) -> list[dict]:
     """`RemoteBackend.messages_claude`: this session's JSONL, parsed, or [].
