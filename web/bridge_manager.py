@@ -42,6 +42,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import temp_sweep
 from jsonl_watcher import tail_jsonl
 from pty_manager import pty_manager
 
@@ -108,6 +109,9 @@ _RELAY_INLINE_MAX = 2048
 # UPLOAD_DIR pattern from server.py). The directory is never explicitly removed
 # on exit — the OS cleans temp dirs on reboot, which is fine for relay files.
 _RELAY_DIR = pathlib.Path(tempfile.mkdtemp(prefix="cockpit_relays_"))
+# Ownership marker, so a LATER process's startup sweep can PROVE this directory
+# still belongs to a live sidecar instead of inferring it from age.
+temp_sweep.mark_owner(_RELAY_DIR)
 
 # Relay files older than this (seconds) are deleted opportunistically when a
 # new relay file is written (10 minutes — bounds secrets-at-rest exposure).

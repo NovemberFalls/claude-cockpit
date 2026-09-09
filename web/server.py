@@ -36,8 +36,10 @@ logger = logging.getLogger("cockpit.server")
 
 import pty_manager as pty_manager_module  # noqa: E402 -- module handle for resolve_claude_cli(); see /api/cli
 from pty_manager import ClaudeCliNotFound, CodexCliNotFound, pty_manager  # noqa: E402 -- must follow load_dotenv(): reads MAX_SESSIONS/IDLE_TIMEOUT from os.environ at module scope
+import bridge_manager as bridge_manager_module  # noqa: E402 -- module handle for _RELAY_DIR; the startup temp sweep must exclude it by path identity
 from bridge_manager import bridge_manager, channel_manager, cleanup_relay_dir  # noqa: E402 -- grouped with pty_manager import for consistent post-setup() init order
 from mailbox_bridge import mailbox_manager, cleanup_mailbox_root, read_mailbox  # noqa: E402 -- V4 bridge; imports bridge_manager, so it must follow that line
+import mailbox_bridge  # noqa: E402 -- module handle for _MAILBOX_ROOT; same reason as bridge_manager_module, and must follow the line above
 # _wait_for_idle_simple / _paste_and_submit are underscore-prefixed (bridge_manager treats
 # them as internal helpers), but they are exactly the typing-quiet + idle gate
 # and bracketed-paste injection mechanics the CLI-actions routes below need
@@ -54,6 +56,7 @@ import pricing_store as pricing_store_module  # noqa: E402 -- grouped with the o
 from pricing_store import pricing_store  # noqa: E402
 import spend_guard  # noqa: E402 -- reads settings_store/usage_tracker lazily; the sole spend-decision module
 import origin_guard  # noqa: E402 -- grouped with the other local-module imports above; the browser-origin guard wired as middleware below
+import temp_sweep  # noqa: E402 -- grouped with the other local-module imports above; startup sweep of stale scratch dirs
 import context_window  # noqa: E402 -- pure resolver; fed the local /models payload below so local sessions get a real context ring
 
 START_TIME = _time.time()
@@ -88,6 +91,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.debug("Crash-detection PID check failed — continuing startup", exc_info=True)
     PID_FILE.write_text(str(os.getpid()))
+
+    # 2b. Sweep stale scratch directories left by processes that never reached
+    # the graceful-shutdown path. Startup is the only moment reached however
+    # the last process died; see temp_sweep's docstring. Run here, AFTER this
+    # process's own three directories exist, so they are excluded by resolved
+    # path identity rather than by luck of ordering. Best-effort: the sweep
+    # never raises on its own, and the wrapper guarantees startup cannot fail
+    # because of it (same stance as the pricing poller and managed vLLM).
+    try:
+        temp_sweep.sweep_stale(
+            ours=(UPLOAD_DIR, bridge_manager_module._RELAY_DIR, mailbox_bridge._MAILBOX_ROOT),
+        )
+    except Exception:
+        logger.warning("Startup temp sweep failed — continuing", exc_info=True)
 
     # 3. Start idle session cleanup loop (tracked for graceful shutdown)
     async def idle_cleanup_loop():
@@ -324,6 +341,10 @@ else:
 
 # Session-scoped temp directory for file uploads
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="cockpit_uploads_"))
+# Stamp the ownership marker so a LATER process's startup sweep can prove this
+# directory is still owned by a live sidecar rather than guessing from its age.
+# The sidecar outlives its window on purpose, and these files are the user's.
+temp_sweep.mark_owner(UPLOAD_DIR)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 #: The upload dir is a CACHE, not a store with a ceiling. This is the size at

@@ -61,6 +61,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import temp_sweep
 from bridge_manager import _paste_and_submit
 from pty_manager import pty_manager
 
@@ -73,6 +74,9 @@ logger = logging.getLogger("cockpit.bridge")
 # Root for per-bridge mailbox directories. One temp dir for the process; each
 # bridge gets a subdirectory under it.
 _MAILBOX_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="cockpit_mailbox_"))
+# Ownership marker, so a LATER process's startup sweep can PROVE this directory
+# still belongs to a live sidecar instead of inferring it from age.
+temp_sweep.mark_owner(_MAILBOX_ROOT)
 
 # How long a terminal record is kept in memory (and its directory on disk) so
 # frontend pollers can read the final state and the user can still read the
