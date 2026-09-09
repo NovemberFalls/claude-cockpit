@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.16] - 2026-09-09
+
+### Fixed
+- Studio Remote: the device store no longer rewrites itself on every phone request. Concurrent polls raced the file replacement on Windows and each failure was a server error for the phone. Writes are serialised, last-seen is persisted at most every 30 s, and a failed write is logged, never raised. Failed pairing attempts are now logged with a reason.
+- Settings ▸ Remote: "Run when Studio starts" starts the connector immediately when a token is saved, and turning it off stops it.
+
 ## [2.1.15] - 2026-09-08
 
 ### Added
