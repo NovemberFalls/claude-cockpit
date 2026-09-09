@@ -182,6 +182,31 @@ def test_latest_preview_skips_task_notification_user_record(tmp_path):
     assert result["text"] == "prior assistant reply"
 
 
+def test_latest_preview_skips_command_args_only_record(tmp_path):
+    """A slash-command's empty <command-args></command-args> is not a preview (SPEC §2)."""
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [
+        assistant_text_line("prior assistant reply"),
+        user_line("<command-args></command-args>"),
+    ])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert result["role"] == "assistant"
+    assert result["text"] == "prior assistant reply"
+
+
+def test_latest_preview_skips_self_closing_tag_only_residue(tmp_path):
+    """Belt to the blocklist's braces: any leftover self-closing tag markup, not just
+    the known blocklist, fails to qualify as a preview."""
+    path = tmp_path / "s.jsonl"
+    _write_jsonl(path, [
+        assistant_text_line("prior assistant reply"),
+        user_line("<some-future-tag/>"),
+    ])
+    result = jsonl_watcher.latest_preview(str(path))
+    assert result["role"] == "assistant"
+    assert result["text"] == "prior assistant reply"
+
+
 def test_latest_preview_strips_leading_system_reminder(tmp_path):
     path = tmp_path / "s.jsonl"
     _write_jsonl(path, [

@@ -14,7 +14,12 @@ import pytest
 os.environ.setdefault("MAX_SESSIONS", "3")
 
 from jsonl_watcher import latest_custom_title  # noqa: E402
-from pty_manager import PtyManager, SessionStateTracker, TerminalSession  # noqa: E402
+from pty_manager import (  # noqa: E402
+    PtyManager,
+    SessionStateTracker,
+    TerminalSession,
+    normalize_cli_title,
+)
 
 
 def _line(**obj) -> str:
@@ -194,13 +199,41 @@ class TestRefreshCliTitle:
         assert s.name == "Original"
         assert s.name_source == "studio"
 
-    def test_osc_channel_serves_codex(self, monkeypatch):
+    def test_osc_channel_seeds_first_title_without_adopting(self, monkeypatch):
+        """The first OSC title a CLI emits is its startup default, not a rename."""
         s = make_session(harness="codex")
         monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
         s.tracker.feed("\x1b]0;Codex Work\x07")
-        assert self.mgr._refresh_cli_title(s) == "Codex Work"
-        assert s.name == "Codex Work"
+        assert self.mgr._refresh_cli_title(s) is None
+        assert s.name == "Original"
+        assert s.name_source == "studio"
+        assert s.cli_title == "Codex Work"  # seeded
+
+    def test_osc_channel_adopts_on_change_after_seed(self, monkeypatch):
+        s = make_session(harness="codex")
+        monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
+        s.tracker.feed("\x1b]0;Codex Work\x07")
+        assert self.mgr._refresh_cli_title(s) is None  # seed
+        s._cli_title_checked -= 10.0
+        s.tracker.feed("\x1b]0;Renamed Codex Session\x07")
+        assert self.mgr._refresh_cli_title(s) == "Renamed Codex Session"
+        assert s.name == "Renamed Codex Session"
         assert s.name_source == "cli"
+
+    def test_osc_channel_desktop_rename_survives_unchanged_title(self, monkeypatch):
+        """A desktop rename is not clobbered while the CLI's title hasn't moved."""
+        s = make_session(harness="codex")
+        monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
+        s.tracker.feed("\x1b]0;Codex Work\x07")
+        assert self.mgr._refresh_cli_title(s) is None  # seed
+        s.name = "Desktop Given Name"
+        s.name_source = "studio"
+        s._cli_title_checked -= 10.0
+        # Same title still, no change -> nothing adopts.
+        s.tracker.feed("\x1b]0;Codex Work\x07")
+        assert self.mgr._refresh_cli_title(s) is None
+        assert s.name == "Desktop Given Name"
+        assert s.name_source == "studio"
 
     def test_desktop_rename_then_newer_cli_rename_wins(self, tmp_path, monkeypatch):
         s = make_session()
@@ -221,11 +254,14 @@ class TestRefreshCliTitle:
         assert s.name_source == "cli"
 
     def test_same_title_as_current_name_is_not_adopted(self, monkeypatch):
+        # cli_title is None on a fresh session, so this is a SEED (never an
+        # adoption) regardless of whether it happens to match the name already.
         s = make_session(name="Already This")
         monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
         s.tracker.osc_title = "Already This"
         assert self.mgr._refresh_cli_title(s) is None
         assert s.name_source == "studio"
+        assert s.name == "Already This"
 
     def test_refresh_cli_titles_skips_dead_and_survives_errors(self, monkeypatch):
         alive = make_session("a")
@@ -247,9 +283,68 @@ class TestRefreshCliTitle:
         s = make_session()
         monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
         s.tracker.osc_title = "From The CLI"
-        self.mgr._refresh_cli_title(s)
+        self.mgr._refresh_cli_title(s)  # seed
+        s._cli_title_checked -= 10.0
+        s.tracker.osc_title = "From The CLI Renamed"
+        self.mgr._refresh_cli_title(s)  # change -> adopt
         self.mgr.sessions[s.id] = s
         row = self.mgr._session_to_dict(s)
-        assert row["name"] == "From The CLI"
+        assert row["name"] == "From The CLI Renamed"
         assert row["name_source"] == "cli"
-        assert row["cli_title"] == "From The CLI"
+        assert row["cli_title"] == "From The CLI Renamed"
+
+
+class TestNormalizeCliTitle:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("✳ Session 1", "Session 1"),
+            ("◑ Claude Code", "Claude Code"),
+            ("Hermes?", "Hermes?"),
+            ("�\xa0� browser-rpg", None),
+            ("claude", None),
+            ("Claude", None),
+            ("CODEX", None),
+            ("✳️  My App (dev)", "My App (dev)"),
+        ],
+    )
+    def test_worked_examples(self, raw, expected):
+        assert normalize_cli_title(raw) == expected
+
+    def test_none_input(self):
+        assert normalize_cli_title(None) is None
+
+    def test_blank_after_stripping_decoration_is_none(self):
+        assert normalize_cli_title("✳   ") is None
+
+    def test_caps_at_120_chars(self):
+        assert normalize_cli_title("z" * 500) == "z" * 120
+
+    def test_internal_punctuation_and_emoji_preserved(self):
+        assert normalize_cli_title("My-App_v2 (✨ shiny)") == "My-App_v2 (✨ shiny)"
+
+
+class TestRefreshCliTitleRepair:
+    def setup_method(self):
+        self.mgr = PtyManager()
+
+    def test_repairs_decorated_name_once(self, monkeypatch):
+        s = make_session(name="✳ Session 1")
+        s.name_source = "cli"
+        monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
+        assert self.mgr._refresh_cli_title(s) is None
+        assert s.name == "Session 1"
+
+    def test_never_blanks_a_name_it_cannot_normalize(self, monkeypatch):
+        s = make_session(name="� garbled")
+        s.name_source = "cli"
+        monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
+        assert self.mgr._refresh_cli_title(s) is None
+        assert s.name == "� garbled"  # left alone, never blanked
+
+    def test_does_not_repair_studio_named_sessions(self, monkeypatch):
+        s = make_session(name="✳ Studio Given")
+        s.name_source = "studio"
+        monkeypatch.setattr(self.mgr, "_get_jsonl_path", lambda sess: None)
+        assert self.mgr._refresh_cli_title(s) is None
+        assert s.name == "✳ Studio Given"  # untouched -- not CLI-sourced

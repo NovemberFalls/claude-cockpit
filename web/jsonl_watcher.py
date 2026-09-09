@@ -363,6 +363,7 @@ _SYSTEM_INJECTED_TAGS = (
     "local-command-stderr",
     "command-name",
     "command-message",
+    "command-args",
     "bash-input",
 )
 _LEADING_TAG_RE = re.compile(
@@ -372,6 +373,11 @@ _LEADING_TAG_RE = re.compile(
 _TRAILING_SYSTEM_REMINDER_RE = re.compile(
     r"<system-reminder(?:\s[^>]*)?>.*?</system-reminder>\s*$", re.DOTALL
 )
+# Residue that is nothing but leftover tag markup -- an empty/self-closed tag
+# like ``<command-args></command-args>`` that survived stripping. This is the
+# belt to the blocklist's braces: the next wrapper tag Claude Code invents
+# must not become a preview either.
+_TAG_ONLY_RESIDUE_RE = re.compile(r"^\s*<[^>]+>\s*(?:</[^>]+>)?\s*$")
 
 
 def _strip_system_injected(text: str) -> str | None:
@@ -510,6 +516,8 @@ def _preview_from_window(lines: list[str]) -> dict | None:
             found_text = _strip_system_injected(found_text)
             if not found_text:
                 continue
+        if _TAG_ONLY_RESIDUE_RE.match(found_text):
+            continue
         found_text = _strip_markdown(found_text)
         collapsed = " ".join(found_text.split())
         if not collapsed:

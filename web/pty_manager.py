@@ -310,6 +310,44 @@ _CONTEXT_PCT_RE = re.compile(r"context\D{0,30}?(\d{1,3})\s*%", re.IGNORECASE)
 # are titles -- OSC 8 (hyperlinks) and every other OSC number are ignored.
 _OSC_TITLE_RE = re.compile(r"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)")
 
+# Leading "decoration" run stripped by normalize_cli_title: status glyphs,
+# spinners, emoji, box-drawing -- anything that is not a character a real
+# title would legitimately start with.
+_TITLE_LEADING_DECORATION_RE = re.compile(
+    "^[^A-Za-z0-9_(\\[\"']*\\s*"
+)
+
+
+def normalize_cli_title(raw: Optional[str]) -> Optional[str]:
+    """Normalize a raw CLI-emitted terminal title, or None if unusable.
+
+    The CLI's terminal title is ``<status glyph> <label>`` and the glyph
+    animates (see the R-177 measurement in CLAUDE.md), so the raw OSC value is
+    never itself the session name -- only the label after the leading
+    decoration is. Internal punctuation/emoji are preserved; only the LEADING
+    run is stripped.
+
+    Returns None (never adopt) when: the value contains decode damage
+    (``�``), the remainder after stripping leading decoration and
+    trailing whitespace is empty, or it case-folds to "claude"/"codex" (every
+    CLI sets the title to its own binary name on startup -- not a rename).
+    """
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if "�" in value:
+        return None
+    value = _TITLE_LEADING_DECORATION_RE.sub("", value)
+    value = value.rstrip()
+    if not value:
+        return None
+    value = value[:120]
+    if value.casefold() in ("claude", "codex"):
+        return None
+    return value
+
 
 class SessionStateTracker:
     """Tracks activity state, tokens, and cost from PTY output."""
@@ -1870,6 +1908,13 @@ class PtyManager:
           ``SessionStateTracker``. This is the only Codex channel, since a Codex
           rollout carries no rename record at all.
 
+        The OSC channel signals a CHANGE, not a value (see the R-177 follow-up
+        in CLAUDE.md): the CLI's terminal title is ``<status glyph> <label>``
+        and the glyph animates, so the raw title is never itself the name. The
+        FIRST title a session's CLI emits is its startup default and is only
+        SEEDED (recorded, not adopted); only a later title that differs from
+        the seed is an active rename and gets adopted.
+
         Blocking disk I/O: call this OFF the event loop (the state ticker hands
         it to ``self._pty_executor``). Throttled to once per
         ``_CLI_TITLE_THROTTLE`` seconds per session.
@@ -1881,6 +1926,24 @@ class PtyManager:
             return None
         session._cli_title_checked = now
 
+        # Repair an already-corrupted name once per session: a name adopted
+        # before normalization existed (or before this session's title was
+        # normalized) may still carry leading decoration. Never blank a name
+        # the user can see -- only replace when the normalized form differs
+        # and is non-empty.
+        if session.name_source == "cli":
+            repaired = normalize_cli_title(session.name)
+            if repaired is not None and repaired != session.name:
+                logger.info(
+                    "Terminal %s name repaired (decoration stripped): %r -> %r",
+                    session.id,
+                    session.name,
+                    repaired,
+                )
+                session.name = repaired
+
+        # The claude-code JSONL custom-title record keeps precedence and is
+        # unchanged: when it supplies a title the OSC branch is not consulted.
         title: Optional[str] = None
         if getattr(session, "harness", "claude-code") == "claude-code":
             path = self._get_jsonl_path(session)
@@ -1889,25 +1952,38 @@ class PtyManager:
 
                 title = latest_custom_title(path)
 
-        if not title:
-            osc = session.tracker.osc_title
-            if isinstance(osc, str):
-                title = osc.strip()[:120] or None
+        if title:
+            if title.lower() in ("claude", "codex"):
+                return None
+            if title == session.cli_title or title == session.name:
+                return None  # unchanged -- must not re-log
+            session.cli_title = title
+            session.name = title
+            session.name_source = "cli"
+            logger.info("Terminal %s renamed by the CLI: %r", session.id, title)
+            return title
 
-        if not title:
+        # OSC channel: adopts on CHANGE, never on value.
+        osc_title = normalize_cli_title(session.tracker.osc_title)
+        if osc_title is None:
             return None
-        # Never adopt the launch command's own binary name: every CLI sets the
-        # terminal title to that on startup, which is not a rename.
-        if title.lower() in ("claude", "codex"):
+        if session.cli_title is None:
+            # SEED: the first title this CLI emitted is its startup default,
+            # not a rename. Record it, but do not touch name/name_source and
+            # do not log at INFO.
+            session.cli_title = osc_title
+            logger.debug(
+                "Terminal %s OSC title seeded (not adopted): %r", session.id, osc_title
+            )
             return None
-        if title == session.cli_title or title == session.name:
-            return None  # unchanged -- must not re-log
+        if osc_title == session.cli_title:
+            return None  # no churn, no re-log
 
-        session.cli_title = title
-        session.name = title
+        session.cli_title = osc_title
+        session.name = osc_title
         session.name_source = "cli"
-        logger.info("Terminal %s renamed by the CLI: %r", session.id, title)
-        return title
+        logger.info("Terminal %s renamed by the CLI: %r", session.id, osc_title)
+        return osc_title
 
     def refresh_cli_titles(self) -> None:
         """Run ``_refresh_cli_title`` over every live session (executor entry point)."""
