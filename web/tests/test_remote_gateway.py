@@ -9,6 +9,7 @@ eventually live inside.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 
@@ -229,6 +230,45 @@ def test_bad_code_is_400_with_the_one_message(rig):
     resp = client.post("/remote/v1/pair", json={"code": "ZZZZ-ZZZZ", "device_name": "P"})
     assert resp.status_code == 400
     assert resp.json() == {"error": "invalid or expired code"}
+
+
+@pytest.fixture
+def remote_caplog(caplog):
+    """cockpit.* loggers are configured with propagate=False (they route to
+    their own file sinks in production), so pytest's root-attached caplog
+    handler never sees their records unless attached directly."""
+    logger = logging.getLogger("cockpit.remote")
+    logger.addHandler(caplog.handler)
+    orig_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(orig_level)
+
+
+def test_failed_pair_attempts_are_logged_with_reason_but_never_code(rig, remote_caplog):
+    """W9: pair failures must be logged at WARNING with the reason and
+    client host, and must never log the code or a token."""
+    _backend, _store, client = rig
+    secret_code = "ZZZZ-ZZZZ"
+    resp = client.post("/remote/v1/pair", json={"code": secret_code, "device_name": "P"})
+    assert resp.status_code == 400
+    warnings = [r for r in remote_caplog.records if r.levelname == "WARNING"]
+    assert warnings, "expected a WARNING log line for the failed pair attempt"
+    for record in warnings:
+        text = record.getMessage()
+        assert secret_code not in text
+        assert "ZZZZZZZZ" not in text
+    assert any("unknown code" in r.getMessage() for r in warnings)
+
+
+def test_successful_pair_still_logs_info_not_warning(rig, remote_caplog):
+    _backend, store, client = rig
+    pair(client, store)
+    assert not any(r.levelname == "WARNING" for r in remote_caplog.records)
+    assert any("paired" in r.getMessage() for r in remote_caplog.records)
 
 
 # -- admin routes ----------------------------------------------------------

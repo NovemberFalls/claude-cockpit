@@ -872,6 +872,12 @@ async def pair(request: Request):
             str(body.get("code") or ""), str(body.get("device_name") or "")
         )
     except PairingError as exc:
+        client_host = request.client.host if request.client else "unknown"
+        logger.warning(
+            "Remote pairing attempt failed: %s (client %s)",
+            getattr(exc, "reason", "unknown code"),
+            client_host,
+        )
         return _error(400, str(exc))
     return {
         "device_id": device_id,

@@ -166,3 +166,111 @@ def test_corrupt_store_reads_as_empty(tmp_path):
     store = DeviceStore(path, now=Clock())
     assert store.list_devices() == []
     assert store.authenticate("anything") is None
+
+
+def test_concurrent_authenticate_never_raises_and_store_stays_valid_json(tmp_path):
+    """W9: 8 threads x 50 authenticate() calls on a real temp file must never
+    raise (even under real os.replace races) and the store must always
+    remain valid JSON afterwards."""
+    import threading
+
+    path = tmp_path / "remote_devices.json"
+    store = DeviceStore(path, now=Clock())
+    pairing = store.create_pairing()
+    device_id, token = store.redeem_pairing(pairing["code"], "Pixel")
+    assert device_id
+
+    errors: list[BaseException] = []
+
+    def worker():
+        for _ in range(50):
+            try:
+                device = store.authenticate(token)
+                assert device is not None
+                assert device.id == device_id
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    assert data["devices"][0]["id"] == device_id
+
+
+def test_last_seen_debounced_within_flush_window(tmp_path):
+    """Two authenticate() calls within _LAST_SEEN_FLUSH_S must persist once."""
+    clock = Clock()
+    path = tmp_path / "remote_devices.json"
+    store = DeviceStore(path, now=clock)
+    pairing = store.create_pairing()
+    _device_id, token = store.redeem_pairing(pairing["code"], "Pixel")
+
+    write_calls = []
+    real_write = store._write
+
+    def counting_write(data):
+        write_calls.append(1)
+        real_write(data)
+
+    store._write = counting_write  # type: ignore[method-assign]
+
+    store.authenticate(token)
+    clock.t += 5.0
+    store.authenticate(token)
+    assert len(write_calls) == 1  # debounced, no persist on the second call
+
+    clock.t += 30.0
+    store.authenticate(token)
+    assert len(write_calls) == 2  # window elapsed -- persists again
+
+
+def test_authenticate_survives_write_failure(tmp_path, monkeypatch):
+    """A failed bookkeeping write inside authenticate() must never fail the
+    request -- the device is still returned."""
+    path = tmp_path / "remote_devices.json"
+    store = DeviceStore(path, now=Clock())
+    pairing = store.create_pairing()
+    device_id, token = store.redeem_pairing(pairing["code"], "Pixel")
+
+    def boom(*_a, **_kw):
+        raise PermissionError("simulated WinError 5")
+
+    monkeypatch.setattr("remote_devices.os.replace", boom)
+
+    device = store.authenticate(token)
+    assert device is not None
+    assert device.id == device_id
+
+
+def test_pairing_error_carries_reason_for_logging(tmp_path):
+    store = DeviceStore(tmp_path / "remote_devices.json", now=Clock())
+    with pytest.raises(PairingError) as exc:
+        store.redeem_pairing("ZZZZ-ZZZZ", "Phone")
+    assert exc.value.reason == "unknown code"
+    assert str(exc.value) == PairingError.MESSAGE
+
+
+def test_pairing_error_reason_already_used(tmp_path):
+    clock = Clock()
+    store = DeviceStore(tmp_path / "remote_devices.json", now=clock)
+    pairing = store.create_pairing()
+    store.redeem_pairing(pairing["code"], "Phone")
+    with pytest.raises(PairingError) as exc:
+        store.redeem_pairing(pairing["code"], "Phone2")
+    assert exc.value.reason == "already used"
+
+
+def test_pairing_error_reason_expired(tmp_path):
+    clock = Clock()
+    store = DeviceStore(tmp_path / "remote_devices.json", now=clock)
+    pairing = store.create_pairing()
+    clock.t += 301.0
+    with pytest.raises(PairingError) as exc:
+        store.redeem_pairing(pairing["code"], "Phone")
+    assert exc.value.reason == "expired"
