@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.15] - 2026-09-08
+
+### Added
+- Studio runs the Cloudflare connector for you. Settings ▸ Remote gains a **Tunnel connector** card: paste the connector token, press Start, and `cloudflared` runs as a hidden child process that Studio restarts with backoff if it dies, optionally starting with the app. The card shows state, registered connections, restarts, the last error and a log tail. No console window, no Windows service, no scheduled task.
+- The connector token is stored with the provider API keys in `config.json`, never in the exportable `settings.json`, is never returned by any route, and is scrubbed out of the ring buffer and `cloudflared.log`.
+- A `cloudflared` that Studio did not start is reported as "another connector is already running outside Studio" — Studio never adopts or terminates a process it did not launch.
+
 ## [2.1.14] - 2026-09-08
 
 ### Changed
