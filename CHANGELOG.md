@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.13] - 2026-09-08
+
+### Added
+- Studio Remote: sessions carry `branch` (from the working directory's `.git/HEAD`) and `effort` (the live level the CLI reported, else the launch value). A pasted `<image name=... path=...>` tag in a user message is served as an image block; the list preview strips markdown markers.
+
 ## [2.1.12] - 2026-09-08
 
 ### Added
