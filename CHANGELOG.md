@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.21] - 2026-09-09
+
+### Fixed
+- Studio no longer leaves its Cloudflare connector running when the server dies uncleanly. Five orphans were measured, one per unclean exit. Identity is proven before anything is terminated: spawning records the connector PID, the owning Studio, and a hash of the argv (never the token), and the sweep acts only when the owner is gone AND the live process is a cloudflared AND its command line hashes equal. `cloudflared` is not a Studio process — another Plexar product runs the same binary.
+
+### Changed
+- A failed image paste now reports where its time went, from both ends: the client splits the upload into headers and body and includes the browser's own queueing figure, and the server logs bytes and its own handling time per upload. The server answers a 10 MB upload in under two seconds, so this exists to find the twenty that the client sees.
+
 ## [2.1.20] - 2026-09-09
 
 ### Fixed
