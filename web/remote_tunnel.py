@@ -20,10 +20,41 @@ error, and a log file is exactly where a secret must not be.
 A ``cloudflared`` that Studio did NOT start is not ours: ``foreign_running``
 says so, so the UI can explain "another connector is already running outside
 Studio" rather than fighting it or pretending the state is ours.
+
+ORPHANS, AND WHY IDENTITY IS PROVEN BEFORE ANYTHING IS TERMINATED (2026-09-09).
+``TunnelManager.stop()`` runs on the graceful shutdown path only, and on this
+app that path is the exception, not the rule (see ``temp_sweep``'s docstring and
+NOTE-197): the owner's machine held five orphaned Studio connectors, one per
+unclean server exit. Startup is the only moment reached however the last process
+died, so ``sweep_orphan()`` runs there.
+
+**R-185 is the rule that decides the design: ``cloudflared.exe`` is NOT a Studio
+process.** Several Plexar products run that same binary -- Plexar-LLM's tunnel
+is ``cloudflared tunnel run plexar-vllm`` under its own supervisor -- and
+terminating by process NAME took that product's service down. So Studio
+terminates only a connector it can PROVE it started, exactly the way
+``instance_guard`` gates its kill on ``SIDECAR_NAMES`` and ``temp_sweep`` gates
+its removal on a marker:
+
+  * spawning writes an OWNERSHIP RECORD (``connector-owner.json``, beside the
+    connector log) naming the connector pid, the Studio pid that spawned it, and
+    a SHA-256 of the exact argv;
+  * the sweep terminates that pid only when the record's Studio owner is gone,
+    the live process is a ``cloudflared``, AND the hash of its live command line
+    equals the recorded one. **A pid that now runs a different command line is
+    left alone** -- that is a recycled pid or another product's connector.
+  * the token never enters the record: a hash cannot be read back, and the argv
+    carries the secret.
+
+Adoption of a healthy orphan was considered and rejected: supervision here means
+owning the child's stdout pipe and its exit code, and neither can be reattached
+to a process we did not spawn. Terminate-and-respawn is the honest option.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -39,9 +70,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 import app_paths
+import instance_guard
 import settings_store
 
 logger = logging.getLogger("cockpit.tunnel")
+
+#: Executable basenames a Cloudflare connector can legitimately have. This is a
+#: NECESSARY condition for terminating a recorded pid, never a sufficient one --
+#: R-185 is precisely the mistake of treating it as sufficient.
+CONNECTOR_NAMES = {"cloudflared", "cloudflared.exe"}
 
 # Ring buffer of recent child output, in memory. 200 lines is enough to see a
 # start-up failure and the connection registrations that follow it.
@@ -139,6 +176,152 @@ def _build_argv(binary: str, token: str) -> list[str]:
 
 def _log_path() -> Path:
     return app_paths.data_path("logs", "cloudflared.log")
+
+
+def _owner_record_path() -> Path:
+    """Where the ownership record lives — beside the connector log."""
+    return app_paths.data_path("logs", "connector-owner.json")
+
+
+def _argv_fingerprint(argv) -> str:
+    """SHA-256 over the argv, joined by NUL.
+
+    A hash, not the argv itself: the token is an argv element and a record file
+    is exactly where a secret must not be. It is still a total identity test --
+    the sweep hashes the live command line and requires equality.
+    """
+    joined = "\x00".join(str(a) for a in argv)
+    return hashlib.sha256(joined.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def write_owner_record(pid: int, argv) -> None:
+    """Record that THIS Studio process spawned connector ``pid``. Best-effort."""
+    record = {
+        "connector_pid": pid,
+        "argv_sha256": _argv_fingerprint(argv),
+        "owner_pid": os.getpid(),
+        "owner_exe": Path(sys.executable).name,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        path = _owner_record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record), encoding="utf-8")
+    except OSError:
+        logger.debug("Could not write the connector ownership record", exc_info=True)
+
+
+def read_owner_record() -> dict | None:
+    """The stored record, or None when absent/unreadable/wrong-shaped."""
+    try:
+        data = json.loads(_owner_record_path().read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a missing or damaged record is simply "none"
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("connector_pid"), int):
+        return None
+    if not isinstance(data.get("argv_sha256"), str):
+        return None
+    return data
+
+
+def clear_owner_record() -> None:
+    """Forget the record — the connector it named is gone. Best-effort."""
+    try:
+        _owner_record_path().unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Could not clear the connector ownership record", exc_info=True)
+
+
+def _owning_studio_is_live(record: dict) -> bool:
+    """Is the Studio process that spawned this connector still running?
+
+    Both halves, the same reasoning ``temp_sweep`` applies: a bare pid-exists
+    test keeps a record alive forever the moment the OS recycles that pid.
+    """
+    pid = record.get("owner_pid")
+    if not isinstance(pid, int):
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        import psutil
+
+        proc = psutil.Process(pid)
+        if not proc.is_running():
+            return False
+        return proc.name() in instance_guard.SIDECAR_NAMES
+    except Exception:  # noqa: BLE001 - unidentifiable owner counts as gone
+        return False
+
+
+def sweep_orphan() -> dict:
+    """Terminate a connector this Studio install PROVABLY started and abandoned.
+
+    Called at startup, best-effort, NEVER raises. Returns a small verdict dict
+    for logging and tests. Verdicts:
+
+      ``no_record``      nothing was ever recorded, or the file is unreadable.
+      ``owner_alive``    the Studio that spawned it is still running — not ours
+                         to clean up, and killing it would break a live install.
+      ``gone``           the recorded pid is no longer running.
+      ``not_ours``       that pid is alive but is NOT a matching connector. **It
+                         is never touched** — this is the R-185 case.
+      ``terminated``     proven ours and orphaned; terminated.
+      ``error``          something failed; nothing was touched.
+    """
+    record = read_owner_record()
+    if record is None:
+        return {"verdict": "no_record"}
+    try:
+        if _owning_studio_is_live(record):
+            return {"verdict": "owner_alive", "pid": record["connector_pid"]}
+
+        import psutil
+
+        pid = record["connector_pid"]
+        try:
+            proc = psutil.Process(pid)
+            name = (proc.name() or "").lower()
+            cmdline = proc.cmdline()
+        except Exception:  # noqa: BLE001 - vanished/inaccessible: nothing to do
+            clear_owner_record()
+            return {"verdict": "gone", "pid": pid}
+
+        if name not in CONNECTOR_NAMES:
+            logger.info(
+                "Connector sweep: PID %d now runs %s — not ours, left alone", pid, name
+            )
+            clear_owner_record()
+            return {"verdict": "not_ours", "pid": pid, "reason": "name"}
+        if _argv_fingerprint(cmdline) != record["argv_sha256"]:
+            # A cloudflared that is not the one we started. R-185: another
+            # Plexar product runs this same binary. Never touched.
+            logger.info(
+                "Connector sweep: PID %d is a cloudflared with a different command "
+                "line — not ours, left alone", pid,
+            )
+            clear_owner_record()
+            return {"verdict": "not_ours", "pid": pid, "reason": "cmdline"}
+
+        logger.warning(
+            "Connector sweep: terminating orphaned connector PID %d left by a "
+            "previous Studio process", pid,
+        )
+        proc.terminate()
+        try:
+            proc.wait(timeout=_TERMINATE_GRACE)
+        except Exception:  # noqa: BLE001 - psutil.TimeoutExpired and friends
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001 - a survivor is reported, not fatal
+                logger.debug("kill() on the orphaned connector failed", exc_info=True)
+        clear_owner_record()
+        return {"verdict": "terminated", "pid": pid}
+    except Exception:  # noqa: BLE001 - startup must never fail because of this
+        logger.warning("Connector orphan sweep failed", exc_info=True)
+        return {"verdict": "error"}
 
 
 def _creation_flags() -> int:
@@ -248,6 +431,9 @@ class TunnelManager:
             self._proc = None
             self._started_at = None
             self._worker = None
+        # The child is gone by intent; the record would otherwise name a pid the
+        # OS is free to hand to something else.
+        clear_owner_record()
         return self.status()
 
     def status(self) -> dict:
@@ -424,6 +610,10 @@ class TunnelManager:
             self._proc = proc
             self._state = "running"
             self._started_at = datetime.now(timezone.utc).isoformat()
+        # Durable ownership, written BEFORE we block on the child's output: an
+        # unclean death of this process must still leave proof of what we
+        # started. Overwrites any previous record — there is one child at a time.
+        write_owner_record(proc.pid, argv)
         logger.info("cloudflared started (PID %d)", proc.pid)
 
         try:

@@ -328,3 +328,162 @@ def test_status_shape(client, monkeypatch):
         "pid", "started_at", "restarts", "connections", "last_error",
         "foreign_running", "log_tail",
     }
+
+
+# ---------------------------------------------------------------------------
+# Ownership record + orphan sweep
+#
+# NO REAL cloudflared IS EVER SPAWNED OR KILLED HERE. The "connector" is a
+# python child this test started, and `CONNECTOR_NAMES` is widened to the python
+# basename for the one test that terminates. R-185: identity is proven before
+# anything is terminated, and these tests exist to pin the negative half.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def record_env(tmp_path, monkeypatch):
+    """Redirect the ownership record into tmp_path."""
+    path = tmp_path / "connector-owner.json"
+    monkeypatch.setattr(remote_tunnel, "_owner_record_path", lambda: path)
+    return path
+
+
+def _spawn_sleeper():
+    """A python child that sleeps. Stands in for a connector process."""
+    import subprocess
+
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _dead_pid():
+    """A pid that is definitively not a live Studio sidecar."""
+    import subprocess
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_no_record_is_a_no_op(record_env):
+    assert remote_tunnel.sweep_orphan() == {"verdict": "no_record"}
+
+
+def test_spawning_writes_a_record_and_the_token_is_not_in_it(
+    tunnel_env, record_env, monkeypatch
+):
+    manager, _mode, _log = tunnel_env
+    remote_tunnel.set_token(FAKE_TOKEN)
+    manager.start()
+    for _ in range(50):
+        if remote_tunnel.read_owner_record() is not None:
+            break
+        time.sleep(0.05)
+    record = remote_tunnel.read_owner_record()
+    assert record is not None
+    assert record["connector_pid"] == manager.status()["pid"]
+    assert record["owner_pid"] == os.getpid()
+    assert FAKE_TOKEN not in record_env.read_text(encoding="utf-8")
+
+
+def test_stop_clears_the_record(tunnel_env, record_env):
+    manager, _mode, _log = tunnel_env
+    remote_tunnel.set_token(FAKE_TOKEN)
+    manager.start()
+    for _ in range(50):
+        if remote_tunnel.read_owner_record() is not None:
+            break
+        time.sleep(0.05)
+    manager.stop()
+    assert remote_tunnel.read_owner_record() is None
+
+
+def test_a_live_owning_studio_is_left_alone(record_env):
+    """Our own pid owns it, so the connector belongs to a running Studio."""
+    remote_tunnel.write_owner_record(999999, ["cloudflared", "tunnel", "run"])
+    assert remote_tunnel.sweep_orphan()["verdict"] == "owner_alive"
+    assert remote_tunnel.read_owner_record() is not None
+
+
+def test_a_vanished_connector_is_just_forgotten(record_env, monkeypatch):
+    pid = _dead_pid()
+    remote_tunnel.write_owner_record(pid, ["cloudflared", "tunnel", "run"])
+    monkeypatch.setattr(remote_tunnel, "_owning_studio_is_live", lambda rec: False)
+    verdict = remote_tunnel.sweep_orphan()
+    assert verdict["verdict"] in ("gone", "not_ours")
+    assert remote_tunnel.read_owner_record() is None
+
+
+def test_a_recorded_pid_with_a_different_command_line_is_NEVER_touched(
+    record_env, monkeypatch
+):
+    """R-185, pinned. Another product's connector must survive our sweep."""
+    proc = _spawn_sleeper()
+    try:
+        # Recorded as ours, but the fingerprint is of a DIFFERENT command line.
+        remote_tunnel.write_owner_record(proc.pid, ["cloudflared", "tunnel", "run", "x"])
+        monkeypatch.setattr(remote_tunnel, "_owning_studio_is_live", lambda rec: False)
+        # Widen the name gate so the ONLY thing that can save this process is
+        # the command-line check — otherwise the test would pass for the wrong
+        # reason (the name check refusing a python exe).
+        monkeypatch.setattr(
+            remote_tunnel, "CONNECTOR_NAMES",
+            {os.path.basename(sys.executable).lower()},
+        )
+        verdict = remote_tunnel.sweep_orphan()
+        assert verdict["verdict"] == "not_ours"
+        assert verdict["reason"] == "cmdline"
+        assert proc.poll() is None, "a non-matching process was terminated"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_a_cloudflared_by_name_only_is_never_touched(record_env, monkeypatch):
+    """Name matching is necessary, never sufficient — and here it fails first."""
+    proc = _spawn_sleeper()
+    try:
+        remote_tunnel.write_owner_record(proc.pid, ["cloudflared", "tunnel", "run"])
+        monkeypatch.setattr(remote_tunnel, "_owning_studio_is_live", lambda rec: False)
+        verdict = remote_tunnel.sweep_orphan()
+        assert verdict["verdict"] == "not_ours"
+        assert verdict["reason"] == "name"
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_a_proven_orphan_is_terminated(record_env, monkeypatch):
+    import psutil
+
+    proc = _spawn_sleeper()
+    try:
+        cmdline = psutil.Process(proc.pid).cmdline()
+        remote_tunnel.write_owner_record(proc.pid, cmdline)
+        monkeypatch.setattr(remote_tunnel, "_owning_studio_is_live", lambda rec: False)
+        monkeypatch.setattr(
+            remote_tunnel, "CONNECTOR_NAMES",
+            {os.path.basename(sys.executable).lower()},
+        )
+        verdict = remote_tunnel.sweep_orphan()
+        assert verdict == {"verdict": "terminated", "pid": proc.pid}
+        proc.wait(timeout=10)
+        assert proc.poll() is not None
+        assert remote_tunnel.read_owner_record() is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_the_sweep_never_raises(record_env, monkeypatch):
+    remote_tunnel.write_owner_record(1234, ["cloudflared"])
+    monkeypatch.setattr(
+        remote_tunnel, "_owning_studio_is_live",
+        lambda rec: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert remote_tunnel.sweep_orphan() == {"verdict": "error"}

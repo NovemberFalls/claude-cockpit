@@ -177,6 +177,13 @@ async def lifespan(app: FastAPI):
     # Studio-managed Cloudflare connector: same best-effort posture as managed
     # vLLM. `remote_tunnel` is imported near the bottom of this module (with the
     # rest of the remote wiring); this body runs long after import.
+    # The sweep runs FIRST and unconditionally — including when autostart is
+    # off. An orphan left by an unclean exit must not outlive the intent that
+    # started it, and only a connector proven ours is ever touched (R-185).
+    try:
+        await asyncio.to_thread(remote_tunnel.sweep_orphan)
+    except Exception:
+        logger.warning("Connector orphan sweep failed — continuing", exc_info=True)
     try:
         await asyncio.to_thread(remote_tunnel.autostart_if_configured)
     except Exception:
