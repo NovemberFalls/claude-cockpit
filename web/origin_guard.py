@@ -30,7 +30,7 @@ mean "a legitimate script", it means "not the UI", and it is refused. The only
 clients of `/ws/terminal/{id}` in existence are xterm.js in `TerminalPane.jsx`
 and `PopoutTerminal.jsx`; nothing in `tests/` connects to it.
 
-**`/remote/v1/*` IS exempt, and it is the only exemption.** A phone reaching
+**`/remote/v1/*` IS exempt.** A phone reaching
 Studio through a tunnel presents a public `Host` (`studio.example.com`) and no
 `Origin` at all, so the loopback-Host clause refuses it and the Origin clause
 cannot help. The trust boundary on that prefix is the **device token** instead
@@ -40,6 +40,11 @@ rebinding page — which can read replies — still cannot produce a token it do
 not hold. Every other path keeps both clauses unchanged, including the
 desktop-only `/api/remote/*` admin routes, which are ordinary `/api` routes and
 must stay origin-guarded.
+
+**`GET /.well-known/plexar` is the SECOND and only other exemption** — the
+estate-wide product handshake, unauthenticated by design. See
+`is_handshake_path` for what that discloses and why it is accepted. Both
+exemptions are asked through ONE predicate, `is_origin_exempt`.
 
 **`/shim/*` and `/v1/*` need no exemption.** They are driven by the `claude` CLI
 via `ANTHROPIC_BASE_URL`, a non-browser client that sends no Origin and addresses
@@ -102,6 +107,39 @@ def is_remote_path(path: str) -> bool:
     (the desktop-only admin routes) is not this surface at all.
     """
     return path == "/remote/v1" or path.startswith("/remote/v1/")
+
+
+def is_handshake_path(path: str) -> bool:
+    """True for the estate-wide product handshake, `GET /.well-known/plexar`.
+
+    Exempt for the SAME reason `/remote/v1/*` is: a phone (or any Plexar hub)
+    reaching this machine through a tunnel presents a public `Host` and no
+    `Origin`, so both clauses would refuse it. Unlike `/remote/v1/*` there is no
+    device token here — the route is deliberately unauthenticated, because
+    `authenticated: false` is an answer and a 401 merges "wrong credential" with
+    "server down", whose remedies are opposite.
+
+    What that discloses, stated plainly: a drive-by page can learn that a Plexar
+    product exists at this address and what version it is. Accepted because the
+    route has NO side effect, returns no credential, no path and no hostname,
+    and because a page can already infer the product's presence from a 403 on a
+    guarded path versus a connection refusal. **Any change that adds a side
+    effect or a secret to that route invalidates this reasoning.**
+
+    Exact match only: `/.well-known/plexar/x` is a different route and inherits
+    nothing.
+    """
+    return path == "/.well-known/plexar"
+
+
+def is_origin_exempt(path: str) -> bool:
+    """The single arbiter of "this path is not browser-origin guarded".
+
+    One predicate, one place: the middleware and any future caller ask this
+    rather than each keeping its own list, which is how a second, disagreeing
+    guard gets born.
+    """
+    return is_remote_path(path) or is_handshake_path(path)
 
 
 def _normalise_origin(origin: str) -> str:

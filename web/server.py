@@ -277,11 +277,13 @@ app.add_middleware(
 # and why an Origin==Host equality check is insufficient here.
 @app.middleware("http")
 async def _origin_guard_middleware(request: Request, call_next):
-    # The ONE exemption: `/remote/v1/*` is reached by a phone through a tunnel,
-    # which presents a public Host and no Origin, so both clauses would refuse
-    # it. Its boundary is the device token instead — see origin_guard's
-    # docstring. `/api/remote/*` (desktop-only admin) is NOT exempt.
-    if origin_guard.is_remote_path(request.url.path):
+    # The exemptions, asked through ONE predicate so a second list cannot drift:
+    # `/remote/v1/*` (reached by a phone through a tunnel, which presents a
+    # public Host and no Origin — its boundary is the device token instead) and
+    # `GET /.well-known/plexar` (the unauthenticated product handshake, which
+    # carries no secret and has no side effect). See origin_guard's docstring.
+    # `/api/remote/*` (desktop-only admin) is NOT exempt.
+    if origin_guard.is_origin_exempt(request.url.path):
         return await call_next(request)
     reason = origin_guard.check_http(
         request.headers.get("host", ""),
@@ -6973,6 +6975,11 @@ def _remote_codex_transcript(session, before: int | None, limit: int):
     return get_codex_transcript(getattr(session, "id", "") or "", before, limit)
 
 
+# Held in a module global as well as handed to the gateway: the handshake route
+# below needs the SAME store, and a second DeviceStore over the same file would
+# be a second cache of the same truth.
+_remote_device_store = DeviceStore(app_paths.data_path("remote_devices.json"))
+
 # Wired at IMPORT time, not in lifespan: a TestClient-based test constructs the
 # app without ever running startup, and an unconfigured gateway would 500 there
 # while working in production — the kind of split that hides a real defect.
@@ -7000,8 +7007,65 @@ remote_gateway.configure(
         save_upload=_remote_save_upload,
         git_branch=lambda workdir: _git_branch_from_head(workdir)[1] if workdir else None,
     ),
-    DeviceStore(app_paths.data_path("remote_devices.json")),
+    _remote_device_store,
 )
+
+
+# ── The Plexar handshake ─────────────────────────────────
+#
+# One route, shared by every Plexar product (Studio, Chat, LLM, Email), so a hub
+# can ask "what are you, and am I signed in?" without knowing the product first.
+# The products' APIs are deliberately NOT unified — only this handshake is.
+
+# What Studio offers a paired phone once remote access is on. Empty when it is
+# off: a client must hide a surface whose capability is absent rather than
+# render a control that 404s.
+_HANDSHAKE_CAPABILITIES = ("sessions", "terminal", "chat", "spawn", "upload", "files")
+
+
+def _handshake_authenticated(request: Request) -> bool:
+    """True only for a request carrying a currently-valid device bearer token.
+
+    Deliberately NOT routed through `remote_gateway.require_device`, which
+    RAISES 401/404. Here a missing, malformed or revoked token is simply
+    `authenticated: false` — an answer, where a 401 would merge "wrong
+    credential" with "server down" and those have opposite remedies.
+    """
+    if not remote_gateway.remote_enabled():
+        return False
+    try:
+        token = remote_gateway._bearer_token(request.headers)
+        return bool(token) and _remote_device_store.authenticate(token) is not None
+    except Exception:  # noqa: BLE001 - the handshake answers 200 whenever we are up
+        logger.warning("Handshake device lookup failed", exc_info=True)
+        return False
+
+
+@app.get("/.well-known/plexar")
+async def plexar_handshake(request: Request):
+    """The estate-wide handshake. Always 200 while the process is up.
+
+    Origin-exempt (`origin_guard.is_origin_exempt`) and unauthenticated. The
+    body carries no secret, no filesystem path, no hostname and no private
+    count — a reviewer must be able to check that by reading the literal below,
+    and a test asserts it.
+
+    It answers 200 with empty capabilities even when `remote.enabled` is false.
+    That is the ONE place the remote surface is not 404-when-disabled, and it is
+    deliberate: a hub must be able to tell "off" from "absent", so the user sees
+    "remote access is off" instead of a useless "unreachable".
+    """
+    enabled = remote_gateway.remote_enabled()
+    return JSONResponse({
+        "plexar": 1,
+        "product": "studio",
+        "name": "Plexar Studio",
+        "version": _app_version(),
+        "authenticated": _handshake_authenticated(request),
+        "auth": "device-token",
+        "capabilities": list(_HANDSHAKE_CAPABILITIES) if enabled else [],
+        "detail": {"remote_enabled": enabled},
+    })
 
 
 # ── Static files ─────────────────────────────────────────

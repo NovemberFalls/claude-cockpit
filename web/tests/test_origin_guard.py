@@ -270,7 +270,43 @@ def test_remote_v1_paths_are_exempt(path):
         "/api/remote/pairings",
         "/api/terminals",
         "/remotely/v1/hello",
+        "/.well-known/plexar",  # exempt, but by the OTHER predicate — not this one
     ],
 )
 def test_everything_else_keeps_both_clauses(path):
     assert not origin_guard.is_remote_path(path)
+
+
+# ── The second exemption: GET /.well-known/plexar (the product handshake) ──
+
+
+def test_the_handshake_is_exempt_through_the_one_arbiter():
+    """Both carve-outs are asked through `is_origin_exempt`, deliberately.
+
+    Two predicates and two call sites is how a second, disagreeing guard gets
+    born — the shape this module exists to avoid.
+    """
+    assert origin_guard.is_origin_exempt("/.well-known/plexar")
+    assert origin_guard.is_origin_exempt("/remote/v1/hello")
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/.well-known/plexar/x", "/.well-known/plexarx", "/api/terminals", "/shim/vllm"],
+)
+def test_the_handshake_exemption_is_exactly_one_path(path):
+    assert not origin_guard.is_origin_exempt(path)
+
+
+@pytest.mark.asyncio
+async def test_handshake_reachable_from_a_tunnel_host_while_api_is_not():
+    """Positive and negative in one arm: the exemption is one route wide.
+
+    A tunnel `Host` with no `Origin` reaches the handshake and is still refused
+    on `/api/terminals`. If the carve-out ever widens, the second half reddens.
+    """
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://studio.example.com"
+    ) as c:
+        assert (await c.get("/.well-known/plexar")).status_code == 200
+        assert (await c.get("/api/terminals")).status_code == 403
