@@ -350,6 +350,8 @@ export default function RemoteSettings({ get, setField }) {
   const [tokenEditing, setTokenEditing] = useState(false);
   const [tokenError, setTokenError] = useState(null);
   const [logOpen, setLogOpen] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const [autostartError, setAutostartError] = useState(null);
 
   const [now, setNow] = useState(Date.now());
   const [revokeTarget, setRevokeTarget] = useState(null);
@@ -526,6 +528,40 @@ export default function RemoteSettings({ get, setField }) {
       if (mounted.current) setTunnelBusy(false);
     }
   }, [tokenDraft, loadTunnel]);
+
+  // The toggle saves itself (its own PUT to /api/settings) rather than
+  // waiting for the page's Save button — "run when Studio starts" is
+  // supposed to also mean "run right now", and the server's settings PUT
+  // handler reconciles the connector synchronously with the write. Poll the
+  // tunnel status right away, plus once more shortly after, so the state dot
+  // moves within about a second instead of waiting for the next 3s tick.
+  const toggleAutostart = useCallback(
+    async (checked) => {
+      setField("remote.tunnel.autostart", checked);
+      setField("remote.tunnel.enabled", checked);
+      setAutostartBusy(true);
+      setAutostartError(null);
+      try {
+        const res = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ remote: { tunnel: { autostart: checked, enabled: checked } } }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setAutostartError(data?.error || "Could not save");
+          return;
+        }
+        await loadTunnel();
+        setTimeout(loadTunnel, 1000);
+      } catch {
+        setAutostartError("Could not save");
+      } finally {
+        if (mounted.current) setAutostartBusy(false);
+      }
+    },
+    [setField, loadTunnel]
+  );
 
   const removeToken = useCallback(async () => {
     setTunnelBusy(true);
@@ -1065,13 +1101,16 @@ export default function RemoteSettings({ get, setField }) {
             type="checkbox"
             data-testid="tunnel-autostart-toggle"
             checked={autostartDraft}
-            onChange={(e) => {
-              setField("remote.tunnel.autostart", e.target.checked);
-              setField("remote.tunnel.enabled", e.target.checked);
-            }}
+            disabled={autostartBusy}
+            onChange={(e) => toggleAutostart(e.target.checked)}
           />
           <span style={{ fontSize: 12, color: "var(--cc-fg)" }}>Run when Studio starts</span>
         </label>
+        {autostartError && (
+          <Callout token="var(--cc-error)" testId="tunnel-autostart-error" alert>
+            {autostartError}
+          </Callout>
+        )}
 
         {tunnel?.foreign_running && (
           <Callout token="var(--cc-waiting)" testId="tunnel-foreign-note">

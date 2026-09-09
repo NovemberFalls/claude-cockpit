@@ -276,6 +276,38 @@ class TunnelManager:
         with self._lock:
             return list(self._lines)
 
+    def reconcile(self) -> dict:
+        """Bring the running connector in line with current settings + token.
+
+        Called right after a settings write touches `remote.tunnel`, or after
+        a token save/delete — so "run when Studio starts" (autostart) also
+        means "run right now" instead of waiting for the next launch. Never
+        raises: this rides inside the settings response path, and a broken
+        connector must not turn into a broken settings save.
+        """
+        try:
+            settings = _tunnel_settings()
+            enabled = bool(settings.get("enabled", False))
+            autostart = bool(settings.get("autostart", True))
+            with self._lock:
+                state = self._state
+            if not enabled:
+                if state != "stopped":
+                    self.stop()
+                return self.status()
+            if (
+                enabled
+                and autostart
+                and get_token() is not None
+                and _resolve_binary() is not None
+                and state in ("stopped", "crashed")
+            ):
+                self.start()
+            return self.status()
+        except Exception:  # noqa: BLE001 - reconcile must never raise into a caller
+            logger.error("Tunnel reconcile failed", exc_info=True)
+            return self.status()
+
     def set_token(self, token: str) -> None:
         set_token(token)
 
@@ -483,6 +515,7 @@ async def tunnel_put_token(request: Request):
         return JSONResponse({"error": "token must not be empty"}, status_code=400)
     manager.set_token(token.strip())
     logger.info("Cloudflare connector token saved")
+    manager.reconcile()
     return Response(status_code=204)
 
 

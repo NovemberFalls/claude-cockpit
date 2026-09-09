@@ -63,6 +63,9 @@ function makeFetchMock({ tunnel = TUNNEL_STOPPED, tokenOk = true } = {}) {
     if (url === "/api/remote/cloudflared") {
       return jsonResponse({ installed: true, path: "cloudflared", version: null, running: false });
     }
+    if (url === "/api/settings" && method === "PUT") {
+      return jsonResponse({ path: "settings.json", settings: {} });
+    }
     return jsonResponse({});
   });
   fn.calls = calls;
@@ -119,6 +122,27 @@ describe("RemoteSettings — tunnel connector", () => {
     await waitFor(() => expect(screen.getByTestId("tunnel-stop")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("tunnel-stop"));
     await waitFor(() => expect(fetchMock.calls).toContain("POST /api/remote/tunnel/stop"));
+  });
+
+  it("toggling 'Run when Studio starts' saves immediately and re-polls status", async () => {
+    const fetchMock = makeFetchMock();
+    globalThis.fetch = fetchMock;
+    const props = makeSettingsProps({
+      remote: { enabled: true, hostname: "", tunnel: { enabled: false, autostart: true } },
+    });
+    render(<RemoteSettings {...props} />);
+
+    await waitFor(() => expect(screen.getByTestId("tunnel-autostart-toggle")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("tunnel-autostart-toggle"));
+
+    await waitFor(() => expect(fetchMock.calls).toContain("PUT /api/settings"));
+    // The toggle saves itself, not through the page's draft-only setField —
+    // but the draft still gets updated so the page's own Save stays in sync.
+    expect(props.setField).toHaveBeenCalledWith("remote.tunnel.autostart", true);
+    expect(props.setField).toHaveBeenCalledWith("remote.tunnel.enabled", true);
+    // Re-polls the tunnel status right away rather than waiting for the next tick.
+    const getCallsAfterToggle = fetchMock.calls.filter((c) => c === "GET /api/remote/tunnel").length;
+    expect(getCallsAfterToggle).toBeGreaterThanOrEqual(2);
   });
 
   it("disables Start with a reason when no token is set", async () => {

@@ -3129,6 +3129,16 @@ async def put_settings(request: Request):
     # palettes and keybindings, and the line should stay short.
     sections = ", ".join(sorted(body)) if isinstance(body, dict) else ""
     logger.info("Settings updated (sections: %s)", sections or "none")
+
+    # "Run when Studio starts" must act NOW, not at the next launch: a patch
+    # touching remote.tunnel reconciles the connector immediately rather than
+    # only being read by the startup hook. Never let this fail the save.
+    if isinstance(body, dict) and isinstance(body.get("remote"), dict) and "tunnel" in body.get("remote", {}):
+        try:
+            await asyncio.to_thread(remote_tunnel.manager.reconcile)
+        except Exception:
+            logger.error("Tunnel reconcile after settings save failed", exc_info=True)
+
     return JSONResponse({"path": settings_store.settings_path(), "settings": effective})
 
 

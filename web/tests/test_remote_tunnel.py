@@ -164,6 +164,38 @@ def test_supervisor_stops_itself_when_there_is_no_token(tunnel_env):
     assert manager.status()["last_error"] == "no token"
 
 
+def test_reconcile_starts_immediately_when_enabled_autostart_and_token_set(tunnel_env):
+    """'Run when Studio starts' must also mean 'run right now'."""
+    manager, _mode, _log = tunnel_env
+    remote_tunnel.set_token(FAKE_TOKEN)
+    assert manager.status()["state"] == "stopped"
+
+    manager.reconcile()
+    assert _wait_for(lambda: manager.status()["state"] == "running")
+    manager.stop()
+
+
+def test_reconcile_stops_a_running_tunnel_when_disabled(tunnel_env, monkeypatch):
+    manager, _mode, _log = tunnel_env
+    remote_tunnel.set_token(FAKE_TOKEN)
+    manager.start()
+    assert _wait_for(lambda: manager.status()["state"] == "running")
+
+    monkeypatch.setattr(
+        remote_tunnel,
+        "_tunnel_settings",
+        lambda: {"enabled": False, "autostart": True, "cloudflared_path": ""},
+    )
+    manager.reconcile()
+    assert manager.status()["state"] == "stopped"
+
+
+def test_reconcile_is_a_noop_without_a_token(tunnel_env):
+    manager, _mode, _log = tunnel_env
+    manager.reconcile()
+    assert manager.status()["state"] == "stopped"
+
+
 def test_token_is_stored_in_config_json_not_settings_json(tunnel_env, tmp_path):
     remote_tunnel.set_token(FAKE_TOKEN)
     data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
@@ -251,6 +283,15 @@ def test_put_token_is_204_and_the_token_is_never_echoed(client, monkeypatch):
 
     log = c.get("/api/remote/tunnel/log")
     assert FAKE_TOKEN not in json.dumps(log.json())
+
+
+def test_put_token_reconciles_and_starts_when_enabled_and_autostart(client, monkeypatch):
+    c, calls = client
+    monkeypatch.setattr(remote_tunnel, "_resolve_binary", lambda: "cloudflared")
+
+    res = c.put("/api/remote/tunnel/token", json={"token": FAKE_TOKEN})
+    assert res.status_code == 204
+    assert calls["start"] == 1
 
 
 def test_put_empty_token_is_400(client):
