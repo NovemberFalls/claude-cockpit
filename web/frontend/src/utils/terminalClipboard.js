@@ -26,6 +26,33 @@ const _READ_STRATEGY_MS = 2000;
 const _READ_PHASE_MS = 6000;
 const _UPLOAD_MS = 20000;
 
+// The upload phase is not one span. A `fetch` can sit in the browser's
+// per-origin connection pool before a byte leaves the process (Studio holds a
+// terminals poll, a workflows poll per session, provider health polls and a
+// WebSocket per pane against the same origin), then spend time on the wire,
+// then spend more time streaming the body. Those three have DIFFERENT remedies,
+// so the failure toast must not report them as one number. `PerformanceResource-
+// Timing` is the only client-side view of the queueing portion; it is absent in
+// jsdom and for a request that never completed, which is why every read of it is
+// optional and never throws.
+const _UPLOAD_PATH = "/api/upload";
+
+function uploadResourceUrl() {
+  try { return new URL(_UPLOAD_PATH, window.location.href).href; }
+  catch { return _UPLOAD_PATH; }
+}
+
+/** Milliseconds this upload spent queued/stalled before its request was sent,
+ *  or null when the browser cannot tell us (no entry yet, or no API). */
+function queuedMsSince(perfStart) {
+  try {
+    const entries = performance.getEntriesByName(uploadResourceUrl(), "resource") || [];
+    const entry = entries.filter((e) => e.startTime >= perfStart - 1).pop();
+    if (!entry || !entry.requestStart) return null;
+    return Math.max(0, entry.requestStart - entry.startTime);
+  } catch { return null; }
+}
+
 export function createTerminalClipboard({ captureTarget, isCurrent, notify, readNative = nativeImage,
   clipboard = navigator.clipboard,
   upload = (body, options) => fetch("/api/upload", { method: "POST", body, signal: options.signal }) }) {
@@ -127,15 +154,34 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
         const form = new FormData();
         form.append("files", new File([image], `paste.${ext}`, { type: image.type }));
         const uploadStart = Date.now();
+        let perfStart = 0;
+        try { perfStart = performance.now(); } catch { perfStart = 0; }
+        let headersMs = null;
+        let bodyMs = null;
+        // The breakdown is computed at REPORT time, not at fetch time, so a
+        // timeout (where nothing finished) and a late failure (where the
+        // resource entry exists) both say as much as they honestly can.
+        const uploadDetail = () => {
+          const parts = [headersMs == null ? "headers pending" : `headers ${(headersMs / 1000).toFixed(1)}s`];
+          if (headersMs != null) {
+            parts.push(bodyMs == null ? "body pending" : `body ${((bodyMs - headersMs) / 1000).toFixed(1)}s`);
+          }
+          const queued = queuedMsSince(perfStart);
+          if (queued != null) parts.push(`queued ${(queued / 1000).toFixed(1)}s`);
+          return parts.join(", ");
+        };
         const uploadTimer = setTimeout(() => {
           uploadElapsedMs = Date.now() - uploadStart;
           request.cancel(`Paste timed out after ${(_UPLOAD_MS / 1000).toFixed(1)}s while uploading the image ` +
-            `(clipboard ${(clipboardElapsedMs / 1000).toFixed(1)}s, upload ${(uploadElapsedMs / 1000).toFixed(1)}s); please try pasting again`);
+            `(clipboard ${(clipboardElapsedMs / 1000).toFixed(1)}s, upload ${(uploadElapsedMs / 1000).toFixed(1)}s` +
+            `: ${uploadDetail()}); please try pasting again`);
         }, _UPLOAD_MS);
         let response, data;
         try {
           response = await wait(() => upload(form, { signal: controller.signal }));
+          headersMs = Date.now() - uploadStart;
           data = await wait(() => response.json());
+          bodyMs = Date.now() - uploadStart;
         } finally {
           clearTimeout(uploadTimer);
           uploadElapsedMs = Date.now() - uploadStart;

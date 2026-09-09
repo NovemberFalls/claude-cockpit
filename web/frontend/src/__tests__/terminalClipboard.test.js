@@ -92,7 +92,21 @@ describe("terminal clipboard gesture pipeline", () => {
     await vi.advanceTimersByTimeAsync(20000);
     await pending;
     expect(f.notify).toHaveBeenCalledWith(
-      expect.stringMatching(/timed out after 20\.0s while uploading the image \(clipboard 0\.0s, upload 20\.0s\)/), "error");
+      expect.stringMatching(
+        /timed out after 20\.0s while uploading the image \(clipboard 0\.0s, upload 20\.0s: headers pending\)/), "error");
+  });
+  it("attributes the upload to headers vs body when the response arrives but the body never does", async () => {
+    vi.useFakeTimers();
+    let finishHeaders;
+    const upload = vi.fn(() => new Promise((resolve) => { finishHeaders = resolve; }));
+    const f = fixture({ upload });
+    const pending = f.paste(event(image()));
+    await vi.advanceTimersByTimeAsync(4000);
+    finishHeaders({ ok: true, json: () => new Promise(() => {}) });
+    await vi.advanceTimersByTimeAsync(16000);
+    await pending;
+    expect(f.notify).toHaveBeenCalledWith(
+      expect.stringMatching(/upload 20\.0s: headers 4\.0s, body pending/), "error");
   });
   it("reports our own timeout reason, never the browser's AbortError, when the aborted fetch wins the race", async () => {
     vi.useFakeTimers();

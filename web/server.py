@@ -643,15 +643,27 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
     """Accept multipart file uploads, save to temp dir, return paths."""
     saved_paths: list[str] = []
     errors: list[str] = []
+    # An INDEPENDENT clock for the paste path. The browser reports one elapsed
+    # time for the whole upload; if the client says 20 s and this line says the
+    # request was handled in 0.3 s, the time went to queueing or transport and
+    # not to this server. Logged once per request, at INFO, with the byte count.
+    started = _time.monotonic()
+    total_bytes = 0
 
     for upload in files:
         content = await upload.read()
+        total_bytes += len(content)
         saved, error = await _save_one_upload(upload.filename or "", content)
         if error:
             errors.append(error)
             continue
         if saved:
             saved_paths.append(saved)
+
+    logger.info(
+        "Upload handled: %d file(s), %d bytes, %d saved, %d rejected, %.3fs server-side",
+        len(files), total_bytes, len(saved_paths), len(errors), _time.monotonic() - started,
+    )
 
     result: dict = {"paths": saved_paths}
     if errors:
