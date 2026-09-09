@@ -237,3 +237,76 @@ def test_claude_message_assistant_role_does_not_get_tag_extraction():
     assert message["blocks"] == [
         {"type": "text", "text": '<image name=[Image #1] path="C:\\a.png"></image>'}
     ]
+
+
+# -- the BARE tag form, which is the one real data actually uses (R-187) -------
+#
+# Every case above uses `/>` or `>...</image>`. MEASURED 2026-09-09: across 27
+# Codex rollouts on the owner's machine there are 520 image tags and EVERY ONE
+# is the bare `>` form -- zero self-closing, zero open/close. The old pattern
+# therefore matched NOTHING in real data while all of its tests passed, because
+# the tests invented a shape the harnesses do not write. These cases pin the
+# real one.
+
+
+def test_extract_image_tags_bare_form_is_the_real_shape():
+    text = '<image name=[Image #1] path="C:\\shots\\one.png">'
+    remaining, paths = remote_gateway._extract_image_tags(text)
+    assert paths == ["C:\\shots\\one.png"]
+    assert remaining == ""
+
+
+def test_extract_image_tags_bare_form_keeps_surrounding_prose():
+    text = 'look <image name=[Image #1] path="C:\\a.png"> at this'
+    remaining, paths = remote_gateway._extract_image_tags(text)
+    assert paths == ["C:\\a.png"]
+    assert remaining == "look at this"
+
+
+def test_extract_image_tags_bare_and_closed_forms_mix():
+    text = (
+        '<image name=[Image #1] path="C:\\a.png">'
+        " then "
+        '<image name=[Image #2] path="C:\\b.png"></image>'
+    )
+    remaining, paths = remote_gateway._extract_image_tags(text)
+    assert paths == ["C:\\a.png", "C:\\b.png"]
+    assert remaining == "then"
+
+
+def test_codex_user_message_yields_an_image_block():
+    """A Codex row carrying an attachment renders as an image on the phone.
+
+    `_codex_message` used to emit text only, so under Codex an attachment could
+    never render and the raw tag showed as literal markup in the bubble.
+    """
+    row = {
+        "index": 7,
+        "role": "user",
+        "text": '<image name=[Image #1] path="C:\\shots\\one.png">',
+        "timestamp": "2026-09-09T18:05:00Z",
+    }
+    out = remote_gateway._codex_message(row)
+    assert out["blocks"] == [{"type": "image", "path": "C:\\shots\\one.png"}]
+
+
+def test_codex_user_message_keeps_prose_beside_the_image():
+    row = {"index": 8, "role": "user", "text": 'see <image name=[Image #1] path="C:\\a.png"> here'}
+    out = remote_gateway._codex_message(row)
+    assert out["blocks"] == [
+        {"type": "text", "text": "see here"},
+        {"type": "image", "path": "C:\\a.png"},
+    ]
+
+
+def test_codex_assistant_message_is_left_text_only():
+    """Only a USER row carries attachments; an assistant row must not be rewritten."""
+    row = {"index": 9, "role": "assistant", "text": '<image name=[Image #1] path="C:\\a.png">'}
+    out = remote_gateway._codex_message(row)
+    assert [b["type"] for b in out["blocks"]] == ["text"]
+
+
+def test_codex_plain_user_message_is_unchanged():
+    row = {"index": 10, "role": "user", "text": "no attachment here"}
+    out = remote_gateway._codex_message(row)
+    assert out["blocks"] == [{"type": "text", "text": "no attachment here"}]

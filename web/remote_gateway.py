@@ -1287,12 +1287,16 @@ def _serve_roots(backend: RemoteBackend, session: Any = None) -> list[str]:
 
 
 #: `<image name=[Image #1] path="C:\...">  </image>` -- the desktop's own
-#: image-attachment tag, written into the text block Claude Code sees. Matches
-#: the self-closing form and the open/close form with whitespace (including
-#: newlines) between the tags; the terminator is `</image>` with optional
-#: interior whitespace before the closing bracket.
+#: image-attachment tag, written into the text block the harness sees.
+#: THE CLOSING `</image>` IS OPTIONAL, and the bare form is what real data uses.
+#: MEASURED 2026-09-09 (R-187): 27 Codex rollouts on this machine carry 520 of
+#: these tags and EVERY ONE is the bare `>` form -- not one self-closing or
+#: open/close instance exists, and the last 40 Claude transcripts carry no tag at
+#: all. The previous pattern required `/>` or `>` + whitespace + `</image>`, so it
+#: matched ZERO real tags; every test pinning it used an invented shape. This
+#: pattern is a strict SUPERSET of that one, so those tests still hold.
 _IMAGE_TAG_RE = re.compile(
-    r'<image\b[^>]*?\bpath="([^"]*)"[^>]*?(?:/>|>\s*</image\s*>)',
+    r'<image\b[^>]*?\bpath="([^"]*)"[^>]*?>(?:\s*</image\s*>)?',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -1405,8 +1409,18 @@ def _claude_message(entry: dict, roots: list[str]) -> dict | None:
 
 
 def _codex_message(row: Any) -> dict | None:
-    """One ``transcript_page`` row -> the unified shape. Text only: a Codex
-    rollout page carries no tool or thinking blocks."""
+    r"""One ``transcript_page`` row -> the unified shape. A Codex rollout page
+    carries no tool or thinking blocks, but it DOES carry the same desktop
+    attachment tags Claude Code writes, so image blocks are extracted here too.
+
+    Measured 2026-09-09: a live rollout holds
+    ``<image name=[Image #1] path="C:\...\cockpit_uploads_...">`` byte-identical
+    to the Claude JSONL form. Emitting text only meant an attachment could never
+    render on the phone under Codex, and the raw tag showed as literal markup in
+    the bubble. `_image_paths_in` is deliberately NOT applied: it is root-gated
+    and the Codex call site does not thread `roots`. The tag is the harness's own
+    record and needs no gate.
+    """
     if not isinstance(row, dict):
         return None
     role = row.get("role")
@@ -1416,11 +1430,21 @@ def _codex_message(row: Any) -> dict | None:
     if not isinstance(text, str) or not text:
         return None
     timestamp = row.get("timestamp")
+    blocks: list[dict] = [{"type": "text", "text": text}]
+    if role == "user":
+        remaining, tag_paths = _extract_image_tags(text)
+        if tag_paths:
+            # A text block that was ONLY image tags is now empty -- drop it
+            # rather than showing an empty bubble beside the image it named.
+            blocks = [{"type": "text", "text": remaining}] if remaining else []
+            blocks.extend({"type": "image", "path": path} for path in tag_paths)
+    if not blocks:
+        return None
     return {
         "id": str(row.get("index")),
         "role": role,
         "timestamp": timestamp if isinstance(timestamp, str) and timestamp else None,
-        "blocks": [{"type": "text", "text": text}],
+        "blocks": blocks,
     }
 
 
