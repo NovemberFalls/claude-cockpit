@@ -17,7 +17,14 @@ async function nativeImage() {
   } finally { bitmap.close(); }
 }
 
-const _STEP_TIMEOUT_MS = 4000;
+// The read phase has TWO bounds that must coexist: _READ_STRATEGY_MS caps any ONE strategy
+// (so a hung first strategy cannot starve a working second one — R-181 at a smaller scale)
+// and _READ_PHASE_MS caps all of them combined (so four strategies cannot cost more than
+// the whole paste budget, the 2.1.18 defect). Each strategy races against whichever of the
+// two is smaller. The upload gets its own independent _UPLOAD_MS, started when it begins.
+const _READ_STRATEGY_MS = 2000;
+const _READ_PHASE_MS = 6000;
+const _UPLOAD_MS = 20000;
 
 export function createTerminalClipboard({ captureTarget, isCurrent, notify, readNative = nativeImage,
   clipboard = navigator.clipboard,
@@ -45,16 +52,14 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
       controller.abort();
       rejectPending(request.error);
     };
-    let step = "starting";
-    const timer = setTimeout(
-      () => request.cancel(`Paste timed out after 15s while ${step}; please try pasting again`), 15000);
+    let clipboardElapsedMs = 0;
+    let uploadElapsedMs = 0;
     const check = () => {
       if (request.error) throw request.error;
       if (disposed || active !== request) throw new Error("Paste cancelled");
     };
-    const wait = async (operation, label) => {
+    const wait = async (operation) => {
       check();
-      if (label) step = label;
       const result = await Promise.race([operation(), cancelled]).catch((error) => {
         if (request.error) throw request.error;
         throw error;
@@ -62,39 +67,58 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
       check();
       return result;
     };
-    // The per-step budget applies to the read strategies only; it is a local fallback
-    // (falls through to the next strategy), never a cancellation of the whole paste.
-    const readStep = (operation, label) => wait(() => new Promise((resolve, reject) => {
-      const stepTimer = setTimeout(() => reject(new Error(`Reading timed out`)), _STEP_TIMEOUT_MS);
-      operation().then(
-        (value) => { clearTimeout(stepTimer); resolve(value); },
-        (error) => { clearTimeout(stepTimer); reject(error); });
-    }), label);
     try {
       const transfer = event?.clipboardData;
       const item = Array.from(transfer?.items || []).find((entry) => entry.kind === "file" && entry.type?.startsWith("image/"));
       let image = item?.getAsFile() || Array.from(transfer?.files || []).find((file) => file.type?.startsWith("image/"));
       let text = transfer?.getData("text/plain") || "";
-      let readError;
+      // A timeout is never actionable; a real failure (e.g. "Focus the local terminal
+      // window before pasting") always is. The most actionable error wins the report.
+      let actionableError;
+      let hadTimeout = false;
+      const recordReadError = (error) => {
+        if (error.message === "Reading timed out") hadTimeout = true;
+        else actionableError = error;
+      };
       if (!image && (item || !text)) {
+        // One shared deadline for every read strategy combined — a strategy that finds it
+        // already exhausted rejects locally and falls through, it never cancels the paste.
+        const readPhaseStart = Date.now();
+        const readDeadline = readPhaseStart + _READ_PHASE_MS;
+        const readStep = (operation) => wait(() => new Promise((resolve, reject) => {
+          // Always invoke the strategy — an operation that rejects with its own (actionable)
+          // reason right away must win even with zero budget left; only a strategy that
+          // actually hangs past the shared deadline gets the generic "Reading timed out".
+          const budget = Math.min(_READ_STRATEGY_MS, Math.max(0, readDeadline - Date.now()));
+          const stepTimer = setTimeout(() => reject(new Error("Reading timed out")), budget);
+          operation().then(
+            (value) => { clearTimeout(stepTimer); resolve(value); },
+            (error) => { clearTimeout(stepTimer); reject(error); });
+        }));
         try {
-          const items = await readStep(() => clipboard?.read?.(), "reading the clipboard");
-          for (const entry of items || []) {
-            const type = entry.types.find((value) => value.startsWith("image/"));
-            if (type) { image = await readStep(() => entry.getType(type), "reading the clipboard"); break; }
+          try {
+            const items = await readStep(() => clipboard?.read?.());
+            for (const entry of items || []) {
+              const type = entry.types.find((value) => value.startsWith("image/"));
+              if (type) { image = await readStep(() => entry.getType(type)); break; }
+            }
+          } catch (error) { recordReadError(error); }
+          if (!image) {
+            try { image = await readStep(() => readNative()); }
+            catch (error) { recordReadError(error); }
           }
-        } catch (error) { readError = error; }
-        if (!image) {
-          try { image = await readStep(() => readNative(), "reading the clipboard image"); }
-          catch (error) { readError = error; }
-        }
-        if (!image) {
-          try { text = await readStep(() => clipboard?.readText?.(), "reading clipboard text") || text; }
-          catch (error) { readError = error; }
-        }
+          if (!image) {
+            try { text = await readStep(() => clipboard?.readText?.()) || text; }
+            catch (error) { recordReadError(error); }
+          }
+        } finally { clipboardElapsedMs = Date.now() - readPhaseStart; }
       }
       check();
-      if (!image && !text) throw new Error(readError?.message || "Clipboard contains no readable image or text");
+      if (!image && !text) {
+        throw new Error(actionableError?.message || (hadTimeout
+          ? "Clipboard contains no readable image or text (the window may not have focus; click into the terminal and paste again)"
+          : "Clipboard contains no readable image or text"));
+      }
       if (disposed || !isCurrent(target)) throw new Error("Terminal changed before paste completed; paste again in the intended session");
       if (image) {
         if (!image.size) throw new Error("Clipboard image is empty");
@@ -102,8 +126,20 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
         if (!ext) throw new Error("Clipboard image format is unsupported");
         const form = new FormData();
         form.append("files", new File([image], `paste.${ext}`, { type: image.type }));
-        const response = await wait(() => upload(form, { signal: controller.signal }), "uploading the image");
-        const data = await wait(() => response.json(), "reading the upload response");
+        const uploadStart = Date.now();
+        const uploadTimer = setTimeout(() => {
+          uploadElapsedMs = Date.now() - uploadStart;
+          request.cancel(`Paste timed out after ${(_UPLOAD_MS / 1000).toFixed(1)}s while uploading the image ` +
+            `(clipboard ${(clipboardElapsedMs / 1000).toFixed(1)}s, upload ${(uploadElapsedMs / 1000).toFixed(1)}s); please try pasting again`);
+        }, _UPLOAD_MS);
+        let response, data;
+        try {
+          response = await wait(() => upload(form, { signal: controller.signal }));
+          data = await wait(() => response.json());
+        } finally {
+          clearTimeout(uploadTimer);
+          uploadElapsedMs = Date.now() - uploadStart;
+        }
         if (!response.ok || !Array.isArray(data.paths) || typeof data.paths[0] !== "string" || !data.paths[0]) {
           throw new Error(data.errors?.[0] || "Image upload did not return a file path");
         }
@@ -116,7 +152,6 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
     } catch (error) {
       if (!disposed) notify(`Paste failed: ${error.message || error}`, "error");
     } finally {
-      clearTimeout(timer);
       if (active === request) { active = null; busy = false; }
     }
   }

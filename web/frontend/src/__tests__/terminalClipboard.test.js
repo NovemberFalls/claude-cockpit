@@ -17,39 +17,82 @@ const event = (blob = null, text = "") => ({ preventDefault: vi.fn(), stopImmedi
 
 describe("terminal clipboard gesture pipeline", () => {
   afterEach(() => vi.useRealTimers());
-  it("bounds a hanging clipboard.read to its own step budget, permits retry, and ignores its late image", async () => {
+  it("bounds a hanging clipboard.read to the shared read-phase budget, permits retry, and ignores its late image", async () => {
     vi.useFakeTimers();
     let finish;
     const f = fixture({ clipboard: { read: () => new Promise((resolve) => { finish = resolve; }), readText: async () => "" } });
     const pending = f.paste(event());
-    await vi.advanceTimersByTimeAsync(4000);
+    await vi.advanceTimersByTimeAsync(5000);
     await pending;
-    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("Reading timed out"), "error");
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("no readable image or text"), "error");
     await f.paste(event(null, "retry"));
     finish([{ types: ["image/png"], getType: async () => image() }]);
     await Promise.resolve();
     expect(f.target.term.paste).toHaveBeenCalledExactlyOnceWith("retry");
     expect(f.upload).not.toHaveBeenCalled();
   });
-  it("still lets readNative supply the image when clipboard.read hangs past its step budget", async () => {
+  it("still lets readNative supply the image when clipboard.read hangs past its share of the read-phase budget", async () => {
     vi.useFakeTimers();
     const readNative = vi.fn(async () => image());
     const f = fixture({ clipboard: { read: () => new Promise(() => {}) }, readNative });
     const pending = f.paste(event());
-    await vi.advanceTimersByTimeAsync(4000);
+    await vi.runAllTimersAsync();
     await pending;
     expect(readNative).toHaveBeenCalledOnce();
     expect(f.target.term.paste).toHaveBeenCalledExactlyOnceWith('"C:\\Image Folder\\paste.png"');
     expect(f.upload).toHaveBeenCalledOnce();
   });
-  it("names the in-flight step in the 15s timeout message", async () => {
+  it("costs the whole read phase ~5s total (not 16s) when every read strategy hangs, and reports no-readable-content", async () => {
+    vi.useFakeTimers();
+    const f = fixture({
+      clipboard: { read: () => new Promise(() => {}), readText: () => new Promise(() => {}) },
+      readNative: () => new Promise(() => {}),
+    });
+    const pending = f.paste(event());
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("Clipboard contains no readable image or text"), "error");
+    expect(f.notify).not.toHaveBeenCalledWith(expect.stringContaining("timed out"), "error");
+    expect(f.upload).not.toHaveBeenCalled();
+  });
+  it("prefers an actionable read error (lost window focus) over a bare timeout when every strategy fails", async () => {
+    vi.useFakeTimers();
+    const readNative = vi.fn(async () => { throw new Error("Focus the local terminal window before pasting"); });
+    const f = fixture({
+      clipboard: { read: () => new Promise(() => {}), readText: () => new Promise(() => {}) },
+      readNative,
+    });
+    const pending = f.paste(event());
+    await vi.runAllTimersAsync();
+    await pending;
+    expect(readNative).toHaveBeenCalledOnce();
+    expect(f.notify).toHaveBeenCalledWith("Paste failed: Focus the local terminal window before pasting", "error");
+  });
+  it("succeeds when a read phase that hangs for the full 5s is followed by an upload that takes 6s", async () => {
+    vi.useFakeTimers();
+    let finishUpload;
+    const upload = vi.fn(() => new Promise((resolve) => { finishUpload = resolve; }));
+    const f = fixture({
+      clipboard: { read: () => new Promise(() => {}), readText: () => new Promise(() => {}) },
+      readNative: () => new Promise(() => {}),
+      upload,
+    });
+    const pending = f.paste(event(image()));
+    await vi.advanceTimersByTimeAsync(11000);
+    finishUpload({ ok: true, json: async () => ({ paths: ["C:\\Image Folder\\paste.png"] }) });
+    await pending;
+    expect(f.target.term.paste).toHaveBeenCalledExactlyOnceWith('"C:\\Image Folder\\paste.png"');
+    expect(f.notify).toHaveBeenCalledWith("Image pasted", "success");
+  });
+  it("names the split between clipboard and upload time in the upload timeout message", async () => {
     vi.useFakeTimers();
     const upload = vi.fn(() => new Promise(() => {}));
     const f = fixture({ upload });
     const pending = f.paste(event(image()));
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(20000);
     await pending;
-    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("uploading the image"), "error");
+    expect(f.notify).toHaveBeenCalledWith(
+      expect.stringMatching(/timed out after 20\.0s while uploading the image \(clipboard 0\.0s, upload 20\.0s\)/), "error");
   });
   it("reports our own timeout reason, never the browser's AbortError, when the aborted fetch wins the race", async () => {
     vi.useFakeTimers();
@@ -58,9 +101,9 @@ describe("terminal clipboard gesture pipeline", () => {
     }));
     const f = fixture({ upload });
     const pending = f.paste(event(image()));
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(20000);
     await pending;
-    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("timed out after 15s while uploading the image"), "error");
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("timed out after 20.0s while uploading the image"), "error");
     expect(f.notify).not.toHaveBeenCalledWith(expect.stringContaining("signal is aborted"), "error");
   });
   it("aborts a hanging upload and ignores its late response after retry", async () => {
@@ -69,7 +112,7 @@ describe("terminal clipboard gesture pipeline", () => {
     const upload = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
     const f = fixture({ upload });
     const pending = f.paste(event(image()));
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(20000);
     await pending;
     expect(upload.mock.calls[0][1].signal.aborted).toBe(true);
     await f.paste(event(null, "retry"));

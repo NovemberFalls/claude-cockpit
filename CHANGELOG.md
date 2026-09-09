@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.19] - 2026-09-09
+
+### Fixed
+- Image paste: the 2.1.18 fix still failed at 15s because its four per-step read budgets (4s each) totalled 16s against the 15s whole-paste timer, so a slow clipboard reliably lost the race before the upload even started. Replaced with exactly two budgets: one 5s deadline shared across every read strategy combined, and a separate 20s upload deadline that starts only when the upload itself begins — a slow read no longer eats into upload time. When every read strategy fails, an actionable reason (e.g. "Focus the local terminal window before pasting") now always wins over a bare "Reading timed out"; a fully-hung read phase reports "Clipboard contains no readable image or text (the window may not have focus; click into the terminal and paste again)" instead. A timeout toast now names the clipboard/upload time split (`clipboard <a>s, upload <b>s`) so a repeat failure is conclusive without another round trip.
+
+### Added
+- `GET /.well-known/plexar` — the estate-wide Plexar handshake, so Plexar Mobile can act as a hub across Studio, Chat, LLM and Email without their APIs being forced through one contract. Unauthenticated and always 200 while the process is up: `authenticated` is derived from the device store, so a missing or garbage token answers `false` rather than 401 (a 401 merges "wrong credential" with "server down", whose remedies are opposite). With `remote.enabled` off it still answers 200 with empty `capabilities` and `detail: {"remote_enabled": false}` — the one place the remote surface is not 404-when-disabled, so a hub can say "remote access is off" instead of "unreachable"; every other `/remote/v1/*` route keeps 404-ing. The body carries no secret, filesystem path, hostname or private count.
+- The route is the second browser-origin-guard exemption, beside `/remote/v1/*`, and both are now asked through one arbiter (`origin_guard.is_origin_exempt`). The carve-out is exactly one path: a tunnel `Host` reaches the handshake and is still 403 on `/api/terminals`, pinned by a test.
+
 ## [2.1.18] - 2026-09-09
 
 ### Fixed
