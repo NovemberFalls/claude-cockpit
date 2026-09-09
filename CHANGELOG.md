@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.17] - 2026-09-09
+
+### Fixed
+- The CLI's terminal title is a CHANGE signal, not the session's name. The OSC 0/2 title channel used to adopt the raw value verbatim, including the animating status glyph (`✳`/`◑`/…) prefix and the occasional mojibake read — churning the name and disagreeing between desktop and phone purely by poll timing. `normalize_cli_title` now strips the leading decoration and refuses decode-damaged or bare-binary-name values; the first normalized title is seeded (recorded, not adopted), and only a later, differing title is treated as an active rename. A name adopted before this fix self-repairs once per session.
+- A slash-command's leftover `<command-args></command-args>` tag is no longer shown as a session's preview text; any residue that is nothing but tag markup is now skipped as a non-qualifying record.
+
 ## [2.1.16] - 2026-09-09
 
 ### Fixed
