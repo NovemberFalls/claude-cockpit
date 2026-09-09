@@ -3,6 +3,10 @@
 Near-minimal by design: no sys.path manipulation (every test module already
 inserts the parent dir itself). There is exactly ONE autouse fixture, and it
 asserts rather than changes -- see `_never_log_into_the_real_data_dir`.
+
+Two things below run at IMPORT rather than as fixtures, for the same reason:
+the behaviour they redirect happens at test-module import time, which is before
+any ordinary fixture can run. See the temp-root redirect immediately below.
 """
 from __future__ import annotations
 
@@ -13,6 +17,41 @@ import tempfile
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+#: The developer's ACTUAL system temp folder, captured before we redirect.
+#: A test that genuinely needs the real thing asks for it explicitly, via the
+#: `real_tempdir` fixture below -- never by calling tempfile.gettempdir().
+REAL_TEMPDIR = tempfile.gettempdir()
+
+# THE TEST SUITE MUST NEVER CREATE OR DELETE ANYTHING IN THE REAL TEMP FOLDER.
+#
+# MEASURED 2026-09-09, and it was a live defect: `server.py`'s lifespan calls
+# `temp_sweep.sweep_stale(ours=...)` with no `temp_root`, which correctly
+# defaults to the real system temp folder in production. But
+# `tests/test_upload_eviction.py` uses the context-manager form of TestClient,
+# which RUNS THE REAL LIFESPAN -- so one `pytest tests` run swept the
+# developer's own temp folder, taking it from 307 directories to 109. The age
+# rule held and nothing live was destroyed, but the next person's 25-hour-old
+# directory may be one they cared about.
+#
+# A second, independent leak: `bridge_manager` and `mailbox_bridge` each call
+# `mkdtemp` at MODULE IMPORT, so every pytest process that imported them left
+# one directory behind in the real temp folder forever (88 of each were found).
+#
+# Both are fixed by moving the temp ROOT rather than by special-casing the
+# sweep: silencing the sweep would leave the import-time mkdtemp leak intact.
+# `tempfile.tempdir` is set as well as the env vars because gettempdir()
+# memoises its answer and pytest has already called it by now; the env vars are
+# what carries the redirect into subprocesses (test_pid_file_scoping.py).
+# Opt out for a run with COCKPIT_TESTS_USE_REAL_TEMP=1.
+if os.environ.get("COCKPIT_TESTS_USE_REAL_TEMP") != "1":
+    _test_tempdir = os.environ.get("COCKPIT_TEST_TMPDIR") or os.path.join(
+        REAL_TEMPDIR, "plexar-studio-tests",
+    )
+    os.makedirs(_test_tempdir, exist_ok=True)
+    tempfile.tempdir = _test_tempdir
+    for _var in ("TMPDIR", "TEMP", "TMP"):
+        os.environ[_var] = _test_tempdir
 
 # logging_config now installs a rotating FILE handler, and most test modules
 # call logging_config.setup() at import time. Without this, running the suite
@@ -82,6 +121,19 @@ def _never_log_into_the_real_data_dir():
         f"one file on Windows is a rename against an open handle. Re-point "
         f"COCKPIT_LOG_DIR rather than unsetting it."
     )
+
+
+@pytest.fixture()
+def real_tempdir():
+    """The developer's ACTUAL system temp folder.
+
+    Requirement 4 of the redirect above: a test that genuinely needs the real
+    behaviour must be able to ask for it, explicitly and visibly, rather than
+    getting it by accident from `tempfile.gettempdir()`. Anything using this
+    must READ ONLY -- the redirect exists precisely because writes and deletes
+    out here are not the suite's to make.
+    """
+    return REAL_TEMPDIR
 
 
 @pytest.fixture()

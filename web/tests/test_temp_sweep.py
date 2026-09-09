@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -312,3 +313,51 @@ def _dead_pid() -> int:
         if not temp_sweep.psutil.pid_exists(candidate):
             return candidate
     pytest.skip("could not find a free PID")
+
+
+# ---------------------------------------------------------------------------
+# The suite's own temp root
+# ---------------------------------------------------------------------------
+
+def test_the_suite_never_points_the_sweep_at_the_real_temp_folder(real_tempdir):
+    """The defect this file's sweep caused, pinned at its actual cause.
+
+    `sweep_stale()` with no `temp_root` defaults to `tempfile.gettempdir()`,
+    and `test_upload_eviction.py` runs the real lifespan, which calls it that
+    way. Production must keep that default (requirement 2), so what has to be
+    true instead is that the suite's `gettempdir()` is NOT the developer's.
+    See the redirect at the top of conftest.py.
+    """
+    if os.environ.get("COCKPIT_TESTS_USE_REAL_TEMP") == "1":
+        pytest.skip("redirect deliberately opted out for this run")
+    assert Path(tempfile.gettempdir()).resolve() != Path(real_tempdir).resolve()
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        assert os.environ[var] == tempfile.gettempdir(), var
+
+
+def test_import_time_scratch_dirs_land_in_the_redirected_root():
+    """The second leak: `mkdtemp` at module import, before any fixture runs.
+
+    Every pytest process importing these modules used to leave one directory
+    each behind in the real temp folder, permanently.
+    """
+    if os.environ.get("COCKPIT_TESTS_USE_REAL_TEMP") == "1":
+        pytest.skip("redirect deliberately opted out for this run")
+    import bridge_manager
+    import mailbox_bridge
+    import server
+
+    root = Path(tempfile.gettempdir()).resolve()
+    for d in (server.UPLOAD_DIR, bridge_manager._RELAY_DIR,
+              mailbox_bridge._MAILBOX_ROOT):
+        assert Path(d).resolve().parent == root, d
+
+
+def test_production_default_is_still_the_system_temp_folder():
+    """Requirement 2: the shipped feature is not weakened to make tests safe.
+
+    Read the source rather than calling it -- calling it with no temp_root is
+    the very thing the suite must not do.
+    """
+    src = Path(temp_sweep.__file__).read_text(encoding="utf-8")
+    assert "Path(tempfile.gettempdir())" in src
