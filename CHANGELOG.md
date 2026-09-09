@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.18] - 2026-09-09
+
+### Fixed
+- A failed image paste now names its own cause instead of the browser's "signal is aborted without reason". `terminalClipboard.js`'s timeout race let an aborted upload's own `AbortError` win over our timeout message when the two settled in the same tick; our reason now always wins. The 15s timeout message also names the step in flight (e.g. "while uploading the image"), and each clipboard-read fallback (`clipboard.read`, the native reader, `clipboard.readText`) now has its own 4s budget so one hung read strategy no longer consumes the whole paste before the next fallback gets a turn.
+
 ## [2.1.17] - 2026-09-09
 
 ### Fixed
