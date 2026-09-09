@@ -17,20 +17,51 @@ const event = (blob = null, text = "") => ({ preventDefault: vi.fn(), stopImmedi
 
 describe("terminal clipboard gesture pipeline", () => {
   afterEach(() => vi.useRealTimers());
-  it("times out a hanging read, permits retry, and ignores its late image", async () => {
+  it("bounds a hanging clipboard.read to its own step budget, permits retry, and ignores its late image", async () => {
     vi.useFakeTimers();
     let finish;
-    const f = fixture({ clipboard: { read: () => new Promise((resolve) => { finish = resolve; }) } });
+    const f = fixture({ clipboard: { read: () => new Promise((resolve) => { finish = resolve; }), readText: async () => "" } });
     const pending = f.paste(event());
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(4000);
     await pending;
-    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("timed out"), "error");
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("Reading timed out"), "error");
     await f.paste(event(null, "retry"));
     finish([{ types: ["image/png"], getType: async () => image() }]);
     await Promise.resolve();
     expect(f.target.term.paste).toHaveBeenCalledExactlyOnceWith("retry");
     expect(f.upload).not.toHaveBeenCalled();
-    expect(f.readNative).not.toHaveBeenCalled();
+  });
+  it("still lets readNative supply the image when clipboard.read hangs past its step budget", async () => {
+    vi.useFakeTimers();
+    const readNative = vi.fn(async () => image());
+    const f = fixture({ clipboard: { read: () => new Promise(() => {}) }, readNative });
+    const pending = f.paste(event());
+    await vi.advanceTimersByTimeAsync(4000);
+    await pending;
+    expect(readNative).toHaveBeenCalledOnce();
+    expect(f.target.term.paste).toHaveBeenCalledExactlyOnceWith('"C:\\Image Folder\\paste.png"');
+    expect(f.upload).toHaveBeenCalledOnce();
+  });
+  it("names the in-flight step in the 15s timeout message", async () => {
+    vi.useFakeTimers();
+    const upload = vi.fn(() => new Promise(() => {}));
+    const f = fixture({ upload });
+    const pending = f.paste(event(image()));
+    await vi.advanceTimersByTimeAsync(15000);
+    await pending;
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("uploading the image"), "error");
+  });
+  it("reports our own timeout reason, never the browser's AbortError, when the aborted fetch wins the race", async () => {
+    vi.useFakeTimers();
+    const upload = vi.fn((_, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("signal is aborted without reason", "AbortError")));
+    }));
+    const f = fixture({ upload });
+    const pending = f.paste(event(image()));
+    await vi.advanceTimersByTimeAsync(15000);
+    await pending;
+    expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("timed out after 15s while uploading the image"), "error");
+    expect(f.notify).not.toHaveBeenCalledWith(expect.stringContaining("signal is aborted"), "error");
   });
   it("aborts a hanging upload and ignores its late response after retry", async () => {
     vi.useFakeTimers();

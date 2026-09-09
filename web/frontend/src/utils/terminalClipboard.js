@@ -17,6 +17,8 @@ async function nativeImage() {
   } finally { bitmap.close(); }
 }
 
+const _STEP_TIMEOUT_MS = 4000;
+
 export function createTerminalClipboard({ captureTarget, isCurrent, notify, readNative = nativeImage,
   clipboard = navigator.clipboard,
   upload = (body, options) => fetch("/api/upload", { method: "POST", body, signal: options.signal }) }) {
@@ -43,17 +45,31 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
       controller.abort();
       rejectPending(request.error);
     };
-    const timer = setTimeout(() => request.cancel("Paste timed out; please try pasting again"), 15000);
+    let step = "starting";
+    const timer = setTimeout(
+      () => request.cancel(`Paste timed out after 15s while ${step}; please try pasting again`), 15000);
     const check = () => {
       if (request.error) throw request.error;
       if (disposed || active !== request) throw new Error("Paste cancelled");
     };
-    const wait = async (operation) => {
+    const wait = async (operation, label) => {
       check();
-      const result = await Promise.race([operation(), cancelled]);
+      if (label) step = label;
+      const result = await Promise.race([operation(), cancelled]).catch((error) => {
+        if (request.error) throw request.error;
+        throw error;
+      });
       check();
       return result;
     };
+    // The per-step budget applies to the read strategies only; it is a local fallback
+    // (falls through to the next strategy), never a cancellation of the whole paste.
+    const readStep = (operation, label) => wait(() => new Promise((resolve, reject) => {
+      const stepTimer = setTimeout(() => reject(new Error(`Reading timed out`)), _STEP_TIMEOUT_MS);
+      operation().then(
+        (value) => { clearTimeout(stepTimer); resolve(value); },
+        (error) => { clearTimeout(stepTimer); reject(error); });
+    }), label);
     try {
       const transfer = event?.clipboardData;
       const item = Array.from(transfer?.items || []).find((entry) => entry.kind === "file" && entry.type?.startsWith("image/"));
@@ -62,18 +78,18 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
       let readError;
       if (!image && (item || !text)) {
         try {
-          const items = await wait(() => clipboard?.read?.());
+          const items = await readStep(() => clipboard?.read?.(), "reading the clipboard");
           for (const entry of items || []) {
             const type = entry.types.find((value) => value.startsWith("image/"));
-            if (type) { image = await wait(() => entry.getType(type)); break; }
+            if (type) { image = await readStep(() => entry.getType(type), "reading the clipboard"); break; }
           }
         } catch (error) { readError = error; }
         if (!image) {
-          try { image = await wait(() => readNative()); }
+          try { image = await readStep(() => readNative(), "reading the clipboard image"); }
           catch (error) { readError = error; }
         }
         if (!image) {
-          try { text = await wait(() => clipboard?.readText?.()) || text; }
+          try { text = await readStep(() => clipboard?.readText?.(), "reading clipboard text") || text; }
           catch (error) { readError = error; }
         }
       }
@@ -86,8 +102,8 @@ export function createTerminalClipboard({ captureTarget, isCurrent, notify, read
         if (!ext) throw new Error("Clipboard image format is unsupported");
         const form = new FormData();
         form.append("files", new File([image], `paste.${ext}`, { type: image.type }));
-        const response = await wait(() => upload(form, { signal: controller.signal }));
-        const data = await wait(() => response.json());
+        const response = await wait(() => upload(form, { signal: controller.signal }), "uploading the image");
+        const data = await wait(() => response.json(), "reading the upload response");
         if (!response.ok || !Array.isArray(data.paths) || typeof data.paths[0] !== "string" || !data.paths[0]) {
           throw new Error(data.errors?.[0] || "Image upload did not return a file path");
         }
