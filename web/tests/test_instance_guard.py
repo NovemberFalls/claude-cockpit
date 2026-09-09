@@ -104,6 +104,7 @@ def test_pinned_api_surface():
     assert instance_guard.HUNG_AFTER_S == 10.0
     assert instance_guard.SIDECAR_NAMES == {
         "plexar-studio-server.exe",
+        "plexar-studio-server-x86_64-pc-windows-msvc.exe",
         "cockpit-server.exe",
         "cockpit-server-x86_64-pc-windows-msvc.exe",
         "claude-cockpit.exe",

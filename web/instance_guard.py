@@ -67,6 +67,7 @@ PROBE_INTERVAL_S = 1.0
 # kill path is gated on this set; a name outside it is `foreign` and untouchable.
 SIDECAR_NAMES = {
     "plexar-studio-server.exe",
+    "plexar-studio-server-x86_64-pc-windows-msvc.exe",
     "cockpit-server.exe",
     "cockpit-server-x86_64-pc-windows-msvc.exe",
     "claude-cockpit.exe",

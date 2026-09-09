@@ -38,7 +38,7 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/cockpit-server"
+      "binaries/plexar-studio-server"
     ],
     "windows": {
       "nsis": {

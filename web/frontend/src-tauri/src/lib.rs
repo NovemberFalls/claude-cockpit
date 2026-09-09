@@ -50,11 +50,11 @@ fn spawn_sidecar(
 ) {
     let shell = app.shell();
     let cmd = shell
-        .sidecar("cockpit-server")
-        .expect("failed to find cockpit-server sidecar")
+        .sidecar("plexar-studio-server")
+        .expect("failed to find plexar-studio-server sidecar")
         .env("NO_BROWSER", "1");
 
-    let (mut rx, _child) = cmd.spawn().expect("failed to spawn cockpit-server");
+    let (mut rx, _child) = cmd.spawn().expect("failed to spawn plexar-studio-server");
 
     let app_handle = app.clone();
     let rc = restart_count.clone();
