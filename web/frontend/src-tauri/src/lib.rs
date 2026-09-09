@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
 mod clipboard;
 
@@ -44,6 +45,56 @@ fn server_responds() -> bool {
     }
 }
 
+/// A sidecar that stayed up this long is a HEALTHY run, not a crash loop
+/// member. The restart budget counts CONSECUTIVE rapid failures; without this
+/// reset the budget was for the LIFETIME of the app, so a server that ran fine
+/// for six hours and then died was counted as the fourth crash and never
+/// restarted. An external kill (Task Manager) burned a restart too.
+const HEALTHY_RUN_SECS: u64 = 60;
+
+/// Consecutive rapid failures tolerated before we stop and TELL the user.
+const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
+
+/// Backoff between consecutive attempts: 2s, 4s, 8s. A flat retry into a port
+/// that is still releasing is what the 2.1.7 bind-loop looked like.
+fn backoff_for(attempts: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(2u64 << attempts.min(2))
+}
+
+/// The give-up surface. In a packaged NSIS build nobody sees stderr, so a
+/// stderr-only message left the panes on "waiting for connection" -- which is
+/// the wording for a RECOVERABLE outage -- forever.
+///
+/// Non-blocking `show` with a callback, deliberately: a blocking dialog called
+/// from inside the sidecar event task can deadlock the runtime. The window is
+/// NOT closed and the app is NOT auto-quit; the user may need to copy text out
+/// of a pane, so quitting stays their explicit choice.
+fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>) {
+    let app_handle = app.clone();
+    app.dialog()
+        .message(
+            "The local Plexar Studio server stopped 3 times in a row and the app can no longer \
+             reach it. Your sessions are not running.\n\nTry again restarts the server. Quit \
+             closes Plexar Studio.",
+        )
+        .title("Plexar Studio server stopped")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Try again".to_string(),
+            "Quit".to_string(),
+        ))
+        .show(move |try_again| {
+            if try_again {
+                restart_count.store(0, Ordering::SeqCst);
+                eprintln!("[tauri] User chose Try again — resetting the restart budget and respawning the sidecar");
+                spawn_sidecar(&app_handle, restart_count);
+            } else {
+                eprintln!("[tauri] User chose Quit after the sidecar gave up");
+                app_handle.exit(0);
+            }
+        });
+}
+
 fn spawn_sidecar(
     app: &tauri::AppHandle,
     restart_count: Arc<AtomicU32>,
@@ -58,6 +109,7 @@ fn spawn_sidecar(
 
     let app_handle = app.clone();
     let rc = restart_count.clone();
+    let spawned_at = std::time::Instant::now();
 
     // Log sidecar output and handle crash recovery
     tauri::async_runtime::spawn(async move {
@@ -78,18 +130,41 @@ fn spawn_sidecar(
                         break;
                     }
 
-                    let attempts = rc.fetch_add(1, Ordering::SeqCst);
-                    if attempts < 3 {
+                    // A healthy run clears the budget BEFORE it is read, so the
+                    // counter means "consecutive rapid failures", not "failures
+                    // ever". Read the elapsed time from this spawn's own instant.
+                    let uptime = spawned_at.elapsed();
+                    if uptime.as_secs() >= HEALTHY_RUN_SECS {
+                        rc.store(0, Ordering::SeqCst);
                         eprintln!(
-                            "[tauri] Sidecar crashed — restarting (attempt {}/3)...",
-                            attempts + 1
+                            "[tauri] Sidecar had run {:?} (>= {}s) — treating this as a fresh failure, restart budget reset",
+                            uptime, HEALTHY_RUN_SECS
+                        );
+                    }
+
+                    let attempts = rc.fetch_add(1, Ordering::SeqCst);
+                    if attempts < MAX_CONSECUTIVE_RESTARTS {
+                        let delay = backoff_for(attempts);
+                        eprintln!(
+                            "[tauri] Sidecar crashed — restarting in {:?} (attempt {}/{})...",
+                            delay,
+                            attempts + 1,
+                            MAX_CONSECUTIVE_RESTARTS
                         );
 
                         // Orphan cleanup is handled by the Python sidecar on restart
                         // (only kills tracked cockpit-spawned processes, not user sessions)
 
-                        // Wait before restart to let port free up
-                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        // Wait before restart to let port free up. On the BLOCKING
+                        // pool, not here: this task runs on tauri::async_runtime,
+                        // and a std::thread::sleep in it parks an async worker for
+                        // the whole backoff. Tauri re-exports no timer
+                        // (async_runtime.rs:13-20) and a direct tokio dependency is
+                        // not worth version-aligning for one sleep.
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            std::thread::sleep(delay)
+                        })
+                        .await;
 
                         // Respawn
                         spawn_sidecar(&app_handle, rc);
@@ -97,6 +172,7 @@ fn spawn_sidecar(
                         eprintln!(
                             "[tauri] Sidecar crashed 3 times — giving up. Restart the app."
                         );
+                        report_give_up(&app_handle, rc);
                     }
                     break;
                 }
