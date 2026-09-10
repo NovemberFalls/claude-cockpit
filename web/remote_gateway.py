@@ -17,6 +17,7 @@ callables, so the gateway can be exercised on its own against fakes.
 from __future__ import annotations
 
 import datetime
+import asyncio
 import inspect
 import json
 import logging
@@ -901,7 +902,19 @@ async def hello(device: Device = Depends(require_device)):
 @router.get("/sessions")
 async def list_sessions(device: Device = Depends(require_device)):
     backend, _store_ = _require_configured()
-    return {"sessions": [_session_view(s, backend) for s in backend.list_sessions()]}
+    # The SNAPSHOT is taken on the loop: `list_sessions` iterates the live
+    # session dict, which the loop mutates, so it must not race a worker thread.
+    # The per-session ENRICHMENT goes off the loop (R-191): for every session, on
+    # every phone poll (1.5-3 s), `_session_view` stats the transcript, reads its
+    # tail for the preview and reads .git/HEAD for the branch. That file I/O ran
+    # on the one thread serving everything, which fits the owner's report that a
+    # stall "took the phone with it". `_session_view` reads only the snapshot
+    # dicts, plus plain attribute reads for the live effort.
+    sessions = backend.list_sessions()
+    views = await asyncio.to_thread(
+        lambda: [_session_view(s, backend) for s in sessions]
+    )
+    return {"sessions": views}
 
 
 @router.post("/sessions", status_code=201)
@@ -941,7 +954,7 @@ async def create_session(request: Request, device: Device = Depends(require_devi
         session = await backend.create_session(payload)
     except ValueError as exc:
         return _error(400, str(exc))
-    return {"session": _session_view(session or {}, backend)}
+    return {"session": await asyncio.to_thread(_session_view, session or {}, backend)}
 
 
 @router.delete("/sessions/{terminal_id}")

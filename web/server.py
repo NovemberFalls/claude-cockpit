@@ -938,7 +938,8 @@ async def browse_git_detail(path: str):
     if not target.is_dir():
         return JSONResponse({"git": False, "branch": None, "dirty": None, "changed": None})
 
-    is_git, branch = _git_branch_from_head(str(target))
+    # off the loop (R-191): reads .git/HEAD from disk
+    is_git, branch = (await asyncio.to_thread(_git_branch_from_head, str(target)))
     if not is_git:
         return JSONResponse({"git": False, "branch": None, "dirty": None, "changed": None})
 
@@ -976,7 +977,15 @@ async def git_status(path: str):
         return JSONResponse({"git": False})
 
     try:
-        branch_result = subprocess.run(
+        # OFF THE EVENT LOOP (R-191). `subprocess.run` blocks until git exits,
+        # and on Windows `communicate` also spawns and joins reader threads —
+        # all of it on the ONE thread that serves every request, every pane,
+        # the phone and the tunnel. A py-spy profile of the live sidecar caught
+        # this as the single largest non-idle frame on MainThread. The UI polls
+        # it for every pane every 30 s. Same argv, same timeout, same
+        # exceptions: `to_thread` re-raises exactly what the call raised.
+        branch_result = await asyncio.to_thread(
+            subprocess.run,
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(target), capture_output=True, text=True, timeout=5,
         )
@@ -985,7 +994,8 @@ async def git_status(path: str):
 
         branch = branch_result.stdout.strip()
 
-        status_result = subprocess.run(
+        status_result = await asyncio.to_thread(
+            subprocess.run,
             ["git", "status", "--porcelain"],
             cwd=str(target), capture_output=True, text=True, timeout=5,
         )
@@ -1387,9 +1397,14 @@ async def system_stats():
     """
     import psutil
 
-    cpu = round(psutil.cpu_percent(interval=0.1), 1)
-
-    vm = psutil.virtual_memory()
+    # OFF THE EVENT LOOP (R-191). `cpu_percent(interval=0.1)` SLEEPS for its
+    # interval — it was a guaranteed 100 ms stall of the whole server, and the
+    # UI polls this route every 5 s. The sample itself is unchanged; only the
+    # thread doing the waiting moved.
+    cpu_raw, vm = await asyncio.to_thread(
+        lambda: (psutil.cpu_percent(interval=0.1), psutil.virtual_memory())
+    )
+    cpu = round(cpu_raw, 1)
     ram_percent = round(vm.percent, 1)
     ram_used_gb = round(vm.used / (1024 ** 3), 1)
     ram_total_gb = round(vm.total / (1024 ** 3), 1)
@@ -3204,7 +3219,7 @@ async def reveal_settings_file():
             argv = ["xdg-open", folder]
         # List argv, never shell=True -- the path is server-derived but a shell
         # invocation here would be a needless injection surface.
-        subprocess.Popen(argv)
+        await asyncio.to_thread(subprocess.Popen, argv)  # off the loop (R-191)
     except (OSError, ValueError) as e:
         logger.warning("Failed to reveal settings folder %s", folder, exc_info=True)
         return JSONResponse({"ok": False, "path": path, "error": str(e)})
@@ -3293,7 +3308,9 @@ async def get_cli_info():
     override_set = bool(override_raw)
 
     try:
-        path, _effective_path = pty_manager_module.resolve_claude_cli(os.environ.get("PATH", ""))
+        path, _effective_path = await asyncio.to_thread(
+            pty_manager_module.resolve_claude_cli, os.environ.get("PATH", "")
+        )
     except ClaudeCliNotFound:
         # Expected on a machine without Claude Code installed; the payload
         # below is the honest answer, not a failure.
@@ -3370,7 +3387,13 @@ async def get_version_info():
     """App / CLI / Python / platform versions. Never 500s; unknowns are null."""
     cli_version = None
     try:
-        path, _effective = pty_manager_module.resolve_claude_cli(os.environ.get("PATH", ""))
+        # OFF THE EVENT LOOP (R-191): `shutil.which` stats every PATH entry for
+        # every PATHEXT suffix (85 x 11 on the owner's machine). This is the
+        # route the Tauri watchdog probes every 5 s, so the health check was
+        # itself one of the stalls it was watching for.
+        path, _effective = await asyncio.to_thread(
+            pty_manager_module.resolve_claude_cli, os.environ.get("PATH", "")
+        )
     except (ClaudeCliNotFound, OSError):
         path = None
     if path:
@@ -3576,7 +3599,7 @@ async def reveal_log_folder():
         else:
             argv = ["xdg-open", folder]
         # List argv, never shell=True.
-        subprocess.Popen(argv)
+        await asyncio.to_thread(subprocess.Popen, argv)  # off the loop (R-191)
     except (OSError, ValueError) as e:
         logger.warning("Failed to reveal log folder %s", folder, exc_info=True)
         return JSONResponse({"ok": False, "path": path, "error": str(e)})
