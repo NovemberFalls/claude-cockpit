@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
@@ -61,6 +61,96 @@ fn backoff_for(attempts: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64 << attempts.min(2))
 }
 
+/// The live sidecar's process handle, so a watchdog can kill a HUNG one.
+///
+/// The handle used to be dropped on the floor (`let (mut rx, _child) = ...`),
+/// which meant nothing in the app could end a sidecar that had stopped
+/// answering. Dropping a `CommandChild` does not kill the process.
+type ChildSlot = Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>;
+
+/// How often the watchdog asks the sidecar whether it is still serving.
+const HEALTH_POLL_SECS: u64 = 5;
+
+/// Consecutive failed probes before the sidecar is declared hung and killed.
+/// 6 x 5s = 30s of total silence. Generous on purpose: a restart cycle costs
+/// ~2s and a cold start longer, and the counter resets on the first success, so
+/// an ordinary restart never reaches this. Only a genuinely stuck process does.
+const HEALTH_FAILURES_BEFORE_KILL: u32 = 6;
+
+/// Watch a sidecar that is ALIVE but no longer SERVING, and end it so the
+/// existing restart path can run.
+///
+/// MEASURED 2026-09-09, with py-spy against the live process the owner was
+/// about to kill by hand: the sidecar does not crash, it HANGS. The process was
+/// alive at 178MB, port 8420 was still LISTENING, TCP connect succeeded in 1ms,
+/// and three HTTP probes each timed out at a full 10s. Its event loop was
+/// blocked inside `threading.Thread.start()` -- `run_in_threadpool` ->
+/// `solve_dependencies` -- waiting on a worker thread that never started.
+///
+/// THE SUPERVISOR WAS STRUCTURALLY BLIND TO THIS. Every recovery path in this
+/// file hangs off `CommandEvent::Terminated`, and a hung process never
+/// terminates, so the panes sat on "waiting for connection" forever and the
+/// only remedy was Task Manager. The restart budget, the backoff and the
+/// give-up dialog were all correct and all unreachable.
+///
+/// Killing the bootloader is enough and the rest is already built: the Python
+/// child deliberately outlives it and keeps holding 8420, so the respawned
+/// sidecar's `instance_guard.resolve_port` finds a silent holder, probes it for
+/// `HUNG_AFTER_S` (10s), confirms its executable name is in `SIDECAR_NAMES` and
+/// terminates it before binding. This adds no new kill path; it reaches the one
+/// that already exists.
+fn spawn_health_watchdog(child_slot: ChildSlot) {
+    std::thread::spawn(move || {
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(HEALTH_POLL_SECS));
+
+            if server_responds() {
+                if consecutive_failures > 0 {
+                    eprintln!(
+                        "[tauri] Sidecar answered again after {} failed probe(s)",
+                        consecutive_failures
+                    );
+                }
+                consecutive_failures = 0;
+                continue;
+            }
+
+            consecutive_failures += 1;
+            eprintln!(
+                "[tauri] Sidecar did not answer /api/version ({}/{})",
+                consecutive_failures, HEALTH_FAILURES_BEFORE_KILL
+            );
+            if consecutive_failures < HEALTH_FAILURES_BEFORE_KILL {
+                continue;
+            }
+
+            // Take the handle rather than borrowing it: `kill` consumes the
+            // child, and whatever happens next this handle is spent. The
+            // respawn stores a fresh one.
+            let child = child_slot.lock().ok().and_then(|mut slot| slot.take());
+            match child {
+                Some(c) => {
+                    eprintln!(
+                        "[tauri] Sidecar alive but not serving for ~{}s — ending it so it can be restarted",
+                        HEALTH_FAILURES_BEFORE_KILL as u64 * HEALTH_POLL_SECS
+                    );
+                    if let Err(e) = c.kill() {
+                        eprintln!("[tauri] Could not end the hung sidecar: {}", e);
+                    }
+                }
+                None => {
+                    // Already terminated, or a restart is in flight and has not
+                    // stored its handle yet. Either way the Terminated path
+                    // owns recovery from here.
+                    eprintln!("[tauri] No live sidecar handle to end; leaving recovery to the restart path");
+                }
+            }
+            consecutive_failures = 0;
+        }
+    });
+}
+
 /// The give-up surface. In a packaged NSIS build nobody sees stderr, so a
 /// stderr-only message left the panes on "waiting for connection" -- which is
 /// the wording for a RECOVERABLE outage -- forever.
@@ -69,7 +159,7 @@ fn backoff_for(attempts: u32) -> std::time::Duration {
 /// from inside the sidecar event task can deadlock the runtime. The window is
 /// NOT closed and the app is NOT auto-quit; the user may need to copy text out
 /// of a pane, so quitting stays their explicit choice.
-fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>) {
+fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>, child_slot: ChildSlot) {
     let app_handle = app.clone();
     app.dialog()
         .message(
@@ -87,7 +177,7 @@ fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>) {
             if try_again {
                 restart_count.store(0, Ordering::SeqCst);
                 eprintln!("[tauri] User chose Try again — resetting the restart budget and respawning the sidecar");
-                spawn_sidecar(&app_handle, restart_count);
+                spawn_sidecar(&app_handle, restart_count, child_slot);
             } else {
                 eprintln!("[tauri] User chose Quit after the sidecar gave up");
                 app_handle.exit(0);
@@ -98,6 +188,7 @@ fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>) {
 fn spawn_sidecar(
     app: &tauri::AppHandle,
     restart_count: Arc<AtomicU32>,
+    child_slot: ChildSlot,
 ) {
     let shell = app.shell();
     let cmd = shell
@@ -105,10 +196,17 @@ fn spawn_sidecar(
         .expect("failed to find plexar-studio-server sidecar")
         .env("NO_BROWSER", "1");
 
-    let (mut rx, _child) = cmd.spawn().expect("failed to spawn plexar-studio-server");
+    let (mut rx, child) = cmd.spawn().expect("failed to spawn plexar-studio-server");
+
+    // Hand the handle to the watchdog. Dropping it (the old `_child`) does not
+    // kill the process, it merely makes it unkillable from inside the app.
+    if let Ok(mut slot) = child_slot.lock() {
+        *slot = Some(child);
+    }
 
     let app_handle = app.clone();
     let rc = restart_count.clone();
+    let slot_for_events = child_slot.clone();
     let spawned_at = std::time::Instant::now();
 
     // Log sidecar output and handle crash recovery
@@ -167,12 +265,12 @@ fn spawn_sidecar(
                         .await;
 
                         // Respawn
-                        spawn_sidecar(&app_handle, rc);
+                        spawn_sidecar(&app_handle, rc, slot_for_events);
                     } else {
                         eprintln!(
                             "[tauri] Sidecar crashed 3 times — giving up. Restart the app."
                         );
-                        report_give_up(&app_handle, rc);
+                        report_give_up(&app_handle, rc, slot_for_events);
                     }
                     break;
                 }
@@ -200,9 +298,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let restart_count = Arc::new(AtomicU32::new(0));
+            let child_slot: ChildSlot = Arc::new(Mutex::new(None));
 
             // Spawn the sidecar and monitor it
-            spawn_sidecar(&app.handle(), restart_count);
+            spawn_sidecar(&app.handle(), restart_count, child_slot.clone());
 
             // Wait for the server to answer BEFORE the window exists.
             //
@@ -236,6 +335,13 @@ pub fn run() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
+            // Start the watchdog AFTER the readiness wait, so a slow cold
+            // start is never mistaken for a hang. It runs for the life of the
+            // app, which is the point: every other recovery path in this file
+            // hangs off process termination, and a hung sidecar never
+            // terminates.
+            spawn_health_watchdog(child_slot.clone());
+
             if ready {
                 println!("[tauri] Server ready in {:?}", start.elapsed());
             } else {
