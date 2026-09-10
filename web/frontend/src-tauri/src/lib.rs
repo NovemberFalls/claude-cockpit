@@ -68,6 +68,51 @@ fn backoff_for(attempts: u32) -> std::time::Duration {
 /// answering. Dropping a `CommandChild` does not kill the process.
 type ChildSlot = Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>;
 
+/// Append one line to `~/.plexar-studio/logs/supervisor.log`, and to stderr.
+///
+/// ══ STDERR IS NOT A LOG IN A PACKAGED BUILD ═════════════════════════════
+/// The first watchdog wrote every decision with `eprintln!`, which in an NSIS
+/// build goes nowhere. When it then failed to recover a hang there was no way
+/// to tell whether it had fired, killed the wrong thing, or never run — the
+/// same trap this file already documents for the give-up dialog ("in a
+/// packaged NSIS build nobody sees stderr") and which I walked into anyway.
+///
+/// This is deliberately NOT the Python sidecar's `cockpit.log`: the whole
+/// point is to record what happened while the sidecar was unable to write
+/// anything. Best effort — a supervisor that panics on a full disk is worse
+/// than one that loses a line.
+fn supervisor_log(line: &str) {
+    eprintln!("[tauri] {}", line);
+    let Some(home) = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+    else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(home).join(".plexar-studio").join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("supervisor.log"))
+    {
+        let _ = writeln!(f, "{} {}", now_stamp(), line);
+    }
+}
+
+/// A sortable local timestamp without pulling in a date crate.
+fn now_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Seconds since epoch is unambiguous and needs no timezone handling; the
+    // lines it labels are read next to cockpit.log, which carries wall clock.
+    format!("[epoch {}]", secs)
+}
+
 /// How often the watchdog asks the sidecar whether it is still serving.
 const HEALTH_POLL_SECS: u64 = 5;
 
@@ -76,6 +121,11 @@ const HEALTH_POLL_SECS: u64 = 5;
 /// ~2s and a cold start longer, and the counter resets on the first success, so
 /// an ordinary restart never reaches this. Only a genuinely stuck process does.
 const HEALTH_FAILURES_BEFORE_KILL: u32 = 6;
+
+/// How long a replacement sidecar is given to come up before the watchdog
+/// judges it. A cold start extracts a 50MB onefile archive while Defender
+/// watches, so this is generous on purpose.
+const RECOVERY_GRACE_SECS: u64 = 25;
 
 /// Watch a sidecar that is ALIVE but no longer SERVING, and end it so the
 /// existing restart path can run.
@@ -99,53 +149,86 @@ const HEALTH_FAILURES_BEFORE_KILL: u32 = 6;
 /// `HUNG_AFTER_S` (10s), confirms its executable name is in `SIDECAR_NAMES` and
 /// terminates it before binding. This adds no new kill path; it reaches the one
 /// that already exists.
-fn spawn_health_watchdog(child_slot: ChildSlot) {
+fn spawn_health_watchdog(
+    app: tauri::AppHandle,
+    restart_count: Arc<AtomicU32>,
+    child_slot: ChildSlot,
+) {
     std::thread::spawn(move || {
+        supervisor_log("watchdog started");
         let mut consecutive_failures: u32 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(HEALTH_POLL_SECS));
 
             if server_responds() {
                 if consecutive_failures > 0 {
-                    eprintln!(
-                        "[tauri] Sidecar answered again after {} failed probe(s)",
+                    supervisor_log(&format!(
+                        "sidecar answered again after {} failed probe(s)",
                         consecutive_failures
-                    );
+                    ));
                 }
                 consecutive_failures = 0;
                 continue;
             }
 
             consecutive_failures += 1;
-            eprintln!(
-                "[tauri] Sidecar did not answer /api/version ({}/{})",
+            supervisor_log(&format!(
+                "no answer from /api/version ({}/{})",
                 consecutive_failures, HEALTH_FAILURES_BEFORE_KILL
-            );
+            ));
             if consecutive_failures < HEALTH_FAILURES_BEFORE_KILL {
                 continue;
             }
 
-            // Take the handle rather than borrowing it: `kill` consumes the
-            // child, and whatever happens next this handle is spent. The
-            // respawn stores a fresh one.
+            // ── 1. End the child we own, if we still own one. ───────────────
+            //
+            // Best effort and NOT the load-bearing step. This handle is the
+            // PyInstaller BOOTLOADER; the process actually hung and holding
+            // port 8420 is its Python child, which deliberately outlives it.
+            // Killing this does not free the port and does not stop the hang.
             let child = child_slot.lock().ok().and_then(|mut slot| slot.take());
             match child {
-                Some(c) => {
-                    eprintln!(
-                        "[tauri] Sidecar alive but not serving for ~{}s — ending it so it can be restarted",
-                        HEALTH_FAILURES_BEFORE_KILL as u64 * HEALTH_POLL_SECS
-                    );
-                    if let Err(e) = c.kill() {
-                        eprintln!("[tauri] Could not end the hung sidecar: {}", e);
-                    }
-                }
-                None => {
-                    // Already terminated, or a restart is in flight and has not
-                    // stored its handle yet. Either way the Terminated path
-                    // owns recovery from here.
-                    eprintln!("[tauri] No live sidecar handle to end; leaving recovery to the restart path");
-                }
+                Some(c) => match c.kill() {
+                    Ok(()) => supervisor_log("ended the sidecar bootloader we spawned"),
+                    Err(e) => supervisor_log(&format!("could not end the bootloader: {}", e)),
+                },
+                None => supervisor_log("no live bootloader handle to end"),
             }
+
+            // ── 2. SPAWN A FRESH SIDECAR OURSELVES. ────────────────────────
+            //
+            // THIS is the recovery, and the first watchdog got it wrong by
+            // leaving it to `CommandEvent::Terminated`. MEASURED on the
+            // owner's 2.1.23 during a real hang: cockpit.log recorded NO
+            // "Startup complete" for the 51 minutes the app was wedged and NO
+            // `instance_guard` port verdict at any point, so nothing ever
+            // respawned and nothing ever reclaimed the port. Recovery that
+            // hangs off an event which did not arrive is not recovery.
+            //
+            // Spawning is SAFE even if the hung process is still holding the
+            // port, because the new sidecar arbitrates it with the proven,
+            // name-gated logic in `instance_guard.resolve_port`: a silent
+            // holder is probed for HUNG_AFTER_S, confirmed to be a Plexar
+            // sidecar by executable name, terminated, and the port bound. If
+            // the old one turns out to be healthy after all, the newcomer
+            // exits 3 and attaches instead. Both outcomes are logged by the
+            // Python side, which is what makes the next failure diagnosable.
+            //
+            // The restart budget is reset first: this is a recovery from a
+            // hang, not another member of a crash loop, and a burnt-out budget
+            // would make the watchdog fire forever with nothing happening.
+            restart_count.store(0, Ordering::SeqCst);
+            supervisor_log("spawning a replacement sidecar (instance_guard will arbitrate the port)");
+            spawn_sidecar(&app, restart_count.clone(), child_slot.clone());
+
+            // Give the replacement a real chance before judging it, so the
+            // next loop does not immediately count a cold start as a failure.
+            std::thread::sleep(std::time::Duration::from_secs(RECOVERY_GRACE_SECS));
+            supervisor_log(if server_responds() {
+                "recovered: the replacement sidecar is serving"
+            } else {
+                "still not serving after the grace period; will keep watching"
+            });
             consecutive_failures = 0;
         }
     });
@@ -176,10 +259,10 @@ fn report_give_up(app: &tauri::AppHandle, restart_count: Arc<AtomicU32>, child_s
         .show(move |try_again| {
             if try_again {
                 restart_count.store(0, Ordering::SeqCst);
-                eprintln!("[tauri] User chose Try again — resetting the restart budget and respawning the sidecar");
+                supervisor_log("user chose Try again — resetting the restart budget and respawning");
                 spawn_sidecar(&app_handle, restart_count, child_slot);
             } else {
-                eprintln!("[tauri] User chose Quit after the sidecar gave up");
+                supervisor_log("user chose Quit after the sidecar gave up");
                 app_handle.exit(0);
             }
         });
@@ -221,10 +304,10 @@ fn spawn_sidecar(
                     eprintln!("[server] {}", String::from_utf8_lossy(&line));
                 }
                 CommandEvent::Terminated(status) => {
-                    eprintln!("[server] terminated with {:?}", status);
+                    supervisor_log(&format!("sidecar terminated with {:?}", status));
 
                     if status.code == Some(3) {
-                        eprintln!("[tauri] Sidecar exited 3: a running Plexar Studio already serves 127.0.0.1:8420 — attaching to it, not restarting");
+                        supervisor_log("sidecar exited 3: another Plexar Studio already serves 127.0.0.1:8420 — attaching, not restarting");
                         break;
                     }
 
@@ -234,21 +317,21 @@ fn spawn_sidecar(
                     let uptime = spawned_at.elapsed();
                     if uptime.as_secs() >= HEALTHY_RUN_SECS {
                         rc.store(0, Ordering::SeqCst);
-                        eprintln!(
-                            "[tauri] Sidecar had run {:?} (>= {}s) — treating this as a fresh failure, restart budget reset",
+                        supervisor_log(&format!(
+                            "sidecar had run {:?} (>= {}s) — fresh failure, restart budget reset",
                             uptime, HEALTHY_RUN_SECS
-                        );
+                        ));
                     }
 
                     let attempts = rc.fetch_add(1, Ordering::SeqCst);
                     if attempts < MAX_CONSECUTIVE_RESTARTS {
                         let delay = backoff_for(attempts);
-                        eprintln!(
-                            "[tauri] Sidecar crashed — restarting in {:?} (attempt {}/{})...",
+                        supervisor_log(&format!(
+                            "sidecar exited — restarting in {:?} (attempt {}/{})",
                             delay,
                             attempts + 1,
                             MAX_CONSECUTIVE_RESTARTS
-                        );
+                        ));
 
                         // Orphan cleanup is handled by the Python sidecar on restart
                         // (only kills tracked cockpit-spawned processes, not user sessions)
@@ -267,9 +350,7 @@ fn spawn_sidecar(
                         // Respawn
                         spawn_sidecar(&app_handle, rc, slot_for_events);
                     } else {
-                        eprintln!(
-                            "[tauri] Sidecar crashed 3 times — giving up. Restart the app."
-                        );
+                        supervisor_log("sidecar exited 3 times in a row — giving up and telling the user");
                         report_give_up(&app_handle, rc, slot_for_events);
                     }
                     break;
@@ -299,6 +380,7 @@ pub fn run() {
         .setup(|app| {
             let restart_count = Arc::new(AtomicU32::new(0));
             let child_slot: ChildSlot = Arc::new(Mutex::new(None));
+            let restart_count_for_watchdog = restart_count.clone();
 
             // Spawn the sidecar and monitor it
             spawn_sidecar(&app.handle(), restart_count, child_slot.clone());
@@ -340,20 +422,20 @@ pub fn run() {
             // app, which is the point: every other recovery path in this file
             // hangs off process termination, and a hung sidecar never
             // terminates.
-            spawn_health_watchdog(child_slot.clone());
+            spawn_health_watchdog(app.handle().clone(), restart_count_for_watchdog, child_slot.clone());
 
             if ready {
-                println!("[tauri] Server ready in {:?}", start.elapsed());
+                supervisor_log(&format!("server ready in {:?}", start.elapsed()));
             } else {
                 // Build the window anyway rather than leaving no window at
                 // all: a silent no-window launch is harder to diagnose than
                 // the error page, and this is the same outcome as before the
                 // fix -- not a new failure surface. 30s is 15x the measured
                 // warm boot, so reaching it means something is actually wrong.
-                eprintln!(
-                    "[tauri] Server did not answer within {:?} -- opening the window anyway",
+                supervisor_log(&format!(
+                    "server did not answer within {:?} — opening the window anyway",
                     timeout
-                );
+                ));
             }
 
             // Now create the window. NOT filtered on `cfg.create`: that flag
